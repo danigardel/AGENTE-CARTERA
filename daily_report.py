@@ -43,6 +43,7 @@ class Headline:
 
 @dataclass
 class Quote:
+    current_price: float | None = None
     daily_change_pct: float | None = None
     analyst_consensus: str | None = None
     analyst_count: int | None = None
@@ -143,7 +144,7 @@ def fetch_headlines(
         response.raise_for_status()
     except requests.RequestException as error:
         message = f"Noticias: {error}"
-        logging.warning("%s - %s", company.name, message)
+        logging.warning("%s\n%s", company.name, message)
         return [], message
 
     feed = feedparser.parse(response.content)
@@ -169,7 +170,7 @@ def fetch_headlines(
 
     if getattr(feed, "bozo", False):
         message = f"El feed RSS se recibió con un formato inesperado: {feed.bozo_exception}"
-        logging.warning("%s - %s", company.name, message)
+        logging.warning("%s\n%s", company.name, message)
         return headlines, message
     return headlines, None
 
@@ -189,12 +190,15 @@ def fetch_quote(company: Company) -> Quote:
         logging.warning("%s (%s) - %s", company.name, company.ticker, message)
         return Quote(warning=message)
 
+    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
     recommendation = info.get("recommendationKey")
     analyst_count = info.get("numberOfAnalystOpinions")
     target_mean = info.get("targetMeanPrice")
     daily_change = info.get("regularMarketChangePercent")
     currency = info.get("currency")
+    
     return Quote(
+        current_price=_finite_float(current_price),
         daily_change_pct=_finite_float(daily_change, multiplier=100),
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
@@ -202,7 +206,7 @@ def fetch_quote(company: Company) -> Quote:
         currency=str(currency) if currency else None,
         warning=(
             None
-            if recommendation or daily_change is not None
+            if recommendation or daily_change is not None or current_price is not None
             else "Yahoo Finance no devolvió cotización ni consenso"
         ),
     )
@@ -322,6 +326,16 @@ def render_dashboard(
     generated_at: datetime | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
+    
+    # 1. ORDENAR LOS REPORTES POR SENTIMIENTO (Alcista -> Neutral -> Bajista -> Sin datos)
+    def sentiment_sort_key(report: StockReport) -> int:
+        if report.news_sentiment is None:
+            return 4
+        _, signal = classify_sentiment(report.news_sentiment)
+        return {"bullish": 1, "neutral": 2, "bearish": 3}.get(signal, 4)
+        
+    reports = sorted(reports, key=sentiment_sort_key)
+
     summary = executive_summary(reports)
     label = _esc(summary["sentiment_label"])
     signal = summary["sentiment_signal"]
@@ -334,6 +348,13 @@ def render_dashboard(
         sentiment_label, sentiment_signal = classify_sentiment(report.news_sentiment)
         quote = report.quote
         ticker_text = company.ticker or "Sin ticker"
+        
+        # 2. EXTRAER Y FORMATEAR EL PRECIO ACTUAL
+        price_text = (
+            f'{_format_number(quote.current_price)} {quote.currency or ""}'.strip()
+            if quote.current_price is not None
+            else "—"
+        )
         change_text = (
             f'{_format_number(quote.daily_change_pct)}%'
             if quote.daily_change_pct is not None
@@ -374,9 +395,10 @@ def render_dashboard(
             f'<span class="badge {sentiment_signal}"><i></i>{_esc(sentiment_label)}</span></div>'
             f'<p class="sentiment-note">{_esc(news_note)}</p>'
             '<div class="metrics">'
+            f'<div><span>Precio actual</span><strong>{_esc(price_text)}</strong></div>'
             f'<div><span>Variación diaria</span><strong>{_esc(change_text)}</strong></div>'
             f'<div><span>Consenso analistas</span><strong>{_esc(analyst_text)}</strong></div>'
-            f'<div><span>Precio objetivo medio</span><strong>{_esc(target_text)}</strong></div>'
+            f'<div><span>Precio objetivo</span><strong>{_esc(target_text)}</strong></div>'
             "</div>"
             f"{private_note}<h3>Titulares clave</h3><ul class=\"headlines\">{headline_list}</ul>"
             f"{warnings_html}</article>"
@@ -440,7 +462,10 @@ def render_dashboard(
       background: #ffffff0c; padding: 5px 10px; font-size: 12px; font-weight: 750; }}
     .badge i {{ width: 7px; height: 7px; }}
     .sentiment-note {{ color: var(--muted); font-size: 12px; margin: 12px 0; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }}
+    
+    /* 3. CSS MODIFICADO PARA SOPORTAR LAS 4 COLUMNAS DE MÉTRICAS */
+    .metrics {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }}
+    
     .metrics div {{ border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 9px; min-width: 0; }}
     .metrics span {{ color: var(--muted); display: block; font-size: 10px; line-height: 1.3; min-height: 26px; }}
     .metrics strong {{ display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }}

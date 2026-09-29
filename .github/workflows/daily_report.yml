@@ -2,13 +2,8 @@ name: Daily stock report
 
 on:
   schedule:
-    # GitHub cron is UTC. These pairs cover 21:30 and 22:45 Europe/Madrid
-    # in summer (UTC+2) and winter (UTC+1); the schedule job filters each pair.
-    - cron: "30 19 * * *"
-    - cron: "45 20 * * *"
-    - cron: "30 20 * * *"
-    - cron: "45 21 * * *"
-  workflow_dispatch:
+    - cron: '*/30 * * * *' # Se ejecuta cada 30 minutos
+  workflow_dispatch: # Mantiene la opción de ejecutarlo manualmente si la tenías
 
 permissions:
   contents: read
