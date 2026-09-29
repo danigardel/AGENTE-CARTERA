@@ -5,6 +5,7 @@ import html
 import logging
 import math
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -25,11 +26,47 @@ GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 MAX_HEADLINES = 4
 MAX_WORKERS = 8
 
+# 1. CACHÉ PARA TIPOS DE CAMBIO
+FX_CACHE: dict[str, float] = {"EUR": 1.0}
+FX_LOCK = threading.Lock()
+
+def get_fx_rate(currency: str) -> float:
+    if not currency:
+        return 1.0
+    currency = currency.upper()
+    
+    with FX_LOCK:
+        if currency in FX_CACHE:
+            return FX_CACHE[currency]
+            
+    try:
+        # Consulta el tipo de cambio frente al Euro (ej. USDEUR=X)
+        ticker = f"{currency}EUR=X"
+        rate = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
+    except Exception as e:
+        logging.warning("Error obteniendo tipo de cambio para %s: %s", currency, e)
+        rate = 1.0
+        
+    with FX_LOCK:
+        FX_CACHE[currency] = rate
+    return float(rate)
+
 
 @dataclass(frozen=True)
 class Company:
     name: str
     ticker: str | None
+
+
+@dataclass
+class Quote:
+    current_price_eur: float | None = None
+    daily_change_pct: float | None = None
+    daily_change_abs_eur: float | None = None
+    analyst_consensus: str | None = None
+    analyst_count: int | None = None
+    target_mean_eur: float | None = None
+    warning: str | None = None
 
 
 @dataclass
@@ -39,17 +76,6 @@ class Headline:
     source: str
     published: datetime
     sentiment: float
-
-
-@dataclass
-class Quote:
-    current_price: float | None = None
-    daily_change_pct: float | None = None
-    analyst_consensus: str | None = None
-    analyst_count: int | None = None
-    target_mean: float | None = None
-    currency: str | None = None
-    warning: str | None = None
 
 
 @dataclass
@@ -190,23 +216,27 @@ def fetch_quote(company: Company) -> Quote:
         logging.warning("%s (%s) - %s", company.name, company.ticker, message)
         return Quote(warning=message)
 
+    # 2. CONVERSIÓN DE MONEDA
+    currency = info.get("currency", "USD")
+    fx_rate = get_fx_rate(currency)
+
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+    daily_change_abs = info.get("regularMarketChange")
+    daily_change_pct = info.get("regularMarketChangePercent")
+    target_mean = info.get("targetMeanPrice")
     recommendation = info.get("recommendationKey")
     analyst_count = info.get("numberOfAnalystOpinions")
-    target_mean = info.get("targetMeanPrice")
-    daily_change = info.get("regularMarketChangePercent")
-    currency = info.get("currency")
     
     return Quote(
-        current_price=_finite_float(current_price),
-        daily_change_pct=_finite_float(daily_change, multiplier=100),
+        current_price_eur=_finite_float(current_price, multiplier=fx_rate),
+        daily_change_pct=_finite_float(daily_change_pct, multiplier=100),
+        daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
-        target_mean=_finite_float(target_mean),
-        currency=str(currency) if currency else None,
+        target_mean_eur=_finite_float(target_mean, multiplier=fx_rate),
         warning=(
             None
-            if recommendation or daily_change is not None or current_price is not None
+            if recommendation or daily_change_pct is not None or current_price is not None
             else "Yahoo Finance no devolvió cotización ni consenso"
         ),
     )
@@ -327,7 +357,6 @@ def render_dashboard(
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     
-    # 1. ORDENAR LOS REPORTES POR SENTIMIENTO (Alcista -> Neutral -> Bajista -> Sin datos)
     def sentiment_sort_key(report: StockReport) -> int:
         if report.news_sentiment is None:
             return 4
@@ -349,29 +378,35 @@ def render_dashboard(
         quote = report.quote
         ticker_text = company.ticker or "Sin ticker"
         
-        # 2. EXTRAER Y FORMATEAR EL PRECIO ACTUAL
+        # 3. CONSTRUCCIÓN DE CAJAS (Euros y Rendimiento Relativo/Absoluto)
         price_text = (
-            f'{_format_number(quote.current_price)} {quote.currency or ""}'.strip()
-            if quote.current_price is not None
+            f'{_format_number(quote.current_price_eur)} €'
+            if quote.current_price_eur is not None
             else "—"
         )
-        change_text = (
-            f'{_format_number(quote.daily_change_pct)}%'
-            if quote.daily_change_pct is not None
-            else "—"
-        )
+        
+        if quote.daily_change_abs_eur is not None and quote.daily_change_pct is not None:
+            sign = "+" if quote.daily_change_abs_eur > 0 else ""
+            rendimiento_text = f'{sign}{_format_number(quote.daily_change_abs_eur)} € ({sign}{_format_number(quote.daily_change_pct)}%)'
+            rendimiento_class = "text-bullish" if quote.daily_change_abs_eur > 0 else "text-bearish" if quote.daily_change_abs_eur < 0 else "text-neutral"
+        else:
+            rendimiento_text = "—"
+            rendimiento_class = ""
+            
         target_text = (
-            f'{_format_number(quote.target_mean)} {quote.currency or ""}'.strip()
-            if quote.target_mean is not None
+            f'{_format_number(quote.target_mean_eur)} €'
+            if quote.target_mean_eur is not None
             else "—"
         )
         analyst_text = quote.analyst_consensus or "Sin datos"
         if quote.analyst_count:
             analyst_text += f" · {quote.analyst_count} analistas"
+            
         if report.news_sentiment is None:
             news_note = "No hay titulares de hoy; sentimiento no disponible."
         else:
             news_note = f"Sentimiento de titulares · puntuación {report.news_sentiment:+.2f}"
+            
         headline_list = "".join(_headline_html(item) for item in report.headlines)
         if not headline_list:
             headline_list = '<li class="empty">No se encontraron titulares de hoy.</li>'
@@ -387,6 +422,8 @@ def render_dashboard(
             if company.ticker is None
             else ""
         )
+        
+        # 4. ESTRUCTURA HTML FINAL (Sustituye "Variación diaria" por "Rendimiento diario")
         cards.append(
             f'<article class="stock-card" data-sentiment="{sentiment_signal}">'
             '<div class="card-top"><div>'
@@ -396,7 +433,7 @@ def render_dashboard(
             f'<p class="sentiment-note">{_esc(news_note)}</p>'
             '<div class="metrics">'
             f'<div><span>Precio actual</span><strong>{_esc(price_text)}</strong></div>'
-            f'<div><span>Variación diaria</span><strong>{_esc(change_text)}</strong></div>'
+            f'<div><span>Rendimiento diario</span><strong class="{rendimiento_class}">{_esc(rendimiento_text)}</strong></div>'
             f'<div><span>Consenso analistas</span><strong>{_esc(analyst_text)}</strong></div>'
             f'<div><span>Precio objetivo</span><strong>{_esc(target_text)}</strong></div>'
             "</div>"
@@ -462,10 +499,7 @@ def render_dashboard(
       background: #ffffff0c; padding: 5px 10px; font-size: 12px; font-weight: 750; }}
     .badge i {{ width: 7px; height: 7px; }}
     .sentiment-note {{ color: var(--muted); font-size: 12px; margin: 12px 0; }}
-    
-    /* 3. CSS MODIFICADO PARA SOPORTAR LAS 4 COLUMNAS DE MÉTRICAS */
     .metrics {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }}
-    
     .metrics div {{ border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 9px; min-width: 0; }}
     .metrics span {{ color: var(--muted); display: block; font-size: 10px; line-height: 1.3; min-height: 26px; }}
     .metrics strong {{ display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }}
