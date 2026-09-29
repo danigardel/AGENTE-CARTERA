@@ -117,7 +117,8 @@ COMPANIES = (
     Company("Oracle", "ORCL"),
     Company("MP Materials", "MP"),
     Company("SoFi Technologies", "SOFI"),
-    Company("SpaceX", None),
+    # Actualizado con el ticker de SpaceX. Cámbialo si cotiza bajo otro símbolo.
+    Company("SpaceX", "SPCX"), 
     Company("MercadoLibre", "MELI"),
 )
 
@@ -216,7 +217,6 @@ def fetch_quote(company: Company) -> Quote:
         logging.warning("%s (%s) - %s", company.name, company.ticker, message)
         return Quote(warning=message)
 
-    # 2. CONVERSIÓN DE MONEDA
     currency = info.get("currency", "USD")
     fx_rate = get_fx_rate(currency)
 
@@ -357,13 +357,14 @@ def render_dashboard(
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     
-    def sentiment_sort_key(report: StockReport) -> int:
-        if report.news_sentiment is None:
-            return 4
-        _, signal = classify_sentiment(report.news_sentiment)
-        return {"bullish": 1, "neutral": 2, "bearish": 3}.get(signal, 4)
+    # NUEVA FUNCIÓN DE ORDENACIÓN: Por rendimiento diario (de mayor a menor)
+    def performance_sort_key(report: StockReport) -> float:
+        # Si no hay datos de rendimiento, se mandan al fondo de la lista usando -infinito
+        if report.quote.daily_change_pct is None:
+            return -math.inf
+        return report.quote.daily_change_pct
         
-    reports = sorted(reports, key=sentiment_sort_key)
+    reports = sorted(reports, key=performance_sort_key, reverse=True)
 
     summary = executive_summary(reports)
     label = _esc(summary["sentiment_label"])
@@ -378,7 +379,6 @@ def render_dashboard(
         quote = report.quote
         ticker_text = company.ticker or "Sin ticker"
         
-        # 3. CONSTRUCCIÓN DE CAJAS (Euros y Rendimiento Relativo/Absoluto)
         price_text = (
             f'{_format_number(quote.current_price_eur)} €'
             if quote.current_price_eur is not None
@@ -423,7 +423,6 @@ def render_dashboard(
             else ""
         )
         
-        # 4. ESTRUCTURA HTML FINAL (Sustituye "Variación diaria" por "Rendimiento diario")
         cards.append(
             f'<article class="stock-card" data-sentiment="{sentiment_signal}">'
             '<div class="card-top"><div>'
@@ -544,7 +543,7 @@ def render_dashboard(
       <ul class="key-headlines">{key_headlines_html}</ul>
     </section>
     <section aria-labelledby="stocks-title">
-      <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2><span>Sentimiento basado en noticias · del día</span></div>
+      <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2><span>Ordenada por rendimiento de hoy</span></div>
       <div class="grid">{"".join(cards)}</div>
     </section>
     <footer>Fuentes: Google News RSS y Yahoo Finance (vía yfinance). Datos informativos, no asesoramiento financiero.</footer>
