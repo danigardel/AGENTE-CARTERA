@@ -21,7 +21,7 @@ La lista está en `COMPANIES` en `daily_report.py`. Se normaliza la entrada dupl
 
 ## Automatización y GitHub Pages
 
-El workflow `.github/workflows/daily_report.yml` genera y despliega el dashboard todos los días a las **21:30 y 22:45, hora de Europe/Madrid**. GitHub Actions interpreta cron en UTC; el workflow tiene cuatro disparadores UTC y filtra los dos que corresponden a la hora local según horario de verano/invierno. También se puede iniciar con `workflow_dispatch`.
+El workflow `.github/workflows/daily_report.yml` genera y despliega el dashboard cada **5 minutos** (el intervalo mínimo de GitHub Actions para `schedule`). GitHub puede retrasar o descartar ejecuciones programadas cuando hay carga, así que no se garantiza una actualización exacta cada 5 minutos. Si una ejecución sigue en curso, no se cancela para iniciar otra; se procesa la más reciente cuando queda disponible. El cron se ejecuta en UTC, pero la hora que aparece en el informe usa `Europe/Madrid`. También se puede iniciar manualmente con `workflow_dispatch`. Cada tarjeta muestra el último precio que Yahoo Finance devuelve durante esa generación, convertido a euros cuando hay tipo de cambio disponible; el proveedor puede retrasar los datos o no cambiar el precio cuando el mercado está cerrado. Las ejecuciones programadas deben estar habilitadas y el workflow debe estar en la rama predeterminada del repositorio.
 
 En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de despliegue. El workflow necesita los permisos de Pages y OIDC que declara en el YAML. Tras una ejecución correcta, el dashboard se publica como `index.html`.
 
@@ -29,5 +29,5 @@ En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de des
 
 - Google News RSS proporciona titulares; solo se conservan los publicados en la fecha local del informe.
 - VADER puntúa el tono de los titulares en inglés. La señal alcista/neutral/bajista es una heurística de sentimiento, no una predicción ni asesoramiento.
-- Yahoo Finance vía `yfinance` aporta variación diaria, consenso y precio objetivo cuando el proveedor los entrega. Los errores y datos ausentes se indican en cada tarjeta.
+- Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, consenso y precio objetivo cuando el proveedor los entrega. El precio mostrado es la cotización disponible al generar ese informe; el dato puede faltar o tener retraso según el proveedor/mercado. Los errores y datos ausentes se indican en cada tarjeta.
 - Se resume el consenso por empresa. No se consultan tenencias ni carteras de fondos; esos datos no se infieren a partir de recomendaciones.

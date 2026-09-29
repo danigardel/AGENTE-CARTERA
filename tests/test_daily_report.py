@@ -123,6 +123,36 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("No hay ticker público configurado", html)
         self.assertIn('data-sentiment="bullish"', html)
 
+    def test_dashboard_orders_by_sentiment_and_shows_report_price(self):
+        reports = [
+            StockReport(
+                Company("Bearish Co", "BEAR"),
+                quote=Quote(current_price_eur=40, daily_change_pct=9),
+                news_sentiment=-0.6,
+            ),
+            StockReport(
+                Company("No News Co", "NONE"),
+                quote=Quote(current_price_eur=50),
+            ),
+            StockReport(
+                Company("Neutral Co", "NEUT"),
+                quote=Quote(current_price_eur=30, daily_change_pct=-9),
+                news_sentiment=0,
+            ),
+            StockReport(
+                Company("Bullish Co", "BULL"),
+                quote=Quote(current_price_eur=20, daily_change_pct=-20),
+                news_sentiment=0.7,
+            ),
+        ]
+
+        html = render_dashboard(reports)
+
+        positions = [html.index(f">{ticker}</p>") for ticker in ("BULL", "NEUT", "BEAR", "NONE")]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("<span>Precio en este informe</span><strong>20.00 €</strong>", html)
+        self.assertIn("Sentimiento: alcista → neutral → bajista", html)
+
 
 if __name__ == "__main__":
     unittest.main()

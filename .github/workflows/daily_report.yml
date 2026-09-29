@@ -2,7 +2,7 @@ name: Daily stock report
 
 on:
   schedule:
-    - cron: '*/5 * * * *' # Mínimo permitido por GitHub Actions
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,44 +12,10 @@ permissions:
 
 concurrency:
   group: github-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  schedule:
-    runs-on: ubuntu-latest
-    outputs:
-      run_report: ${{ steps.check.outputs.run_report }}
-    steps:
-      - name: Check Madrid local schedule
-        id: check
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SCHEDULE: ${{ github.event.schedule }}
-        run: |
-          python - <<'PY'
-          import os
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          if os.environ["EVENT_NAME"] == "workflow_dispatch":
-              should_run = True
-          else:
-              local_now = datetime.now(ZoneInfo("Europe/Madrid"))
-              offset_hours = int(local_now.utcoffset().total_seconds() // 3600)
-              wanted_utc_crons = {
-                  f"{minute} {(hour - offset_hours) % 24} * * *"
-                  for hour, minute in ((21, 30), (22, 45))
-              }
-              should_run = os.environ["EVENT_SCHEDULE"] in wanted_utc_crons
-
-          print(f"Execute report: {should_run}")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"run_report={str(should_run).lower()}\n")
-          PY
-
   build:
-    needs: schedule
-    if: needs.schedule.outputs.run_report == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
