@@ -5,46 +5,35 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+# Esto es crucial: da permiso al bot para escribir en tu repositorio
 permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: github-pages
-  cancel-in-progress: false
+  contents: write
 
 jobs:
-  build:
+  build_and_update:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Checkout del repositorio
         uses: actions/checkout@v4
-      - name: Set up Python
+
+      - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Generate daily dashboard
-        run: |
-          python daily_report.py --output dashboard.html
-          mkdir -p public
-          cp dashboard.html public/index.html
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
+          python-version: '3.10' # Asegúrate de que coincida con la que usabas
 
-  deploy:
-    needs: build
-    if: needs.build.result == 'success'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar script del reporte
+        run: python daily_report.py
+
+      - name: Guardar cambios y subir a GitHub
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add dashboard.html
+          # Solo hace commit si hay cambios reales en el archivo
+          git diff --quiet && git diff --staged --quiet || git commit -m "📊 Actualizar radar bursátil"
+          git push
