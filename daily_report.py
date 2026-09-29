@@ -40,7 +40,6 @@ def get_fx_rate(currency: str) -> float:
             return FX_CACHE[currency]
             
     try:
-        # Consulta el tipo de cambio frente al Euro (ej. USDEUR=X)
         ticker = f"{currency}EUR=X"
         rate = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
     except Exception as e:
@@ -87,6 +86,7 @@ class StockReport:
     warnings: list[str] = field(default_factory=list)
 
 
+# LISTA ACTUALIZADA CON SPCX
 COMPANIES = (
     Company("Tempus AI", "TEM"),
     Company("AMD", "AMD"),
@@ -117,7 +117,6 @@ COMPANIES = (
     Company("Oracle", "ORCL"),
     Company("MP Materials", "MP"),
     Company("SoFi Technologies", "SOFI"),
-    # Actualizado con el ticker de SpaceX. Cámbialo si cotiza bajo otro símbolo.
     Company("SpaceX", "SPCX"), 
     Company("MercadoLibre", "MELI"),
 )
@@ -357,9 +356,8 @@ def render_dashboard(
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     
-    # NUEVA FUNCIÓN DE ORDENACIÓN: Por rendimiento diario (de mayor a menor)
+    # ORDENACIÓN POR RENDIMIENTO DIARIO (Extraído del mercado)
     def performance_sort_key(report: StockReport) -> float:
-        # Si no hay datos de rendimiento, se mandan al fondo de la lista usando -infinito
         if report.quote.daily_change_pct is None:
             return -math.inf
         return report.quote.daily_change_pct

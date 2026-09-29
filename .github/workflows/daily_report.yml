@@ -2,8 +2,8 @@ name: Daily stock report
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Se ejecuta cada 30 minutos
-  workflow_dispatch: # Mantiene la opción de ejecutarlo manualmente si la tenías
+    - cron: '*/5 * * * *' # Mínimo permitido por GitHub Actions
+  workflow_dispatch:
 
 permissions:
   contents: read
