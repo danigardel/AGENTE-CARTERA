@@ -5,6 +5,7 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+# Este permiso es obligatorio para que el bot pueda guardar el index.html
 permissions:
   contents: write
 
@@ -18,22 +19,23 @@ jobs:
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.12"
+          cache: pip
 
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Añadimos --output index.html para que el reporte sea la página principal
+      # Genera directamente el archivo con el nombre index.html
       - name: Ejecutar script del reporte
         run: python daily_report.py --output index.html
 
+      # Hace un commit y sube el nuevo index.html a tu repositorio
       - name: Guardar cambios y subir a GitHub
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # Añadimos index.html al repositorio en lugar de dashboard.html
           git add index.html
           git diff --quiet && git diff --staged --quiet || git commit -m "📊 Actualizar radar bursátil"
           git push
