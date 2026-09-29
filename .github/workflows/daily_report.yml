@@ -1,0 +1,89 @@
+name: Daily stock report
+
+on:
+  schedule:
+    # GitHub cron is UTC. These pairs cover 21:30 and 22:45 Europe/Madrid
+    # in summer (UTC+2) and winter (UTC+1); the schedule job filters each pair.
+    - cron: "30 19 * * *"
+    - cron: "45 20 * * *"
+    - cron: "30 20 * * *"
+    - cron: "45 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  schedule:
+    runs-on: ubuntu-latest
+    outputs:
+      run_report: ${{ steps.check.outputs.run_report }}
+    steps:
+      - name: Check Madrid local schedule
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          if os.environ["EVENT_NAME"] == "workflow_dispatch":
+              should_run = True
+          else:
+              local_now = datetime.now(ZoneInfo("Europe/Madrid"))
+              offset_hours = int(local_now.utcoffset().total_seconds() // 3600)
+              wanted_utc_crons = {
+                  f"{minute} {(hour - offset_hours) % 24} * * *"
+                  for hour, minute in ((21, 30), (22, 45))
+              }
+              should_run = os.environ["EVENT_SCHEDULE"] in wanted_utc_crons
+
+          print(f"Execute report: {should_run}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"run_report={str(should_run).lower()}\n")
+          PY
+
+  build:
+    needs: schedule
+    if: needs.schedule.outputs.run_report == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Generate daily dashboard
+        run: |
+          python daily_report.py --output dashboard.html
+          mkdir -p public
+          cp dashboard.html public/index.html
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
