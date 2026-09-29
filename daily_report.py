@@ -86,39 +86,51 @@ class StockReport:
     warnings: list[str] = field(default_factory=list)
 
 
-# LISTA ACTUALIZADA CON SPCX
+# LISTA DE ACCIONES ACTUALIZADA
 COMPANIES = (
-    Company("Tempus AI", "TEM"),
-    Company("AMD", "AMD"),
-    Company("Dell Technologies", "DELL"),
-    Company("ASML", "ASML"),
-    Company("Meta Platforms (A)", "META"),
     Company("Bloom Energy", "BE"),
-    Company("GE Vernova", "GEV"),
-    Company("Vistra", "VST"),
-    Company("Neo Performance Materials", "NEO.TO"),
-    Company("NVIDIA", "NVDA"),
+    Company("Vertiv", "VRT"),
+    Company("ASML", "ASML"),
+    Company("Semiconductor ETF", "SMH"), # Ticker genérico de semiconductores
     Company("Micron Technology", "MU"),
-    Company("Caterpillar", "CAT"),
-    Company("Apple", "AAPL"),
-    Company("Intel", "INTC"),
-    Company("Palantir Technologies", "PLTR"),
-    Company("Tesla", "TSLA"),
-    Company("Alphabet (A)", "GOOGL"),
-    Company("Uber", "UBER"),
-    Company("TSMC (ADR)", "TSM"),
-    Company("Microsoft", "MSFT"),
-    Company("Broadcom", "AVGO"),
-    Company("Modine Manufacturing", "MOD"),
-    Company("Moderna", "MRNA"),
-    Company("Amazon.com", "AMZN"),
-    Company("Walt Disney", "DIS"),
+    Company("Rocket Lab", "RKLB"),
+    Company("Dell Technologies", "DELL"),
+    Company("GE Vernova", "GEV"),
     Company("Netflix", "NFLX"),
-    Company("Oracle", "ORCL"),
+    Company("AMD", "AMD"),
+    Company("Meta Platforms", "META"),
+    Company("Quantum Computing ETF", "QTUM"),
+    Company("Caterpillar", "CAT"),
+    Company("Broadcom", "AVGO"),
+    Company("Space Innovators ETF", "YODA.L"),
+    Company("Intel", "INTC"),
+    Company("Vistra", "VST"),
     Company("MP Materials", "MP"),
     Company("SoFi Technologies", "SOFI"),
-    Company("SpaceX", "SPCX"), 
+    Company("SpaceX", "SPCX"),
+    Company("NVIDIA", "NVDA"),
+    Company("Modine Manufacturing", "MOD"),
+    Company("MSCI World Info Tech", "XDWT.DE"), # Ticker de Xetra para World IT
+    Company("Tempus AI", "TEM"),
+    Company("MSCI Emerging Markets", "IS3N.DE"),
+    Company("Tesla", "TSLA"),
+    Company("Walt Disney", "DIS"),
     Company("MercadoLibre", "MELI"),
+    Company("Uber", "UBER"),
+    Company("Oracle", "ORCL"),
+    Company("S&P 500 Equal Weight", "XDEW.DE"),
+    Company("S&P 500 EUR Acc", "SXR8.DE"),
+    Company("Amazon", "AMZN"),
+    Company("Alphabet (A)", "GOOGL"),
+    Company("Palantir Technologies", "PLTR"),
+    Company("Core MSCI World", "EUNL.DE"),
+    Company("FTSE All-World", "VWCE.DE"),
+    Company("TSMC (ADR)", "TSM"),
+    Company("Microsoft", "MSFT"),
+    Company("Smart Overnight Return", "CSH2.PA"), # Ticker de Euronext París para Amundi
+    Company("Apple", "AAPL"),
+    Company("Moderna", "MRNA"),
+    Company("Neo Performance Materials", "NEO.TO"),
 )
 
 ANALYST_LABELS = {
@@ -228,7 +240,8 @@ def fetch_quote(company: Company) -> Quote:
     
     return Quote(
         current_price_eur=_finite_float(current_price, multiplier=fx_rate),
-        daily_change_pct=_finite_float(daily_change_pct, multiplier=100),
+        # CORRECCIÓN: Yahoo Finance ya devuelve el porcentaje, no hay que multiplicar por 100.
+        daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
         daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
@@ -356,7 +369,7 @@ def render_dashboard(
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     
-    # ORDENACIÓN POR RENDIMIENTO DIARIO (Extraído del mercado)
+    # ORDENACIÓN POR RENDIMIENTO DIARIO ACTUAL
     def performance_sort_key(report: StockReport) -> float:
         if report.quote.daily_change_pct is None:
             return -math.inf
