@@ -5,7 +5,6 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
-# Esto es crucial: da permiso al bot para escribir en tu repositorio
 permissions:
   contents: write
 
@@ -19,21 +18,22 @@ jobs:
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # Asegúrate de que coincida con la que usabas
+          python-version: '3.10'
 
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Añadimos --output index.html para que el reporte sea la página principal
       - name: Ejecutar script del reporte
-        run: python daily_report.py
+        run: python daily_report.py --output index.html
 
       - name: Guardar cambios y subir a GitHub
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add dashboard.html
-          # Solo hace commit si hay cambios reales en el archivo
+          # Añadimos index.html al repositorio en lugar de dashboard.html
+          git add index.html
           git diff --quiet && git diff --staged --quiet || git commit -m "📊 Actualizar radar bursátil"
           git push
