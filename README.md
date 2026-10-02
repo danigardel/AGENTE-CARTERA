@@ -1,6 +1,6 @@
 # Radar bursátil diario
 
-Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización/consenso de analistas de Yahoo Finance cuando están disponibles. No requiere API keys.
+Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización, ratio PEG, consenso de analistas y precio objetivo de Yahoo Finance cuando están disponibles. No requiere API keys.
 
 ## Ejecución local
 
@@ -29,5 +29,5 @@ En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de des
 
 - Google News RSS proporciona titulares; solo se conservan los publicados en la fecha local del informe.
 - VADER puntúa el tono de los titulares en inglés. La señal alcista/neutral/bajista es una heurística de sentimiento, no una predicción ni asesoramiento.
-- Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, consenso y precio objetivo cuando el proveedor los entrega. El precio mostrado es la cotización disponible al generar ese informe; el dato puede faltar o tener retraso según el proveedor/mercado. Los errores y datos ausentes se indican en cada tarjeta.
+- Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, ratio PEG, consenso y precio objetivo cuando el proveedor los entrega. El PEG se muestra cerca de 1 en verde y por encima de 2 en rojo; es una referencia informativa, no una recomendación de inversión. El precio mostrado es la cotización disponible al generar ese informe; los datos pueden faltar o tener retraso según el proveedor/mercado. Los errores y datos ausentes se indican en cada tarjeta.
 - Se resume el consenso por empresa. No se consultan tenencias ni carteras de fondos; esos datos no se infieren a partir de recomendaciones.

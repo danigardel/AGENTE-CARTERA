@@ -62,6 +62,7 @@ class Quote:
     current_price_eur: float | None = None
     daily_change_pct: float | None = None
     daily_change_abs_eur: float | None = None
+    peg_ratio: float | None = None
     analyst_consensus: str | None = None
     analyst_count: int | None = None
     target_mean_eur: float | None = None
@@ -235,6 +236,10 @@ def fetch_quote(company: Company) -> Quote:
     daily_change_abs = info.get("regularMarketChange")
     daily_change_pct = info.get("regularMarketChangePercent")
     target_mean = info.get("targetMeanPrice")
+    peg_ratio = info.get("pegRatio")
+    if peg_ratio is None:
+        peg_ratio = info.get("trailingPegRatio")
+    peg_ratio_value = _finite_float(peg_ratio)
     recommendation = info.get("recommendationKey")
     analyst_count = info.get("numberOfAnalystOpinions")
     
@@ -243,13 +248,19 @@ def fetch_quote(company: Company) -> Quote:
         # CORRECCIÓN: Yahoo Finance ya devuelve el porcentaje, no hay que multiplicar por 100.
         daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
         daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
+        peg_ratio=peg_ratio_value,
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
         target_mean_eur=_finite_float(target_mean, multiplier=fx_rate),
         warning=(
             None
-            if recommendation or daily_change_pct is not None or current_price is not None
-            else "Yahoo Finance no devolvió cotización ni consenso"
+            if (
+                recommendation
+                or daily_change_pct is not None
+                or current_price is not None
+                or peg_ratio_value is not None
+            )
+            else "Yahoo Finance no devolvió cotización, consenso ni PEG"
         ),
     )
 
@@ -409,6 +420,16 @@ def render_dashboard(
             if quote.target_mean_eur is not None
             else "—"
         )
+        peg_text = _format_number(quote.peg_ratio)
+        peg_class = (
+            "text-bearish"
+            if quote.peg_ratio is not None and quote.peg_ratio > 2
+            else "text-bullish"
+            if quote.peg_ratio is not None and 0.8 <= quote.peg_ratio <= 1.2
+            else "text-neutral"
+            if quote.peg_ratio is not None
+            else ""
+        )
         analyst_text = quote.analyst_consensus or "Sin datos"
         if quote.analyst_count:
             analyst_text += f" · {quote.analyst_count} analistas"
@@ -446,6 +467,8 @@ def render_dashboard(
             f'<div><span>Rendimiento diario</span><strong class="{rendimiento_class}">{_esc(rendimiento_text)}</strong></div>'
             f'<div><span>Consenso analistas</span><strong>{_esc(analyst_text)}</strong></div>'
             f'<div><span>Precio objetivo</span><strong>{_esc(target_text)}</strong></div>'
+            f'<div><span title="Price/Earnings-to-Growth; ratio informativo">PEG</span>'
+            f'<strong class="{peg_class}">{_esc(peg_text)}</strong></div>'
             "</div>"
             f"{private_note}<h3>Titulares clave</h3><ul class=\"headlines\">{headline_list}</ul>"
             f"{warnings_html}</article>"
@@ -509,7 +532,7 @@ def render_dashboard(
       background: #ffffff0c; padding: 5px 10px; font-size: 12px; font-weight: 750; }}
     .badge i {{ width: 7px; height: 7px; }}
     .sentiment-note {{ color: var(--muted); font-size: 12px; margin: 12px 0; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr)); gap: 8px; }}
     .metrics div {{ border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 9px; min-width: 0; }}
     .metrics span {{ color: var(--muted); display: block; font-size: 10px; line-height: 1.3; min-height: 26px; }}
     .metrics strong {{ display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }}
@@ -523,7 +546,8 @@ def render_dashboard(
     footer {{ border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; margin-top: 34px; padding-top: 16px; }}
     @media (max-width: 720px) {{ .shell {{ padding: 25px 15px 40px; }} header {{ display: block; }}
       .updated {{ text-align: left; margin-top: 12px; }} .summary {{ grid-template-columns: 1fr; gap: 9px; }}
-      .summary-card {{ min-height: 0; }} }}
+      .summary-card {{ min-height: 0; }} .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }}
+      .metrics div {{ padding: 8px; }} }}
   </style>
 </head>
 <body>
@@ -546,7 +570,8 @@ def render_dashboard(
         <div class="summary-detail">{len(reports)} empresas seguidas · {warnings_count} avisos de datos</div></article>
     </section>
     <p class="disclaimer"><strong>Metodología:</strong> la señal de sentimiento se calcula sobre los titulares del día con VADER;
-      no es una recomendación de inversión. El consenso y los objetivos provienen de Yahoo Finance cuando están disponibles.
+      no es una recomendación de inversión. El PEG, consenso y objetivos provienen de Yahoo Finance cuando están disponibles;
+      el PEG es una referencia informativa, no una recomendación de inversión.
       No se dispone de datos de carteras/tenencias; no se deben interpretar las recomendaciones como posiciones de fondos.
       Los feeds y datos pueden faltar o retrasarse.</p>
     <section aria-labelledby="key-title">
