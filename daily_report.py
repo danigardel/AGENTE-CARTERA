@@ -258,7 +258,6 @@ def fetch_quote(company: Company) -> Quote:
     
     return Quote(
         current_price_eur=_finite_float(current_price, multiplier=fx_rate),
-        # CORRECCIÓN: Yahoo Finance ya devuelve el porcentaje, no hay que multiplicar por 100.
         daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
         daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
         peg_ratio=peg_ratio_value,
@@ -406,7 +405,13 @@ SORT_SCRIPT = """<script>
   const keys = {
     daily: (c) => { const v = num(c.dataset.daily); return v === null ? null : -v; },
     peg: (c) => { const v = num(c.dataset.peg); return v === null || v < 0 ? null : v; },
-    consensus: (c) => CONSENSUS[c.dataset.consensus] ?? null,
+    consensus: (c) => {
+      const rank = CONSENSUS[c.dataset.consensus];
+      if (rank === undefined) return null;
+      const analysts = num(c.dataset.analysts) || 0;
+      // Restamos el (nº de analistas / 100.000) para priorizar los mayores dentro del mismo ranking
+      return rank - (analysts / 100000);
+    },
     sentiment: (c) => SENTIMENT[c.dataset.news] ?? null,
   };
 
@@ -506,6 +511,7 @@ def render_dashboard(
             f'data-daily="{_num_attr(quote.daily_change_pct)}" '
             f'data-peg="{_num_attr(quote.peg_ratio)}" '
             f'data-consensus="{_esc(quote.analyst_consensus or "")}" '
+            f'data-analysts="{quote.analyst_count or 0}" '
             f'data-news="{_esc(sentiment_label)}">'
             '<div class="card-top"><div>'
             f'<p class="ticker">{_esc(ticker_text)}</p>'
