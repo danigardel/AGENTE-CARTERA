@@ -153,6 +153,19 @@ def classify_sentiment(score: float | None) -> tuple[str, str]:
     return "Neutral", "neutral"
 
 
+def classify_peg(peg: float | None) -> str:
+    """Verde < 1,0 · naranja 1,0–1,5 · rojo > 1,5 · sin color si falta o es negativo."""
+    if peg is None or peg < 0:
+        return ""
+    if peg < 1.0:
+        return "text-bullish"
+    return "text-orange" if peg <= 1.5 else "text-bearish"
+
+
+def _num_attr(value: float | None) -> str:
+    return "" if value is None else f"{value:.4f}"
+
+
 def _parse_published(entry: Any) -> datetime | None:
     parsed = getattr(entry, "published_parsed", None)
     if not parsed:
@@ -374,6 +387,47 @@ def _headline_html(headline: Headline) -> str:
     )
 
 
+SORT_SCRIPT = """<script>
+(() => {
+  const grid = document.getElementById('stock-grid');
+  const select = document.getElementById('sort-select');
+  if (!grid || !select) return;
+
+  const cards = Array.from(grid.querySelectorAll('.stock-card'));
+  const origin = new Map(cards.map((card, i) => [card, i]));
+
+  // Pesos: menor = mejor. Lo que no esté en el mapa ("Sin datos") va al final.
+  const CONSENSUS = { 'Compra fuerte': 1, 'Compra': 2, 'Mantener': 3, 'Rendimiento inferior': 4, 'Venta': 5, 'Venta fuerte': 6 };
+  const SENTIMENT = { 'Alcista': 1, 'Neutral': 2, 'Bajista': 3 };
+
+  const num = (v) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+
+  // Cada criterio devuelve un número (menor = antes) o null (sin datos = al final).
+  const keys = {
+    daily: (c) => { const v = num(c.dataset.daily); return v === null ? null : -v; },
+    peg: (c) => { const v = num(c.dataset.peg); return v === null || v < 0 ? null : v; },
+    consensus: (c) => CONSENSUS[c.dataset.consensus] ?? null,
+    sentiment: (c) => SENTIMENT[c.dataset.news] ?? null,
+  };
+
+  function sortCards(mode) {
+    const key = keys[mode] || keys.daily;
+    const sorted = cards.slice().sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      if (ka === null || kb === null) return ka === kb ? origin.get(a) - origin.get(b) : (ka === null ? 1 : -1);
+      return ka - kb || origin.get(a) - origin.get(b);
+    });
+    const frag = document.createDocumentFragment();
+    sorted.forEach((c) => frag.appendChild(c));
+    grid.appendChild(frag);
+  }
+
+  select.addEventListener('change', () => sortCards(select.value));
+  sortCards(select.value);
+})();
+</script>"""
+
+
 def render_dashboard(
     reports: list[StockReport],
     generated_at: datetime | None = None,
@@ -421,15 +475,7 @@ def render_dashboard(
             else "—"
         )
         peg_text = _format_number(quote.peg_ratio)
-        peg_class = (
-            "text-bearish"
-            if quote.peg_ratio is not None and quote.peg_ratio > 2
-            else "text-bullish"
-            if quote.peg_ratio is not None and 0.8 <= quote.peg_ratio <= 1.2
-            else "text-neutral"
-            if quote.peg_ratio is not None
-            else ""
-        )
+        peg_class = classify_peg(quote.peg_ratio)
         analyst_text = quote.analyst_consensus or "Sin datos"
         if quote.analyst_count:
             analyst_text += f" · {quote.analyst_count} analistas"
@@ -456,7 +502,11 @@ def render_dashboard(
         )
         
         cards.append(
-            f'<article class="stock-card" data-sentiment="{sentiment_signal}">'
+            f'<article class="stock-card" data-sentiment="{sentiment_signal}" '
+            f'data-daily="{_num_attr(quote.daily_change_pct)}" '
+            f'data-peg="{_num_attr(quote.peg_ratio)}" '
+            f'data-consensus="{_esc(quote.analyst_consensus or "")}" '
+            f'data-news="{_esc(sentiment_label)}">'
             '<div class="card-top"><div>'
             f'<p class="ticker">{_esc(ticker_text)}</p>'
             f'<h2>{_esc(company.name)}</h2></div>'
@@ -496,7 +546,7 @@ def render_dashboard(
       color-scheme: dark;
       --bg: #0a0e17; --panel: #111827; --panel-2: #172033; --line: #253149;
       --text: #edf2fb; --muted: #95a3b8; --blue: #8cb8ff;
-      --green: #4ade80; --yellow: #facc15; --red: #fb7185;
+      --green: #4ade80; --yellow: #facc15; --red: #fb7185; --orange: #fb923c;
     }}
     * {{ box-sizing: border-box; }}
     body {{ margin: 0; background: radial-gradient(ellipse at top, #15223a 0, var(--bg) 52rem);
@@ -518,9 +568,15 @@ def render_dashboard(
     .bullish {{ color: var(--green); }} .bearish {{ color: var(--red); }} .neutral {{ color: var(--yellow); }}
     .disclaimer {{ border: 1px solid var(--line); border-radius: 12px; background: #0e1522; color: var(--muted);
       padding: 13px 16px; margin: 0 0 25px; font-size: 13px; }}
-    .section-heading {{ display: flex; justify-content: space-between; align-items: baseline; margin: 32px 0 13px; }}
+    .section-heading {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; margin: 32px 0 13px; }}
     .section-heading h2 {{ margin: 0; font-size: 20px; }}
     .section-heading span {{ color: var(--muted); font-size: 13px; }}
+    .sort-select {{ appearance: none; -webkit-appearance: none; max-width: 100%; cursor: pointer; font: inherit; font-size: 13px;
+      color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 34px 8px 12px;
+      background: var(--panel-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none' stroke='%2395a3b8' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M1 1.5l5 5 5-5'/%3E%3C/svg%3E") no-repeat right 12px center; }}
+    .sort-select:hover {{ border-color: #3a4a6b; }}
+    .sort-select:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+    .sort-select option {{ background: var(--panel); color: var(--text); }}
     .key-headlines {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; padding: 0; list-style: none; }}
     .key-headlines li {{ background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }}
     .key-headlines span {{ display: block; color: var(--muted); margin-top: 7px; font-size: 12px; }}
@@ -539,7 +595,7 @@ def render_dashboard(
     .stock-card h3 {{ font-size: 13px; margin: 17px 0 7px; }}
     .headlines {{ margin: 0; padding-left: 17px; }} .headline {{ padding: 0 0 9px 1px; }}
     .headline a {{ font-size: 13px; }} .headline-meta {{ display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }}
-    .text-bullish {{ color: var(--green); }} .text-bearish {{ color: var(--red); }} .text-neutral {{ color: var(--yellow); }}
+    .text-bullish {{ color: var(--green); }} .text-bearish {{ color: var(--red); }} .text-neutral {{ color: var(--yellow); }} .text-orange {{ color: var(--orange); }}
     .empty {{ color: var(--muted); font-size: 13px; list-style: none; margin-left: -17px; }}
     .warnings {{ border-top: 1px solid var(--line); color: #fbbf24; font-size: 11px; margin: 10px 0 0; padding: 9px 0 0 16px; }}
     .private-note {{ color: #fbbf24; font-size: 11px; margin: 10px 0 0; }}
@@ -547,7 +603,7 @@ def render_dashboard(
     @media (max-width: 720px) {{ .shell {{ padding: 25px 15px 40px; }} header {{ display: block; }}
       .updated {{ text-align: left; margin-top: 12px; }} .summary {{ grid-template-columns: 1fr; gap: 9px; }}
       .summary-card {{ min-height: 0; }} .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }}
-      .metrics div {{ padding: 8px; }} }}
+      .metrics div {{ padding: 8px; }} .sort-select {{ width: 100%; }} }}
   </style>
 </head>
 <body>
@@ -579,11 +635,18 @@ def render_dashboard(
       <ul class="key-headlines">{key_headlines_html}</ul>
     </section>
     <section aria-labelledby="stocks-title">
-      <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2><span>Ordenada por rendimiento de hoy</span></div>
-      <div class="grid">{"".join(cards)}</div>
+      <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2>
+        <select id="sort-select" class="sort-select" aria-label="Ordenar la lista de seguimiento" aria-controls="stock-grid">
+          <option value="daily" selected>Rendimiento diario</option>
+          <option value="peg">Valoración PEG (de bueno a malo)</option>
+          <option value="consensus">Consenso de analistas</option>
+          <option value="sentiment">Sentimiento de noticias</option>
+        </select></div>
+      <div class="grid" id="stock-grid">{"".join(cards)}</div>
     </section>
     <footer>Fuentes: Google News RSS y Yahoo Finance (vía yfinance). Datos informativos, no asesoramiento financiero.</footer>
   </main>
+{SORT_SCRIPT}
 </body>
 </html>
 """
