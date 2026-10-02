@@ -177,14 +177,14 @@ class SentimentTests(unittest.TestCase):
         html = render_dashboard([
             StockReport(
                 Company("A Co", "A"),
-                quote=Quote(daily_change_pct=1.5, peg_ratio=0.9, analyst_consensus="Compra"),
+                quote=Quote(daily_change_pct=1.5, peg_ratio=0.9, analyst_consensus="Compra", analyst_count=12),
                 news_sentiment=0.4,
             )
         ])
         self.assertIn('<select id="sort-select"', html)
         self.assertNotIn("Ordenada por rendimiento de hoy", html)
         self.assertIn(
-            'data-daily="1.5000" data-peg="0.9000" data-consensus="Compra" data-news="Alcista"',
+            'data-daily="1.5000" data-peg="0.9000" data-consensus="Compra" data-analysts="12" data-news="Alcista"',
             html,
         )
 
