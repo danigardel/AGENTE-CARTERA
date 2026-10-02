@@ -10,6 +10,7 @@ from daily_report import (
     Headline,
     Quote,
     StockReport,
+    classify_peg,
     classify_sentiment,
     executive_summary,
     fetch_headlines,
@@ -152,7 +153,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('data-sentiment="bullish"', html)
         self.assertIn("el PEG es una referencia informativa, no una recomendación de inversión.", html)
         self.assertIn('<span title="Price/Earnings-to-Growth; ratio informativo">PEG</span>', html)
-        self.assertIn('<strong class="text-bullish">1.15</strong>', html)
+        self.assertIn('<strong class="text-orange">1.15</strong>', html)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;", html)
 
     def test_dashboard_styles_high_peg_as_bearish_and_missing_peg_as_unavailable(self):
@@ -165,6 +166,27 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn('<strong class="text-bearish">2.10</strong></div>', html)
         self.assertIn('<span title="Price/Earnings-to-Growth; ratio informativo">PEG</span><strong class="">—</strong>', html)
+
+    def test_peg_color_thresholds(self):
+        for peg, css in [(None, ""), (-0.4, ""), (0.99, "text-bullish"), (1.0, "text-orange"),
+                         (1.5, "text-orange"), (1.51, "text-bearish")]:
+            with self.subTest(peg=peg):
+                self.assertEqual(classify_peg(peg), css)
+
+    def test_dashboard_has_sort_select_and_card_data(self):
+        html = render_dashboard([
+            StockReport(
+                Company("A Co", "A"),
+                quote=Quote(daily_change_pct=1.5, peg_ratio=0.9, analyst_consensus="Compra"),
+                news_sentiment=0.4,
+            )
+        ])
+        self.assertIn('<select id="sort-select"', html)
+        self.assertNotIn("Ordenada por rendimiento de hoy", html)
+        self.assertIn(
+            'data-daily="1.5000" data-peg="0.9000" data-consensus="Compra" data-news="Alcista"',
+            html,
+        )
 
     def test_dashboard_orders_by_daily_performance_and_shows_report_price(self):
         reports = [
