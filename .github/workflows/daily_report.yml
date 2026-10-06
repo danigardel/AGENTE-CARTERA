@@ -12,11 +12,12 @@ permissions:
 
 concurrency:
   group: github-pages
-  cancel-in-progress: false
+  cancel-in-progress: true # MODIFICADO: Mata el proceso viejo si se queda atascado
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 3 # NUEVO: Si tarda más de 3 minutos, lo aborta por defecto
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
