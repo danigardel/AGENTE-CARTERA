@@ -8,7 +8,7 @@ import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
@@ -27,6 +27,8 @@ GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_CACHE_FILE = Path("gemini_cache.json")
+GEMINI_CACHE_TTL = timedelta(hours=3)
 MAX_HEADLINES = 4
 MAX_WORKERS = 8
 PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
@@ -615,13 +617,114 @@ Datos actuales:
 {serialized_inputs}"""
 
 
+def _read_gemini_cache(
+    cache_path: Path,
+    now_utc: datetime,
+) -> PortfolioAnalysis | None:
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        timestamp = datetime.fromisoformat(cached.pop("timestamp"))
+        if timestamp.tzinfo is None:
+            raise ValueError("timestamp sin zona horaria")
+        age = now_utc - timestamp.astimezone(timezone.utc)
+        if age < timedelta(0) or age >= GEMINI_CACHE_TTL:
+            logging.info("La caché Gemini ha expirado o tiene una fecha futura.")
+            return None
+        analysis = PortfolioAnalysis(**cached)
+        if (
+            analysis.warning is not None
+            or not all(
+                isinstance(value, str)
+                for value in (
+                    analysis.portfolio_assessment,
+                    analysis.diversification,
+                    analysis.recommended_changes,
+                    analysis.market_context,
+                )
+            )
+            or not all(
+                isinstance(items, list)
+                for items in (
+                    analysis.top_buys,
+                    analysis.sell_candidates,
+                    analysis.risks,
+                )
+            )
+            or any(
+                not isinstance(item, dict)
+                or any(
+                    not isinstance(item.get(key), str)
+                    for key in ("ticker", "name", "reason")
+                )
+                for items in (analysis.top_buys, analysis.sell_candidates)
+                for item in items
+            )
+            or any(not isinstance(item, str) for item in analysis.risks)
+        ):
+            raise ValueError("los datos de análisis almacenados no son válidos")
+        return analysis
+    except FileNotFoundError:
+        return None
+    except (
+        OSError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        KeyError,
+        AttributeError,
+    ) as error:
+        logging.warning(
+            "No se pudo usar la caché Gemini %s: %s",
+            cache_path,
+            error,
+        )
+        return None
+
+
+def _write_gemini_cache(
+    cache_path: Path,
+    analysis: PortfolioAnalysis,
+    now_utc: datetime,
+) -> None:
+    cached = asdict(analysis)
+    cached["timestamp"] = now_utc.astimezone(timezone.utc).isoformat()
+    temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path.write_text(
+            json.dumps(cached, ensure_ascii=False, allow_nan=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, cache_path)
+    except (OSError, TypeError, ValueError) as error:
+        logging.error("No se pudo guardar la caché Gemini %s: %s", cache_path, error)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            logging.error(
+                "No se pudo limpiar el archivo temporal de caché %s: %s",
+                temporary_path,
+                cleanup_error,
+            )
+
+
 def analyze_portfolio(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
     api_key: str | None = None,
     model: str = GEMINI_MODEL,
+    *,
+    cache_path: Path | None = None,
+    now_utc: datetime | None = None,
 ) -> PortfolioAnalysis:
     analysis = PortfolioAnalysis()
+    cache_path = cache_path or GEMINI_CACHE_FILE
+    now_utc = now_utc or datetime.now(timezone.utc)
+    cached_analysis = _read_gemini_cache(cache_path, now_utc)
+    if cached_analysis is not None:
+        logging.info("Se reutiliza el análisis Gemini almacenado en %s.", cache_path)
+        return cached_analysis
+
     api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
     if not api_key:
         analysis.warning = (
@@ -753,6 +856,7 @@ def analyze_portfolio(
             "lista de seguimiento o de la cartera."
         )
         logging.warning("Gemini devolvió recomendaciones fuera de los tickers autorizados.")
+    _write_gemini_cache(cache_path, analysis, datetime.now(timezone.utc))
     return analysis
 
 

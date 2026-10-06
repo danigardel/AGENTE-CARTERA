@@ -1,6 +1,8 @@
 import json
+import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -350,7 +352,13 @@ class SentimentTests(unittest.TestCase):
             },
         )
 
-        analysis = analyze_portfolio(reports, portfolio, api_key="secret-test-key")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                reports,
+                portfolio,
+                api_key="secret-test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
 
         self.assertEqual(analysis.portfolio_assessment, "Posición pequeña y positiva.")
         self.assertEqual([item["ticker"] for item in analysis.top_buys], ["EX"])
@@ -377,7 +385,13 @@ class SentimentTests(unittest.TestCase):
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_reports_missing_api_key_without_calling_provider(self, post_mock):
-        analysis = analyze_portfolio([], [], api_key="")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
 
         self.assertIn("GEMINI_API_KEY", analysis.warning)
         post_mock.assert_not_called()
@@ -395,11 +409,141 @@ class SentimentTests(unittest.TestCase):
             response=response
         )
 
-        analysis = analyze_portfolio([], [], api_key="secret-test-key")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
 
         self.assertIn("HTTP 429", analysis.warning)
         self.assertIn("Quota exceeded", analysis.warning)
         self.assertNotIn("secret-test-key", analysis.warning)
+
+    @patch("daily_report.requests.post")
+    def test_analyze_portfolio_returns_fresh_cache_without_calling_gemini(self, post_mock):
+        now_utc = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+        cached_data = {
+            "timestamp": (now_utc - timedelta(hours=2, minutes=59)).isoformat(),
+            "portfolio_assessment": "Análisis desde caché.",
+            "diversification": "Diversificación desde caché.",
+            "recommended_changes": "Sin cambios.",
+            "top_buys": [
+                {"ticker": "EX", "name": "Example", "reason": "Razón almacenada."}
+            ],
+            "sell_candidates": [],
+            "market_context": "Contexto almacenado.",
+            "risks": ["Riesgo almacenado."],
+            "warning": None,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="unused-test-key",
+                cache_path=cache_path,
+                now_utc=now_utc,
+            )
+
+        self.assertEqual(analysis.portfolio_assessment, "Análisis desde caché.")
+        self.assertEqual(analysis.top_buys[0]["ticker"], "EX")
+        self.assertIsNone(analysis.warning)
+        post_mock.assert_not_called()
+
+    @patch("daily_report.requests.post")
+    def test_analyze_portfolio_refreshes_expired_cache_and_persists_success(self, post_mock):
+        now_utc = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+        cached_data = {
+            "timestamp": (now_utc - timedelta(hours=3)).isoformat(),
+            "portfolio_assessment": "Expirado.",
+            "diversification": "Expirado.",
+            "recommended_changes": "Expirado.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Expirado.",
+            "risks": [],
+            "warning": None,
+        }
+        result = {
+            "portfolio_assessment": "Actualizado por Gemini.",
+            "diversification": "Diversificación actualizada.",
+            "recommended_changes": "Mantener las posiciones.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Mercado mixto.",
+            "risks": ["No se conoce el horizonte de inversión."],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="test-key",
+                cache_path=cache_path,
+                now_utc=now_utc,
+            )
+            saved_data = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(analysis.portfolio_assessment, "Actualizado por Gemini.")
+        saved_timestamp = datetime.fromisoformat(saved_data["timestamp"])
+        self.assertEqual(saved_timestamp.tzinfo, timezone.utc)
+        self.assertLess(abs((datetime.now(timezone.utc) - saved_timestamp).total_seconds()), 5)
+        self.assertEqual(saved_data["portfolio_assessment"], "Actualizado por Gemini.")
+        post_mock.assert_called_once()
+
+    @patch("daily_report.requests.post")
+    def test_analyze_portfolio_ignores_corrupt_cache_and_rewrites_on_success(self, post_mock):
+        now_utc = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+        result = {
+            "portfolio_assessment": "Caché reparada.",
+            "diversification": "Evaluada.",
+            "recommended_changes": "Ninguno.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Neutral.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text("{corrupt", encoding="utf-8")
+
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="test-key",
+                cache_path=cache_path,
+                now_utc=now_utc,
+            )
+            saved_data = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(analysis.portfolio_assessment, "Caché reparada.")
+        saved_timestamp = datetime.fromisoformat(saved_data["timestamp"])
+        self.assertEqual(saved_timestamp.tzinfo, timezone.utc)
+        self.assertLess(abs((datetime.now(timezone.utc) - saved_timestamp).total_seconds()), 5)
+        post_mock.assert_called_once()
 
 
 if __name__ == "__main__":

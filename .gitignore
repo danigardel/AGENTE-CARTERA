@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+gemini_cache.json
+.gemini_cache.json.tmp

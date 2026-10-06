@@ -3,6 +3,7 @@
 Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización, ratios PEG y PER, consenso de analistas y precio objetivo de Yahoo Finance cuando están disponibles. Incluye además la cartera configurada en `PORTFOLIO`, con cierres históricos, rendimientos por periodo y rendimiento máximo seleccionables. La cotización y las noticias no requieren claves; el análisis IA es opcional y necesita una clave Gemini.
 
 El reporte también solicita un análisis estructurado a Gemini Flash (`gemini-2.5-flash`) usando la API estándar `generateContent` (no Batch). Envía a Google las posiciones de `PORTFOLIO` y los datos de `COMPANIES` para redactar una evaluación de cartera, diversificación, cambios posibles, candidatas de compra y posibles ventas. No se envían claves de API dentro del prompt.
+El análisis se guarda en `gemini_cache.json` con un timestamp UTC y se reutiliza durante menos de tres horas. El archivo se excluye de Git. GitHub Actions restaura la caché persistente con `actions/cache/restore` y guarda una clave nueva por cada timestamp de análisis actualizado; así se respeta que las entradas de Actions Cache sean inmutables y no se crean archivos de caché nuevos en cada ejecución de cinco minutos.
 
 ## Ejecución local
 

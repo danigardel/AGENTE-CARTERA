@@ -33,13 +33,76 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Restore Gemini analysis cache
+        id: gemini-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: gemini_cache.json
+          key: gemini-cache-lookup-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gemini-cache-data-
+
+      - name: Record restored Gemini cache timestamp
+        id: gemini-cache-before
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          timestamp = ""
+          try:
+              timestamp = json.loads(
+                  Path("gemini_cache.json").read_text(encoding="utf-8")
+              ).get("timestamp", "")
+          except (OSError, json.JSONDecodeError, AttributeError):
+              pass
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"timestamp={timestamp}\n")
+          PY
+
       - name: Generate daily dashboard
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
         run: |
           mkdir -p public
           # Genera el reporte directamente en la carpeta public como index.html
           python daily_report.py --output public/index.html
+
+      - name: Prepare Gemini cache key
+        id: gemini-cache-after
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          timestamp = ""
+          try:
+              timestamp = json.loads(
+                  Path("gemini_cache.json").read_text(encoding="utf-8")
+              ).get("timestamp", "")
+          except (OSError, json.JSONDecodeError, AttributeError):
+              pass
+
+          before = os.environ.get("GEMINI_CACHE_TIMESTAMP_BEFORE", "")
+          should_save = bool(timestamp and timestamp != before)
+          key_suffix = re.sub(r"[^A-Za-z0-9_-]", "-", timestamp)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"should_save={'true' if should_save else 'false'}\n")
+              if should_save:
+                  output.write(f"key=gemini-cache-data-{key_suffix}\n")
+          PY
+
+      - name: Save refreshed Gemini analysis cache
+        if: success() && steps.gemini-cache-after.outputs.should_save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: gemini_cache.json
+          key: ${{ steps.gemini-cache-after.outputs.key }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
