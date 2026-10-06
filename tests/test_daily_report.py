@@ -1,19 +1,23 @@
+import json
 import unittest
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+import requests
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from daily_report import (
     Company,
     Headline,
+    PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
     PORTFOLIO_PERIODS,
     Quote,
     StockReport,
+    analyze_portfolio,
     classify_peg,
     classify_sentiment,
     executive_summary,
@@ -299,6 +303,103 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("portfolio-metric", html)
         self.assertIn('<th scope="col">Valor actual</th>', html)
         self.assertIn("80.00 €", html)
+
+    @patch("daily_report.requests.post")
+    def test_analyze_portfolio_calls_standard_flash_api_with_portfolio_and_watchlist(self, post_mock):
+        reports = [
+            StockReport(
+                Company("Example Inc.", "EX"),
+                quote=Quote(
+                    current_price_eur=42,
+                    daily_change_pct=1.2,
+                    peg_ratio=1.4,
+                    analyst_consensus="Compra",
+                    target_mean_eur=50,
+                    sector="Technology",
+                ),
+                news_sentiment=0.3,
+            )
+        ]
+        portfolio = [
+            PortfolioPosition(
+                asset=PortfolioAsset("Example Inc.", "EX", 2, 80, "EUR"),
+                prices_eur={"Hoy": 42},
+                current_value_eur=84,
+            )
+        ]
+        result = {
+            "portfolio_assessment": "Posición pequeña y positiva.",
+            "diversification": "Falta diversificación.",
+            "recommended_changes": "Evitar concentrar más en tecnología.",
+            "top_buys": [
+                {"ticker": "EX", "name": "Example Inc.", "reason": "Datos favorables."},
+                {"ticker": "FAKE", "name": "Invented Co.", "reason": "No está en lista."},
+            ],
+            "sell_candidates": [
+                {"ticker": "FAKE", "name": "Invented Co.", "reason": "No está en cartera."}
+            ],
+            "market_context": "Sentimiento positivo.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+
+        analysis = analyze_portfolio(reports, portfolio, api_key="secret-test-key")
+
+        self.assertEqual(analysis.portfolio_assessment, "Posición pequeña y positiva.")
+        self.assertEqual([item["ticker"] for item in analysis.top_buys], ["EX"])
+        self.assertEqual(analysis.sell_candidates, [])
+        self.assertTrue(any("Se omitieron recomendaciones" in risk for risk in analysis.risks))
+        endpoint, = post_mock.call_args.args
+        self.assertEqual(
+            endpoint,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        )
+        self.assertNotIn("secret-test-key", endpoint)
+        self.assertEqual(post_mock.call_args.kwargs["headers"]["x-goog-api-key"], "secret-test-key")
+        prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertIn('"quantity": 2', prompt)
+        self.assertIn('"price_eur": 42', prompt)
+        self.assertIn('"global_news_sentiment": "Alcista"', prompt)
+        self.assertIn('"sector": "Technology"', prompt)
+        self.assertIn("3 a 5 mejores candidatas", prompt)
+
+        html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
+        self.assertIn("Análisis de cartera con Gemini Flash", html)
+        self.assertIn("Posición pequeña y positiva.", html)
+        self.assertNotIn("Invented Co.", html)
+
+    @patch("daily_report.requests.post")
+    def test_analyze_portfolio_reports_missing_api_key_without_calling_provider(self, post_mock):
+        analysis = analyze_portfolio([], [], api_key="")
+
+        self.assertIn("GEMINI_API_KEY", analysis.warning)
+        post_mock.assert_not_called()
+
+        html = render_dashboard([], analysis=analysis)
+        self.assertIn("configura el secreto GEMINI_API_KEY", html)
+
+    @patch("daily_report.requests.post")
+    def test_analyze_portfolio_shows_gemini_http_error_without_exposing_api_key(self, post_mock):
+        response = SimpleNamespace(
+            status_code=429,
+            json=lambda: {"error": {"message": "Quota exceeded"}},
+        )
+        post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
+            response=response
+        )
+
+        analysis = analyze_portfolio([], [], api_key="secret-test-key")
+
+        self.assertIn("HTTP 429", analysis.warning)
+        self.assertIn("Quota exceeded", analysis.warning)
+        self.assertNotIn("secret-test-key", analysis.warning)
 
 
 if __name__ == "__main__":

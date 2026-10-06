@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import logging
 import math
 import os
@@ -12,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -24,6 +25,8 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 TIMEZONE = ZoneInfo(os.getenv("REPORT_TIMEZONE", "Europe/Madrid"))
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_HEADLINES = 4
 MAX_WORKERS = 8
 PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
@@ -69,6 +72,7 @@ class Quote:
     analyst_consensus: str | None = None
     analyst_count: int | None = None
     target_mean_eur: float | None = None
+    sector: str | None = None
     warning: str | None = None
 
 
@@ -108,6 +112,18 @@ class PortfolioPosition:
     current_value_eur: float | None = None
     max_profit_eur: float | None = None
     max_return_pct: float | None = None
+    warning: str | None = None
+
+
+@dataclass
+class PortfolioAnalysis:
+    portfolio_assessment: str | None = None
+    diversification: str | None = None
+    recommended_changes: str | None = None
+    top_buys: list[dict[str, str]] = field(default_factory=list)
+    sell_candidates: list[dict[str, str]] = field(default_factory=list)
+    market_context: str | None = None
+    risks: list[str] = field(default_factory=list)
     warning: str | None = None
 
 
@@ -303,6 +319,7 @@ def fetch_quote(company: Company) -> Quote:
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
         target_mean_eur=_finite_float(target_mean, multiplier=fx_rate),
+        sector=(str(info["sector"]).strip() if info.get("sector") else None),
         warning=(
             None
             if (
@@ -478,6 +495,267 @@ def fetch_portfolio(
         return list(executor.map(fetch_position, assets))
 
 
+def _analysis_inputs(
+    reports: list[StockReport],
+    portfolio: list[PortfolioPosition],
+) -> dict[str, Any]:
+    reports_by_ticker = {
+        report.company.ticker: report
+        for report in reports
+        if report.company.ticker
+    }
+    reports_by_name = {report.company.name.casefold(): report for report in reports}
+    portfolio_data = []
+    for position in portfolio:
+        report = reports_by_ticker.get(position.asset.ticker) or reports_by_name.get(
+            position.asset.name.casefold()
+        )
+        quote = report.quote if report else Quote()
+        portfolio_data.append(
+            {
+                "ticker": position.asset.ticker,
+                "name": position.asset.name,
+                "quantity": position.asset.shares,
+                "current_price_eur": position.prices_eur.get("Hoy"),
+                "current_value_eur": position.current_value_eur,
+                "daily_change_pct": quote.daily_change_pct,
+                "peg": quote.peg_ratio,
+                "analyst_consensus": quote.analyst_consensus,
+                "analyst_target_eur": quote.target_mean_eur,
+            }
+        )
+
+    watchlist = []
+    for report in reports:
+        quote = report.quote
+        watchlist.append(
+            {
+                "ticker": report.company.ticker,
+                "name": report.company.name,
+                "price_eur": quote.current_price_eur,
+                "daily_change_pct": quote.daily_change_pct,
+                "news_sentiment": (
+                    classify_sentiment(report.news_sentiment)[0]
+                    if report.news_sentiment is not None
+                    else None
+                ),
+                "news_sentiment_score": report.news_sentiment,
+                "peg": quote.peg_ratio,
+                "analyst_consensus": quote.analyst_consensus,
+                "analyst_target_eur": quote.target_mean_eur,
+            }
+        )
+
+    summary = executive_summary(reports)
+    sector_changes: dict[str, list[float]] = {}
+    for report in reports:
+        if report.quote.sector and report.quote.daily_change_pct is not None:
+            sector_changes.setdefault(report.quote.sector, []).append(
+                report.quote.daily_change_pct
+            )
+    sector_performance = [
+        {
+            "sector": sector,
+            "average_daily_change_pct": fmean(changes),
+            "companies": len(changes),
+        }
+        for sector, changes in sector_changes.items()
+    ]
+    sector_performance.sort(
+        key=lambda item: item["average_daily_change_pct"], reverse=True
+    )
+    observed_sectors = len(sector_performance)
+
+    return {
+        "portfolio": portfolio_data,
+        "watchlist": watchlist,
+        "market_context": {
+            "global_news_sentiment": summary["sentiment_label"],
+            "global_news_sentiment_score": summary["sentiment_score"],
+            "companies_with_news": summary["companies_with_news"],
+            "sector_performance": sector_performance,
+            "strongest_followed_sectors": sector_performance[:3],
+            "weakest_followed_sectors": list(reversed(sector_performance[-3:])),
+            "sector_data_note": (
+                "Promedios del cambio diario de las empresas seguidas con sector disponible; "
+                "no son índices sectoriales de mercado."
+                if observed_sectors
+                else "No se recibieron sectores de Yahoo Finance."
+            ),
+        },
+    }
+
+
+def _build_analysis_prompt(inputs: dict[str, Any]) -> str:
+    serialized_inputs = json.dumps(inputs, ensure_ascii=False, allow_nan=False)
+    return f"""Eres un analista financiero prudente. Analiza exclusivamente los datos de entrada y responde en español.
+
+Tareas:
+1. Analiza la cartera actual, sus concentraciones, solapamientos y diversificación geográfica/sectorial.
+2. Explica qué cambios considerarías y por qué, distinguiendo hechos de inferencias.
+3. Clasifica y ordena las 3 a 5 mejores candidatas de compra de la lista de seguimiento, si hay suficientes datos; usa únicamente tickers de esa lista. Si los datos no bastan para recomendar 3, explica la limitación.
+4. Señala posibles ventas únicamente entre los tickers que ya están en cartera. Si no hay una razón basada en los datos para vender, devuelve una lista vacía.
+5. Usa el sentimiento agregado y los sectores seguidos más fuertes/débiles cuando estén disponibles. Son promedios de la lista seguida, no índices de mercado. Si falta un dato, indícalo en lugar de inventarlo.
+6. Considera precio, cambio diario, sentimiento de noticias, PEG, consenso y objetivos analistas cuando existan. No presentes el consenso ni el sentimiento como garantías.
+
+Devuelve solo un objeto JSON válido, sin Markdown, con esta forma exacta:
+{{
+  "portfolio_assessment": "resumen del estado de la cartera",
+  "diversification": "evaluación de diversificación y solapamientos",
+  "recommended_changes": "cambios posibles y sus motivos",
+  "top_buys": [{{"ticker": "TICKER", "name": "nombre", "reason": "motivo y riesgos"}}],
+  "sell_candidates": [{{"ticker": "TICKER", "name": "nombre", "reason": "motivo y riesgos"}}],
+  "market_context": "lectura del sentimiento global y sectores disponibles",
+  "risks": ["limitación o riesgo relevante"]
+}}
+
+Es un análisis informativo, no asesoramiento financiero personalizado. El horizonte temporal, tolerancia al riesgo, objetivos y situación fiscal del usuario no están disponibles. No inventes precios ni hechos externos y no afirmes conocer el futuro.
+
+Datos actuales:
+{serialized_inputs}"""
+
+
+def analyze_portfolio(
+    reports: list[StockReport],
+    portfolio: list[PortfolioPosition],
+    api_key: str | None = None,
+    model: str = GEMINI_MODEL,
+) -> PortfolioAnalysis:
+    analysis = PortfolioAnalysis()
+    api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        analysis.warning = (
+            "Análisis IA no disponible: configura el secreto GEMINI_API_KEY "
+            "en GitHub Actions o la variable de entorno local."
+        )
+        logging.warning("%s", analysis.warning)
+        return analysis
+
+    if not model or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in model):
+        analysis.warning = "Análisis IA no disponible: el nombre del modelo Gemini no es válido."
+        logging.error("%s", analysis.warning)
+        return analysis
+
+    inputs = _analysis_inputs(reports, portfolio)
+    request_body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": _build_analysis_prompt(inputs)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.3,
+            "responseMimeType": "application/json",
+        },
+    }
+    try:
+        response = requests.post(
+            f"{GEMINI_API_URL}/{quote(model, safe='')}:generateContent",
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            json=request_body,
+            timeout=(10, 45),
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        status = (
+            f" (HTTP {error.response.status_code})"
+            if isinstance(error, requests.HTTPError) and error.response is not None
+            else ""
+        )
+        provider_message = ""
+        if isinstance(error, requests.HTTPError) and error.response is not None:
+            try:
+                provider_error = error.response.json().get("error", {})
+                provider_message = (
+                    f" {provider_error['message']}"
+                    if isinstance(provider_error, dict) and provider_error.get("message")
+                    else ""
+                )
+            except (ValueError, AttributeError) as detail_error:
+                provider_message = (
+                    f" (no se pudo leer el detalle del proveedor: "
+                    f"{type(detail_error).__name__})"
+                )
+        analysis.warning = (
+            f"Análisis IA no disponible{status}: error de conexión con Gemini."
+            f"{provider_message}"
+        )
+        logging.warning("%s (%s)", analysis.warning, type(error).__name__)
+        return analysis
+
+    try:
+        response_body = response.json()
+        text = "".join(
+            part["text"]
+            for part in response_body["candidates"][0]["content"]["parts"]
+            if "text" in part
+        )
+        result = json.loads(text)
+        if not isinstance(result, dict):
+            raise ValueError("la respuesta no es un objeto JSON")
+        required_strings = (
+            "portfolio_assessment",
+            "diversification",
+            "recommended_changes",
+            "market_context",
+        )
+        if any(not isinstance(result.get(key), str) for key in required_strings):
+            raise ValueError("faltan campos de texto obligatorios")
+        for key in ("top_buys", "sell_candidates", "risks"):
+            if not isinstance(result.get(key), list):
+                raise ValueError(f"el campo {key} no es una lista")
+        if any(
+            not isinstance(item, dict)
+            or any(not isinstance(item.get(field), str) for field in ("ticker", "name", "reason"))
+            for key in ("top_buys", "sell_candidates")
+            for item in result[key]
+        ):
+            raise ValueError("las recomendaciones tienen un formato no válido")
+        if any(not isinstance(item, str) for item in result["risks"]):
+            raise ValueError("los riesgos tienen un formato no válido")
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        analysis.warning = (
+            "Análisis IA no disponible: Gemini devolvió una respuesta incompleta "
+            "o no válida."
+        )
+        logging.warning("%s (%s)", analysis.warning, error)
+        return analysis
+
+    allowed_buys = {
+        report.company.ticker
+        for report in reports
+        if report.company.ticker
+    }
+    allowed_sells = {position.asset.ticker for position in portfolio}
+    invalid_recommendations = False
+    analysis.top_buys = [
+        item for item in result["top_buys"] if item["ticker"] in allowed_buys
+    ][:5]
+    analysis.sell_candidates = [
+        item for item in result["sell_candidates"] if item["ticker"] in allowed_sells
+    ]
+    invalid_recommendations = (
+        len(analysis.top_buys) != min(len(result["top_buys"]), 5)
+        or len(analysis.sell_candidates) != len(result["sell_candidates"])
+    )
+    analysis.portfolio_assessment = result["portfolio_assessment"]
+    analysis.diversification = result["diversification"]
+    analysis.recommended_changes = result["recommended_changes"]
+    analysis.market_context = result["market_context"]
+    analysis.risks = result["risks"]
+    if invalid_recommendations:
+        analysis.risks.append(
+            "Se omitieron recomendaciones que no correspondían a tickers de la "
+            "lista de seguimiento o de la cartera."
+        )
+        logging.warning("Gemini devolvió recomendaciones fuera de los tickers autorizados.")
+    return analysis
+
+
 def collect_reports(
     companies: tuple[Company, ...] = COMPANIES,
     report_date: date | None = None,
@@ -618,6 +896,61 @@ def _portfolio_value(value: float | None, kind: str) -> str:
     return f"<td>{_portfolio_cell(value, ' €')}</td>"
 
 
+def _analysis_paragraph(value: str | None) -> str:
+    return _esc(value or "Sin datos en la respuesta.").replace("\n", "<br>")
+
+
+def _analysis_recommendations(
+    recommendations: list[dict[str, str]],
+    empty_text: str,
+) -> str:
+    if not recommendations:
+        return f"<li>{_esc(empty_text)}</li>"
+    return "".join(
+        f"<li><strong>{_esc(item['ticker'])} · {_esc(item['name'])}</strong>"
+        f"<p>{_analysis_paragraph(item['reason'])}</p></li>"
+        for item in recommendations
+    )
+
+
+def _analysis_section(analysis: PortfolioAnalysis | None) -> str:
+    if analysis is None:
+        return ""
+    if analysis.warning:
+        content = (
+            '<div class="analysis-warning" role="status">'
+            f"{_esc(analysis.warning)}</div>"
+        )
+    else:
+        risks_html = "".join(
+            f"<li>{_analysis_paragraph(risk)}</li>" for risk in analysis.risks
+        ) or "<li>No se señalaron riesgos adicionales.</li>"
+        content = (
+            '<div class="analysis-grid">'
+            f'<article><h3>Evaluación de la cartera</h3><p>{_analysis_paragraph(analysis.portfolio_assessment)}</p></article>'
+            f'<article><h3>Diversificación</h3><p>{_analysis_paragraph(analysis.diversification)}</p></article>'
+            f'<article><h3>Cambios posibles</h3><p>{_analysis_paragraph(analysis.recommended_changes)}</p></article>'
+            f'<article><h3>Contexto de mercado</h3><p>{_analysis_paragraph(analysis.market_context)}</p></article>'
+            "</div>"
+            '<div class="analysis-recommendations">'
+            "<div><h3>Mejores candidatas de compra</h3><ol>"
+            f"{_analysis_recommendations(analysis.top_buys, 'No hay candidatas suficientes con los datos actuales.')}"
+            "</ol></div>"
+            "<div><h3>Posibles ventas de la cartera</h3><ul>"
+            f"{_analysis_recommendations(analysis.sell_candidates, 'No se identificaron posiciones con motivos suficientes para vender.')}"
+            "</ul></div></div>"
+            f'<div class="analysis-risks"><h3>Riesgos y limitaciones</h3><ul>{risks_html}</ul></div>'
+        )
+    return (
+        '<section aria-labelledby="ai-analysis-title">'
+        '<div class="section-heading"><h2 id="ai-analysis-title">Análisis de cartera con Gemini Flash</h2>'
+        '<span>Generado con los datos de esta actualización</span></div>'
+        f'<div class="analysis-panel">{content}'
+        '<p class="portfolio-note">Análisis informativo generado por IA; no constituye asesoramiento financiero personalizado. '
+        "Puede contener errores y no conoce tus objetivos, horizonte ni tolerancia al riesgo.</p></div></section>"
+    )
+
+
 SORT_SCRIPT = """<script>
 (() => {
   const grid = document.getElementById('stock-grid');
@@ -715,6 +1048,7 @@ def render_dashboard(
     reports: list[StockReport],
     generated_at: datetime | None = None,
     portfolio: list[PortfolioPosition] | None = None,
+    analysis: PortfolioAnalysis | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     portfolio = portfolio or []
@@ -945,6 +1279,18 @@ def render_dashboard(
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
+    .analysis-panel {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; }}
+    .analysis-warning {{ border: 1px solid #fb923c66; border-radius: 10px; background: #fb923c12; color: #fdba74; padding: 12px; }}
+    .analysis-grid, .analysis-recommendations {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; }}
+    .analysis-grid article, .analysis-recommendations > div, .analysis-risks {{ border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 13px; }}
+    .analysis-panel h3 {{ margin: 0 0 7px; font-size: 14px; }}
+    .analysis-panel p, .analysis-panel li {{ color: var(--muted); font-size: 13px; }}
+    .analysis-panel p {{ margin: 0; }}
+    .analysis-recommendations, .analysis-risks {{ margin-top: 12px; }}
+    .analysis-recommendations ol, .analysis-recommendations ul, .analysis-risks ul {{ margin: 0; padding-left: 20px; }}
+    .analysis-recommendations li + li, .analysis-risks li + li {{ margin-top: 9px; }}
+    .analysis-recommendations strong {{ color: var(--text); }}
+    .analysis-recommendations li p {{ margin-top: 3px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 15px; }}
     .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; }}
     .card-top {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
@@ -1032,6 +1378,7 @@ def render_dashboard(
         {portfolio_warning_html}
       </div>
     </section>
+    {_analysis_section(analysis)}
     <section aria-labelledby="stocks-title">
       <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2>
         <select id="sort-select" class="sort-select" aria-label="Ordenar la lista de seguimiento" aria-controls="stock-grid">
@@ -1042,7 +1389,7 @@ def render_dashboard(
         </select></div>
       <div class="grid" id="stock-grid">{"".join(cards)}</div>
     </section>
-    <footer>Fuentes: Google News RSS, Google Translate y Yahoo Finance (vía yfinance). Datos informativos, no asesoramiento financiero.</footer>
+    <footer>Fuentes: Google News RSS, Google Translate, Yahoo Finance (vía yfinance) y Gemini API. Datos informativos, no asesoramiento financiero.</footer>
   </main>
 {SORT_SCRIPT}
 {PORTFOLIO_SCRIPT}
@@ -1066,7 +1413,8 @@ def main() -> int:
     args = build_parser().parse_args()
     reports = collect_reports()
     portfolio = fetch_portfolio()
-    report_html = render_dashboard(reports, portfolio=portfolio)
+    analysis = analyze_portfolio(reports, portfolio)
+    report_html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as output_file:

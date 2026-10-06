@@ -34,6 +34,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Generate daily dashboard
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           mkdir -p public
           # Genera el reporte directamente en la carpeta public como index.html
