@@ -1,6 +1,6 @@
 # Radar bursátil diario
 
-Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización, ratio PEG, consenso de analistas y precio objetivo de Yahoo Finance cuando están disponibles. Incluye además la cartera configurada en `PORTFOLIO`, con cierres históricos, rendimientos por periodo y rendimiento máximo. No requiere API keys.
+Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización, ratios PEG y PER, consenso de analistas y precio objetivo de Yahoo Finance cuando están disponibles. Incluye además la cartera configurada en `PORTFOLIO`, con cierres históricos, rendimientos por periodo y rendimiento máximo seleccionables. No requiere API keys.
 
 ## Ejecución local
 
@@ -29,6 +29,7 @@ En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de des
 
 - Google News RSS proporciona titulares; solo se conservan los publicados en la fecha local del informe. Google Translate muestra sus traducciones al español en los titulares clave y en las tarjetas; si la traducción no está disponible, se conserva el titular original y se indica el aviso.
 - VADER puntúa el tono del titular original. La señal alcista/neutral/bajista es una heurística de sentimiento, no una predicción ni asesoramiento.
-- Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, ratio PEG, consenso y precio objetivo cuando el proveedor los entrega. El PEG se muestra en verde (< 1,0), naranja (1,0–1,5) y rojo (> 1,5), y sin color si falta o es negativo; es una referencia informativa, no una recomendación de inversión. El precio mostrado es la cotización disponible al generar ese informe; los datos pueden faltar o tener retraso según el proveedor/mercado. Los errores y datos ausentes se indican en cada tarjeta.
+- Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, ratios PEG y PER (TTM), consenso y precio objetivo cuando el proveedor los entrega. El PEG se muestra en verde (< 1,0), naranja (1,0–1,5) y rojo (> 1,5), y sin color si falta o es negativo; ambos ratios son referencias informativas, no recomendaciones de inversión. El precio mostrado es la cotización disponible al generar ese informe; los datos pueden faltar o tener retraso según el proveedor/mercado. Los errores y datos ausentes se indican en cada tarjeta.
 - Se resume el consenso por empresa. La cartera propia es una lista estática definida por el usuario; no se consultan ni infieren las tenencias internas de fondos a partir de recomendaciones.
 - El desplegable de la lista de seguimiento reordena las tarjetas en el navegador (rendimiento diario, PEG, consenso o sentimiento); las empresas sin dato van siempre al final.
+- En la tabla de cartera, los selectores de periodo y métrica cambian entre cierres/rendimientos de 1D, 1W, 1M, 6M y 1Y, o ganancia/rendimiento MAX; las columnas de activo, posición, inversión base, precio actual y valor actual permanecen.

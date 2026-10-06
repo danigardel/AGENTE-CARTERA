@@ -82,11 +82,13 @@ class SentimentTests(unittest.TestCase):
         ticker_mock.return_value.get_info.return_value = {
             "currency": "USD",
             "pegRatio": 1.15,
+            "trailingPE": 28.5,
         }
 
         quote = fetch_quote(Company("Example Co", "EX"))
 
         self.assertEqual(quote.peg_ratio, 1.15)
+        self.assertEqual(quote.pe_ratio, 28.5)
         self.assertIsNone(quote.warning)
 
     @patch("daily_report.get_fx_rate", return_value=1.0)
@@ -155,6 +157,7 @@ class SentimentTests(unittest.TestCase):
                     analyst_count=8,
                     target_mean_eur=123.45,
                     peg_ratio=1.15,
+                    pe_ratio=27.4,
                 ),
                 news_sentiment=0.7,
             ),
@@ -176,6 +179,9 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("el PEG es una referencia informativa, no una recomendación de inversión.", html)
         self.assertIn('<span title="Price/Earnings-to-Growth; ratio informativo">PEG</span>', html)
         self.assertIn('<strong class="text-orange">1.15</strong>', html)
+        self.assertIn('<span title="PER basado en beneficios de los últimos doce meses">PER (TTM)</span>', html)
+        self.assertIn('<span title="PER basado en beneficios de los últimos doce meses">PER (TTM)</span><strong>27.40</strong>', html)
+        self.assertIn("<strong>—</strong></div>", html)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;", html)
         self.assertIn('<section aria-labelledby="portfolio-title">', html)
         self.assertLess(html.index("Mi cartera"), html.index("Lista de seguimiento"))
@@ -282,10 +288,16 @@ class SentimentTests(unittest.TestCase):
 
         html = render_dashboard([], portfolio=[position])
 
-        self.assertIn("<th scope=\"col\">Cierre 1D</th>", html)
-        self.assertIn("<th scope=\"col\">Rend. 1Y</th>", html)
-        self.assertIn("<td>120.00 €</td>", html)
-        self.assertIn("+20.00%</td>", html)
+        self.assertIn('<th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>', html)
+        self.assertIn('data-portfolio-period="1D" data-portfolio-kind="close">110.00 €</td>', html)
+        self.assertIn('data-portfolio-period="1Y" data-portfolio-kind="close">70.00 €</td>', html)
+        self.assertIn('data-portfolio-period="1W" data-portfolio-kind="return" class="text-bullish">+20.00%', html)
+        self.assertIn('data-portfolio-period="MAX" data-portfolio-kind="profit" class="text-bullish">80.00 €', html)
+        self.assertIn('<select id="portfolio-period" class="sort-select">', html)
+        self.assertIn('<option value="MAX">MAX</option>', html)
+        self.assertIn("portfolio-period", html)
+        self.assertIn("portfolio-metric", html)
+        self.assertIn('<th scope="col">Valor actual</th>', html)
         self.assertIn("80.00 €", html)
 
 

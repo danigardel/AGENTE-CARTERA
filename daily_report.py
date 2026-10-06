@@ -65,6 +65,7 @@ class Quote:
     daily_change_pct: float | None = None
     daily_change_abs_eur: float | None = None
     peg_ratio: float | None = None
+    pe_ratio: float | None = None
     analyst_consensus: str | None = None
     analyst_count: int | None = None
     target_mean_eur: float | None = None
@@ -289,6 +290,7 @@ def fetch_quote(company: Company) -> Quote:
     if peg_ratio is None:
         peg_ratio = info.get("trailingPegRatio")
     peg_ratio_value = _finite_float(peg_ratio)
+    pe_ratio_value = _finite_float(info.get("trailingPE"))
     recommendation = info.get("recommendationKey")
     analyst_count = info.get("numberOfAnalystOpinions")
     
@@ -297,6 +299,7 @@ def fetch_quote(company: Company) -> Quote:
         daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
         daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
         peg_ratio=peg_ratio_value,
+        pe_ratio=pe_ratio_value,
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
         target_mean_eur=_finite_float(target_mean, multiplier=fx_rate),
@@ -307,8 +310,9 @@ def fetch_quote(company: Company) -> Quote:
                 or daily_change_pct is not None
                 or current_price is not None
                 or peg_ratio_value is not None
+                or pe_ratio_value is not None
             )
-            else "Yahoo Finance no devolvió cotización, consenso ni PEG"
+            else "Yahoo Finance no devolvió cotización, consenso, PEG ni PER"
         ),
     )
 
@@ -601,6 +605,19 @@ def _portfolio_change(value: float | None) -> str:
     return f'<td class="{css_class}">{sign}{_format_number(value)}%</td>'
 
 
+def _portfolio_value(value: float | None, kind: str) -> str:
+    if kind == "return":
+        return _portfolio_change(value)
+    if kind == "profit":
+        css_class = (
+            "text-bullish" if value is not None and value > 0
+            else "text-bearish" if value is not None and value < 0
+            else ""
+        )
+        return f'<td class="{css_class}">{_portfolio_cell(value, " €")}</td>'
+    return f"<td>{_portfolio_cell(value, ' €')}</td>"
+
+
 SORT_SCRIPT = """<script>
 (() => {
   const grid = document.getElementById('stock-grid');
@@ -644,6 +661,52 @@ SORT_SCRIPT = """<script>
 
   select.addEventListener('change', () => sortCards(select.value));
   sortCards(select.value);
+})();
+</script>"""
+
+PORTFOLIO_SCRIPT = """<script>
+(() => {
+  const periodSelect = document.getElementById('portfolio-period');
+  const metricSelect = document.getElementById('portfolio-metric');
+  const heading = document.getElementById('portfolio-selected-heading');
+  const cells = Array.from(document.querySelectorAll('[data-portfolio-period]'));
+  if (!periodSelect || !metricSelect || !heading) return;
+
+  const historicalOptions = [
+    ['close', 'Precio de cierre'],
+    ['return', 'Rendimiento (%)'],
+  ];
+  const maxOptions = [
+    ['profit', 'Ganancia absoluta (€)'],
+    ['return', 'Rendimiento (%)'],
+  ];
+
+  function updatePortfolioView() {
+    const period = periodSelect.value;
+    const options = period === 'MAX' ? maxOptions : historicalOptions;
+    const previousValue = metricSelect.value;
+    metricSelect.replaceChildren(...options.map(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }));
+    metricSelect.value = options.some(([value]) => value === previousValue)
+      ? previousValue
+      : options[0][0];
+    const kind = metricSelect.value;
+    heading.textContent = period === 'MAX'
+      ? (kind === 'profit' ? 'Ganancia MAX' : 'Rendimiento MAX')
+      : (kind === 'close' ? `Cierre ${period}` : `Rendimiento ${period}`);
+    cells.forEach((cell) => {
+      cell.hidden = cell.dataset.portfolioPeriod !== period
+        || cell.dataset.portfolioKind !== kind;
+    });
+  }
+
+  periodSelect.addEventListener('change', updatePortfolioView);
+  metricSelect.addEventListener('change', updatePortfolioView);
+  updatePortfolioView();
 })();
 </script>"""
 
@@ -698,6 +761,7 @@ def render_dashboard(
         )
         peg_text = _format_number(quote.peg_ratio)
         peg_class = classify_peg(quote.peg_ratio)
+        pe_text = _format_number(quote.pe_ratio)
         analyst_text = quote.analyst_consensus or "Sin datos"
         if quote.analyst_count:
             analyst_text += f" · {quote.analyst_count} analistas"
@@ -742,6 +806,8 @@ def render_dashboard(
             f'<div><span>Precio objetivo</span><strong>{_esc(target_text)}</strong></div>'
             f'<div><span title="Price/Earnings-to-Growth; ratio informativo">PEG</span>'
             f'<strong class="{peg_class}">{_esc(peg_text)}</strong></div>'
+            f'<div><span title="PER basado en beneficios de los últimos doce meses">PER (TTM)</span>'
+            f'<strong>{_esc(pe_text)}</strong></div>'
             "</div>"
             f"{private_note}<h3>Titulares clave</h3><ul class=\"headlines\">{headline_list}</ul>"
             f"{warnings_html}</article>"
@@ -769,13 +835,20 @@ def render_dashboard(
         f"<td>{_portfolio_cell(position.prices_eur.get('Hoy'), ' €')}</td>"
         f"<td>{_portfolio_cell(position.current_value_eur, ' €')}</td>"
         + "".join(
-            f"<td>{_portfolio_cell(position.prices_eur.get(period), ' €')}</td>"
-            + _portfolio_change(position.returns_pct.get(period))
+            _portfolio_value(position.prices_eur.get(period), "close").replace(
+                "<td", f'<td data-portfolio-period="{period}" data-portfolio-kind="close"'
+            )
+            + _portfolio_value(position.returns_pct.get(period), "return").replace(
+                "<td", f'<td data-portfolio-period="{period}" data-portfolio-kind="return"'
+            )
             for period, _ in PORTFOLIO_PERIODS
         )
-        + f'<td class="{("text-bullish" if position.max_profit_eur is not None and position.max_profit_eur > 0 else "text-bearish" if position.max_profit_eur is not None and position.max_profit_eur < 0 else "")}">'
-        f'{_portfolio_cell(position.max_profit_eur, " €")}</td>'
-        + _portfolio_change(position.max_return_pct)
+        + _portfolio_value(position.max_profit_eur, "profit").replace(
+            "<td", '<td data-portfolio-period="MAX" data-portfolio-kind="profit"'
+        )
+        + _portfolio_value(position.max_return_pct, "return").replace(
+            "<td", '<td data-portfolio-period="MAX" data-portfolio-kind="return"'
+        )
         + "</tr>"
         for position in portfolio
     )
@@ -859,13 +932,17 @@ def render_dashboard(
     .key-headlines li {{ background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }}
     .key-headlines span {{ display: block; color: var(--muted); margin-top: 7px; font-size: 12px; }}
     .portfolio-panel {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 15px; }}
+    .portfolio-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }}
+    .portfolio-controls label {{ color: var(--muted); font-size: 12px; }}
+    .portfolio-controls .sort-select {{ min-width: 125px; }}
     .portfolio-total {{ color: var(--muted); font-size: 13px; margin: 0 0 12px; }}
     .portfolio-table-wrap {{ overflow-x: auto; }}
-    .portfolio-table {{ border-collapse: collapse; min-width: 1500px; width: 100%; font-size: 12px; white-space: nowrap; }}
+    .portfolio-table {{ border-collapse: collapse; min-width: 900px; width: 100%; font-size: 12px; white-space: nowrap; }}
     .portfolio-table th, .portfolio-table td {{ border-bottom: 1px solid var(--line); padding: 9px 10px; text-align: right; }}
     .portfolio-table thead th {{ color: var(--muted); font-size: 10px; line-height: 1.35; position: sticky; top: 0; background: var(--panel); }}
     .portfolio-table th:first-child, .portfolio-table td:first-child {{ text-align: left; }}
     .portfolio-table tbody th {{ font-weight: 650; }}
+    .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 15px; }}
@@ -892,7 +969,8 @@ def render_dashboard(
     @media (max-width: 720px) {{ .shell {{ padding: 25px 15px 40px; }} header {{ display: block; }}
       .updated {{ text-align: left; margin-top: 12px; }} .summary {{ grid-template-columns: 1fr; gap: 9px; }}
       .summary-card {{ min-height: 0; }} .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }}
-      .metrics div {{ padding: 8px; }} .sort-select {{ width: 100%; }} }}
+      .metrics div {{ padding: 8px; }} .sort-select {{ width: 100%; }}
+      .portfolio-controls .sort-select {{ width: auto; }} }}
   </style>
 </head>
 <body>
@@ -925,7 +1003,19 @@ def render_dashboard(
     </section>
     <section aria-labelledby="portfolio-title">
       <div class="section-heading"><h2 id="portfolio-title">Mi cartera</h2>
-        <span>Rendimientos calculados en euros</span></div>
+        <div class="portfolio-controls">
+          <label for="portfolio-period">Periodo</label>
+          <select id="portfolio-period" class="sort-select">
+            <option value="1D" selected>1D</option><option value="1W">1W</option>
+            <option value="1M">1M</option><option value="6M">6M</option>
+            <option value="1Y">1Y</option><option value="MAX">MAX</option>
+          </select>
+          <label for="portfolio-metric">Mostrar</label>
+          <select id="portfolio-metric" class="sort-select">
+            <option value="return" selected>Rendimiento (%)</option>
+            <option value="close">Precio de cierre</option>
+          </select>
+        </div></div>
       <div class="portfolio-panel">
         {portfolio_total}
         <div class="portfolio-table-wrap">
@@ -933,17 +1023,12 @@ def render_dashboard(
             <thead><tr>
               <th scope="col">Activo</th><th scope="col">Posición</th><th scope="col">Inversión base</th>
               <th scope="col">Precio actual</th><th scope="col">Valor actual</th>
-              <th scope="col">Cierre 1D</th><th scope="col">Rend. 1D</th>
-              <th scope="col">Cierre 1W</th><th scope="col">Rend. 1W</th>
-              <th scope="col">Cierre 1M</th><th scope="col">Rend. 1M</th>
-              <th scope="col">Cierre 6M</th><th scope="col">Rend. 6M</th>
-              <th scope="col">Cierre 1Y</th><th scope="col">Rend. 1Y</th>
-              <th scope="col">Ganancia MAX</th><th scope="col">Rend. MAX</th>
+              <th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>
             </tr></thead>
-            <tbody>{portfolio_rows or '<tr><td colspan="17">No hay posiciones definidas.</td></tr>'}</tbody>
+            <tbody>{portfolio_rows or '<tr><td colspan="6">No hay posiciones definidas.</td></tr>'}</tbody>
           </table>
         </div>
-        <p class="portfolio-note">Cierres históricos de Yahoo Finance. Los tickers estadounidenses se convierten a EUR con el tipo de cambio USD/EUR de cada fecha; se usa el último cierre disponible en o antes de cada periodo de calendario. MAX se calcula frente a la inversión base fija indicada.</p>
+        <p class="portfolio-note">Selecciona periodo y métrica para ver cierres históricos, rendimiento porcentual o ganancia MAX. Cierres históricos de Yahoo Finance; los tickers estadounidenses se convierten a EUR con el cambio USD/EUR de cada fecha.</p>
         {portfolio_warning_html}
       </div>
     </section>
@@ -960,6 +1045,7 @@ def render_dashboard(
     <footer>Fuentes: Google News RSS, Google Translate y Yahoo Finance (vía yfinance). Datos informativos, no asesoramiento financiero.</footer>
   </main>
 {SORT_SCRIPT}
+{PORTFOLIO_SCRIPT}
 </body>
 </html>
 """
