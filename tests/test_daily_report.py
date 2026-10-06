@@ -3,19 +3,25 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pandas as pd
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from daily_report import (
     Company,
     Headline,
+    PortfolioAsset,
+    PortfolioPosition,
+    PORTFOLIO_PERIODS,
     Quote,
     StockReport,
     classify_peg,
     classify_sentiment,
     executive_summary,
+    fetch_portfolio,
     fetch_headlines,
     fetch_quote,
     render_dashboard,
+    translate_headline,
 )
 
 
@@ -96,6 +102,19 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(quote.peg_ratio, 2.4)
 
+    @patch("daily_report.requests.get")
+    def test_translate_headline_requests_spanish_and_joins_translation_parts(self, get_mock):
+        get_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: [[["Las acciones", "Stocks"], [" suben", " rise"]]],
+        )
+
+        translated, warning = translate_headline("Stocks rise")
+
+        self.assertEqual(translated, "Las acciones suben")
+        self.assertIsNone(warning)
+        self.assertEqual(get_mock.call_args.kwargs["params"]["tl"], "es")
+
     def test_summary_aggregates_news_and_analyst_consensus(self):
         reports = [
             StockReport(
@@ -123,6 +142,7 @@ class SentimentTests(unittest.TestCase):
             source="Example & Co",
             published=datetime(2026, 9, 28, 13, 30, tzinfo=timezone.utc),
             sentiment=0.7,
+            title_es="Titular traducido",
         )
         reports = [
             StockReport(
@@ -146,6 +166,8 @@ class SentimentTests(unittest.TestCase):
         )
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>alert", html)
+        self.assertIn("Titular traducido", html)
+        self.assertIn('Original: &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;', html)
         self.assertIn("Example &lt;Company&gt;", html)
         self.assertIn("Private Example", html)
         self.assertIn("1.25%", html)
@@ -155,6 +177,8 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('<span title="Price/Earnings-to-Growth; ratio informativo">PEG</span>', html)
         self.assertIn('<strong class="text-orange">1.15</strong>', html)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;", html)
+        self.assertIn('<section aria-labelledby="portfolio-title">', html)
+        self.assertLess(html.index("Mi cartera"), html.index("Lista de seguimiento"))
 
     def test_dashboard_styles_high_peg_as_bearish_and_missing_peg_as_unavailable(self):
         reports = [
@@ -216,6 +240,53 @@ class SentimentTests(unittest.TestCase):
         positions = [html.index(f">{ticker}</p>") for ticker in ("BEAR", "NEUT", "BULL", "NONE")]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("<span>Precio actual</span><strong>20.00 €</strong>", html)
+
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_portfolio_converts_historical_prices_and_calculates_returns(self, ticker_mock):
+        as_of = date(2025, 1, 11)
+        asset = PortfolioAsset("Example", "EX", 2, 100, "USD")
+        dates = pd.date_range("2024-01-01", "2025-01-11", freq="D")
+        stock_history = pd.DataFrame(
+            {"Close": [100.0 if day.date() == date(2025, 1, 10) else 110.0 for day in dates]},
+            index=dates,
+        )
+        fx_history = pd.DataFrame({"Close": [0.9] * len(dates)}, index=dates)
+
+        def ticker_factory(symbol):
+            history = fx_history if symbol == "USDEUR=X" else stock_history
+            return SimpleNamespace(history=lambda **_kwargs: history)
+
+        ticker_mock.side_effect = ticker_factory
+
+        positions = fetch_portfolio((asset,), as_of=as_of)
+
+        position = positions[0]
+        self.assertAlmostEqual(position.prices_eur["Hoy"], 99.0)
+        self.assertAlmostEqual(position.prices_eur["1D"], 90.0)
+        self.assertAlmostEqual(position.returns_pct["1D"], 10.0)
+        self.assertAlmostEqual(position.current_value_eur, 198.0)
+        self.assertAlmostEqual(position.max_profit_eur, 98.0)
+        self.assertAlmostEqual(position.max_return_pct, 98.0)
+        self.assertEqual(tuple(position.returns_pct), tuple(period for period, _ in PORTFOLIO_PERIODS))
+
+    def test_dashboard_renders_portfolio_price_history_and_max_returns(self):
+        asset = PortfolioAsset("Example ETF", "ETF.DE", 1.5, 100, "EUR")
+        position = PortfolioPosition(
+            asset=asset,
+            prices_eur={"Hoy": 120, "1D": 110, "1W": 100, "1M": 90, "6M": 80, "1Y": 70},
+            returns_pct={"1D": 9.09, "1W": 20, "1M": 33.33, "6M": 50, "1Y": 71.43},
+            current_value_eur=180,
+            max_profit_eur=80,
+            max_return_pct=80,
+        )
+
+        html = render_dashboard([], portfolio=[position])
+
+        self.assertIn("<th scope=\"col\">Cierre 1D</th>", html)
+        self.assertIn("<th scope=\"col\">Rend. 1Y</th>", html)
+        self.assertIn("<td>120.00 €</td>", html)
+        self.assertIn("+20.00%</td>", html)
+        self.assertIn("80.00 €", html)
 
 
 if __name__ == "__main__":

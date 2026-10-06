@@ -1,6 +1,6 @@
 # Radar bursátil diario
 
-Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización, ratio PEG, consenso de analistas y precio objetivo de Yahoo Finance cuando están disponibles. No requiere API keys.
+Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa y datos de cotización, ratio PEG, consenso de analistas y precio objetivo de Yahoo Finance cuando están disponibles. Incluye además la cartera configurada en `PORTFOLIO`, con cierres históricos, rendimientos por periodo y rendimiento máximo. No requiere API keys.
 
 ## Ejecución local
 
@@ -17,7 +17,7 @@ El archivo se crea en `dashboard.html`. Se puede elegir otra ruta:
 python daily_report.py --output public\index.html
 ```
 
-La lista está en `COMPANIES` en `daily_report.py`. Se normaliza la entrada duplicada de Palantir a una sola tarjeta. SpaceX se incluye en noticias, pero no tiene un ticker público configurado, por lo que no se muestran cotización ni consenso para ella. Neo Performance Materials utiliza `NEO.TO`; Alphabet clase A, `GOOGL`.
+La lista de seguimiento está en `COMPANIES` y la cartera fija en `PORTFOLIO`, ambas en `daily_report.py`. La cartera usa símbolos negociados en euros cuando están disponibles (EUNL.DE para iShares Core MSCI World, ASML.AS y XDWT.DE); los activos estadounidenses se convierten desde USD con el cambio histórico USD/EUR de cada fecha. Los periodos comparan el último cierre disponible en o antes de hoy menos 1, 7, 30, 180 y 365 días naturales. El rendimiento MAX usa las posiciones e inversiones base configuradas, sin depender de las fechas de compra. Se normaliza la entrada duplicada de Palantir a una sola tarjeta. SpaceX se incluye en noticias, pero no tiene un ticker público configurado, por lo que no se muestran cotización ni consenso para ella. Neo Performance Materials utiliza `NEO.TO`; Alphabet clase A, `GOOGL`.
 
 ## Automatización y GitHub Pages
 
@@ -27,8 +27,8 @@ En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de des
 
 ## Fuentes y límites
 
-- Google News RSS proporciona titulares; solo se conservan los publicados en la fecha local del informe.
-- VADER puntúa el tono de los titulares en inglés. La señal alcista/neutral/bajista es una heurística de sentimiento, no una predicción ni asesoramiento.
+- Google News RSS proporciona titulares; solo se conservan los publicados en la fecha local del informe. Google Translate muestra sus traducciones al español en los titulares clave y en las tarjetas; si la traducción no está disponible, se conserva el titular original y se indica el aviso.
+- VADER puntúa el tono del titular original. La señal alcista/neutral/bajista es una heurística de sentimiento, no una predicción ni asesoramiento.
 - Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, ratio PEG, consenso y precio objetivo cuando el proveedor los entrega. El PEG se muestra en verde (< 1,0), naranja (1,0–1,5) y rojo (> 1,5), y sin color si falta o es negativo; es una referencia informativa, no una recomendación de inversión. El precio mostrado es la cotización disponible al generar ese informe; los datos pueden faltar o tener retraso según el proveedor/mercado. Los errores y datos ausentes se indican en cada tarjeta.
-- Se resume el consenso por empresa. No se consultan tenencias ni carteras de fondos; esos datos no se infieren a partir de recomendaciones.
+- Se resume el consenso por empresa. La cartera propia es una lista estática definida por el usuario; no se consultan ni infieren las tenencias internas de fondos a partir de recomendaciones.
 - El desplegable de la lista de seguimiento reordena las tarjetas en el navegador (rendimiento diario, PEG, consenso o sentimiento); las empresas sin dato van siempre al final.

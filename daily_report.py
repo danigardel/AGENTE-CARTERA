@@ -23,8 +23,10 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 TIMEZONE = ZoneInfo(os.getenv("REPORT_TIMEZONE", "Europe/Madrid"))
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 MAX_HEADLINES = 4
 MAX_WORKERS = 8
+PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
 
 # 1. CACHÉ PARA TIPOS DE CAMBIO
 FX_CACHE: dict[str, float] = {"EUR": 1.0}
@@ -76,6 +78,7 @@ class Headline:
     source: str
     published: datetime
     sentiment: float
+    title_es: str | None = None
 
 
 @dataclass
@@ -85,6 +88,39 @@ class StockReport:
     quote: Quote = field(default_factory=Quote)
     news_sentiment: float | None = None
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PortfolioAsset:
+    name: str
+    ticker: str
+    shares: float
+    investment_eur: float
+    currency: str
+
+
+@dataclass
+class PortfolioPosition:
+    asset: PortfolioAsset
+    prices_eur: dict[str, float | None] = field(default_factory=dict)
+    returns_pct: dict[str, float | None] = field(default_factory=dict)
+    current_value_eur: float | None = None
+    max_profit_eur: float | None = None
+    max_return_pct: float | None = None
+    warning: str | None = None
+
+
+PORTFOLIO = (
+    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 1.985433, 248.52, "EUR"),
+    PortfolioAsset("ASML", "ASML.AS", 0.046588, 61.65, "EUR"),
+    PortfolioAsset("Vistra", "VST", 0.407497, 50.00, "USD"),
+    PortfolioAsset("GE Vernova", "GEV", 0.038649, 30.00, "USD"),
+    PortfolioAsset("MSCI World Information Tech.", "XDWT.DE", 0.218023, 30.00, "EUR"),
+    PortfolioAsset("Broadcom", "AVGO", 0.084104, 25.00, "USD"),
+    PortfolioAsset("NVIDIA", "NVDA", 0.098541, 17.00, "USD"),
+    PortfolioAsset("Alphabet (A)", "GOOGL", 0.038737, 12.00, "USD"),
+    PortfolioAsset("MercadoLibre", "MELI", 0.002776, 5.00, "USD"),
+)
 
 
 # LISTA DE ACCIONES ACTUALIZADA
@@ -277,6 +313,26 @@ def fetch_quote(company: Company) -> Quote:
     )
 
 
+def translate_headline(title: str) -> tuple[str | None, str | None]:
+    try:
+        response = requests.get(
+            GOOGLE_TRANSLATE_URL,
+            params={"client": "gtx", "sl": "auto", "tl": "es", "dt": "t", "q": title},
+            headers={"User-Agent": "DailyStockReport/1.0"},
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+        result = response.json()
+        translated = "".join(part[0] for part in result[0] if part and part[0])
+        if not translated:
+            raise ValueError("el servicio no devolvió una traducción")
+        return translated, None
+    except (requests.RequestException, ValueError, TypeError, IndexError) as error:
+        message = f"Traducción al español: {type(error).__name__}: {error}"
+        logging.warning("No se pudo traducir el titular %r: %s", title, message)
+        return None, message
+
+
 def _finite_float(value: Any, multiplier: float = 1.0) -> float | None:
     try:
         number = float(value) * multiplier
@@ -291,6 +347,131 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _dated_closes(history: Any) -> list[tuple[date, float]]:
+    if history is None or history.empty or "Close" not in history:
+        return []
+    closes = []
+    for timestamp, value in history["Close"].items():
+        close = _finite_float(value)
+        if close is None or close <= 0:
+            continue
+        closes.append((timestamp.date(), close))
+    return sorted(closes)
+
+
+def _close_on_or_before(
+    closes: list[tuple[date, float]], target: date
+) -> tuple[date, float] | None:
+    return next(((day, value) for day, value in reversed(closes) if day <= target), None)
+
+
+def fetch_portfolio(
+    assets: tuple[PortfolioAsset, ...] = PORTFOLIO,
+    as_of: date | None = None,
+) -> list[PortfolioPosition]:
+    as_of = as_of or datetime.now(TIMEZONE).date()
+    usd_assets = any(asset.currency == "USD" for asset in assets)
+    fx_closes: list[tuple[date, float]] = []
+    fx_warning = None
+    if usd_assets:
+        try:
+            fx_history = yf.Ticker("USDEUR=X").history(period="2y", auto_adjust=False)
+            fx_closes = _dated_closes(fx_history)
+            if not fx_closes:
+                raise ValueError("Yahoo Finance no devolvió cierres históricos")
+        except (
+            yf.exceptions.YFException,
+            requests.RequestException,
+            TimeoutError,
+            OSError,
+            ValueError,
+            KeyError,
+        ) as error:
+            fx_warning = f"Tipo de cambio USD/EUR: {type(error).__name__}: {error}"
+            logging.warning("%s", fx_warning)
+
+    def fetch_position(asset: PortfolioAsset) -> PortfolioPosition:
+        position = PortfolioPosition(
+            asset=asset,
+            prices_eur={"Hoy": None, **{period: None for period, _ in PORTFOLIO_PERIODS}},
+            returns_pct={period: None for period, _ in PORTFOLIO_PERIODS},
+        )
+        if asset.currency == "USD" and fx_warning:
+            position.warning = fx_warning
+            return position
+        try:
+            history = yf.Ticker(asset.ticker).history(period="2y", auto_adjust=False)
+            closes = _dated_closes(history)
+        except (
+            yf.exceptions.YFException,
+            requests.RequestException,
+            TimeoutError,
+            OSError,
+            ValueError,
+            KeyError,
+        ) as error:
+            position.warning = (
+                f"{asset.ticker}: {type(error).__name__}: {error}"
+            )
+            logging.warning("No se pudo obtener el histórico de %s: %s", asset.ticker, error)
+            return position
+
+        if not closes:
+            position.warning = f"{asset.ticker}: Yahoo Finance no devolvió cierres históricos"
+            logging.warning("%s", position.warning)
+            return position
+
+        targets = {"Hoy": as_of}
+        targets.update(
+            {period: as_of - timedelta(days=days) for period, days in PORTFOLIO_PERIODS}
+        )
+        for label, target in targets.items():
+            dated_close = _close_on_or_before(closes, target)
+            if dated_close is None:
+                continue
+            price_date, close = dated_close
+            if asset.currency == "USD":
+                dated_fx_rate = _close_on_or_before(fx_closes, price_date)
+                if dated_fx_rate is None:
+                    continue
+                _, fx_rate = dated_fx_rate
+                close *= fx_rate
+            position.prices_eur[label] = close
+
+        current_price = position.prices_eur["Hoy"]
+        if current_price is not None:
+            position.current_value_eur = current_price * asset.shares
+            position.max_profit_eur = position.current_value_eur - asset.investment_eur
+            position.max_return_pct = (
+                (position.current_value_eur / asset.investment_eur - 1) * 100
+            )
+        for period, _ in PORTFOLIO_PERIODS:
+            historical_price = position.prices_eur[period]
+            if current_price is not None and historical_price:
+                position.returns_pct[period] = (
+                    (current_price - historical_price) / historical_price * 100
+                )
+        if position.prices_eur["Hoy"] is None:
+            position.warning = f"{asset.ticker}: no hay un cierre convertible a euros"
+            logging.warning("%s", position.warning)
+        else:
+            missing_periods = [
+                period
+                for period, _ in PORTFOLIO_PERIODS
+                if position.prices_eur[period] is None
+            ]
+            if missing_periods:
+                position.warning = (
+                    f"{asset.ticker}: sin cierre histórico disponible para "
+                    f"{', '.join(missing_periods)}"
+                )
+                logging.warning("%s", position.warning)
+        return position
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        return list(executor.map(fetch_position, assets))
 
 
 def collect_reports(
@@ -323,6 +504,20 @@ def collect_reports(
             report.quote = task.result()
             if report.quote.warning:
                 report.warnings.append(report.quote.warning)
+
+    headline_tasks = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        for report in reports:
+            for headline in report.headlines:
+                headline_tasks[executor.submit(translate_headline, headline.title)] = (
+                    report,
+                    headline,
+                )
+        for task in as_completed(headline_tasks):
+            report, headline = headline_tasks[task]
+            headline.title_es, warning = task.result()
+            if warning and warning not in report.warnings:
+                report.warnings.append(warning)
     return reports
 
 
@@ -376,14 +571,34 @@ def _format_number(value: float | None, decimals: int = 2) -> str:
 
 def _headline_html(headline: Headline) -> str:
     label, signal = classify_sentiment(headline.sentiment)
+    display_title = headline.title_es or headline.title
+    original_title = (
+        f'<span class="headline-original">Original: {_esc(headline.title)}</span>'
+        if headline.title_es and headline.title_es != headline.title
+        else ""
+    )
     return (
         '<li class="headline">'
         f'<a href="{_esc(headline.url)}" target="_blank" rel="noopener noreferrer">'
-        f"{_esc(headline.title)}</a>"
+        f"{_esc(display_title)}</a>{original_title}"
         f'<span class="headline-meta">{_esc(headline.source)} · '
         f'{_esc(headline.published.strftime("%H:%M"))} · '
         f'<span class="text-{signal}">{label}</span></span></li>'
     )
+
+
+def _portfolio_cell(value: float | None, suffix: str = "", decimals: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{_format_number(value, decimals)}{suffix}"
+
+
+def _portfolio_change(value: float | None) -> str:
+    if value is None:
+        return '<td class="text-neutral">—</td>'
+    css_class = "text-bullish" if value > 0 else "text-bearish" if value < 0 else "text-neutral"
+    sign = "+" if value > 0 else ""
+    return f'<td class="{css_class}">{sign}{_format_number(value)}%</td>'
 
 
 SORT_SCRIPT = """<script>
@@ -436,8 +651,10 @@ SORT_SCRIPT = """<script>
 def render_dashboard(
     reports: list[StockReport],
     generated_at: datetime | None = None,
+    portfolio: list[PortfolioPosition] | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
+    portfolio = portfolio or []
     
     # ORDENACIÓN POR RENDIMIENTO DIARIO ACTUAL
     def performance_sort_key(report: StockReport) -> float:
@@ -535,9 +752,64 @@ def render_dashboard(
     ) or "Sin datos"
     key_headlines_html = "".join(
         f'<li><a href="{_esc(item.url)}" target="_blank" rel="noopener noreferrer">'
-        f"{_esc(item.title)}</a><span>{_esc(item.source)}</span></li>"
+        f"{_esc(item.title_es or item.title)}</a>"
+        + (
+            f'<span class="headline-original">Original: {_esc(item.title)}</span>'
+            if item.title_es and item.title_es != item.title
+            else ""
+        )
+        + f"<span>{_esc(item.source)}</span></li>"
         for item in summary["key_headlines"]
     ) or "<li>Aún no hay titulares con fecha de hoy.</li>"
+    portfolio_rows = "".join(
+        "<tr>"
+        f"<th scope=\"row\">{_esc(position.asset.name)}<span>{_esc(position.asset.ticker)}</span></th>"
+        f"<td>{_format_number(position.asset.shares, 6)}</td>"
+        f"<td>{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
+        f"<td>{_portfolio_cell(position.prices_eur.get('Hoy'), ' €')}</td>"
+        f"<td>{_portfolio_cell(position.current_value_eur, ' €')}</td>"
+        + "".join(
+            f"<td>{_portfolio_cell(position.prices_eur.get(period), ' €')}</td>"
+            + _portfolio_change(position.returns_pct.get(period))
+            for period, _ in PORTFOLIO_PERIODS
+        )
+        + f'<td class="{("text-bullish" if position.max_profit_eur is not None and position.max_profit_eur > 0 else "text-bearish" if position.max_profit_eur is not None and position.max_profit_eur < 0 else "")}">'
+        f'{_portfolio_cell(position.max_profit_eur, " €")}</td>'
+        + _portfolio_change(position.max_return_pct)
+        + "</tr>"
+        for position in portfolio
+    )
+    portfolio_warnings = [
+        position.warning for position in portfolio if position.warning
+    ]
+    portfolio_warning_html = (
+        '<ul class="warnings" aria-label="Avisos de datos de cartera">'
+        + "".join(f"<li>{_esc(warning)}</li>" for warning in portfolio_warnings)
+        + "</ul>"
+        if portfolio_warnings
+        else ""
+    )
+    available_positions = sum(
+        position.current_value_eur is not None for position in portfolio
+    )
+    if portfolio and available_positions == len(portfolio):
+        total_invested = sum(position.asset.investment_eur for position in portfolio)
+        total_value = sum(position.current_value_eur or 0 for position in portfolio)
+        total_profit = total_value - total_invested
+        total_return = (total_value / total_invested - 1) * 100
+        portfolio_total = (
+            f'<p class="portfolio-total">Valor actual: <strong>{_portfolio_cell(total_value, " €")}</strong>'
+            f' · Inversión base: {_portfolio_cell(total_invested, " €")}'
+            f' · Ganancia MAX: <strong>{_portfolio_cell(total_profit, " €")} '
+            f'({_portfolio_cell(total_return, "%")})</strong></p>'
+        )
+    elif portfolio:
+        portfolio_total = (
+            f'<p class="portfolio-total">Cotización disponible para {available_positions} '
+            f'de {len(portfolio)} posiciones; los totales se muestran cuando están todas disponibles.</p>'
+        )
+    else:
+        portfolio_total = '<p class="portfolio-total">No hay datos de cartera disponibles.</p>'
     warnings_count = sum(len(report.warnings) for report in reports)
 
     return f"""<!doctype html>
@@ -586,6 +858,16 @@ def render_dashboard(
     .key-headlines {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; padding: 0; list-style: none; }}
     .key-headlines li {{ background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }}
     .key-headlines span {{ display: block; color: var(--muted); margin-top: 7px; font-size: 12px; }}
+    .portfolio-panel {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 15px; }}
+    .portfolio-total {{ color: var(--muted); font-size: 13px; margin: 0 0 12px; }}
+    .portfolio-table-wrap {{ overflow-x: auto; }}
+    .portfolio-table {{ border-collapse: collapse; min-width: 1500px; width: 100%; font-size: 12px; white-space: nowrap; }}
+    .portfolio-table th, .portfolio-table td {{ border-bottom: 1px solid var(--line); padding: 9px 10px; text-align: right; }}
+    .portfolio-table thead th {{ color: var(--muted); font-size: 10px; line-height: 1.35; position: sticky; top: 0; background: var(--panel); }}
+    .portfolio-table th:first-child, .portfolio-table td:first-child {{ text-align: left; }}
+    .portfolio-table tbody th {{ font-weight: 650; }}
+    .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
+    .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 15px; }}
     .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; }}
     .card-top {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
@@ -601,6 +883,7 @@ def render_dashboard(
     .stock-card h3 {{ font-size: 13px; margin: 17px 0 7px; }}
     .headlines {{ margin: 0; padding-left: 17px; }} .headline {{ padding: 0 0 9px 1px; }}
     .headline a {{ font-size: 13px; }} .headline-meta {{ display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }}
+    .headline-original {{ display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }}
     .text-bullish {{ color: var(--green); }} .text-bearish {{ color: var(--red); }} .text-neutral {{ color: var(--yellow); }} .text-orange {{ color: var(--orange); }}
     .empty {{ color: var(--muted); font-size: 13px; list-style: none; margin-left: -17px; }}
     .warnings {{ border-top: 1px solid var(--line); color: #fbbf24; font-size: 11px; margin: 10px 0 0; padding: 9px 0 0 16px; }}
@@ -634,11 +917,35 @@ def render_dashboard(
     <p class="disclaimer"><strong>Metodología:</strong> la señal de sentimiento se calcula sobre los titulares del día con VADER;
       no es una recomendación de inversión. El PEG, consenso y objetivos provienen de Yahoo Finance cuando están disponibles;
       el PEG es una referencia informativa, no una recomendación de inversión.
-      No se dispone de datos de carteras/tenencias; no se deben interpretar las recomendaciones como posiciones de fondos.
+      La cartera mostrada se basa en posiciones configuradas manualmente; no se consultan las tenencias internas de fondos.
       Los feeds y datos pueden faltar o retrasarse.</p>
     <section aria-labelledby="key-title">
       <div class="section-heading"><h2 id="key-title">Titulares clave</h2><span>Los de mayor polaridad detectados hoy</span></div>
       <ul class="key-headlines">{key_headlines_html}</ul>
+    </section>
+    <section aria-labelledby="portfolio-title">
+      <div class="section-heading"><h2 id="portfolio-title">Mi cartera</h2>
+        <span>Rendimientos calculados en euros</span></div>
+      <div class="portfolio-panel">
+        {portfolio_total}
+        <div class="portfolio-table-wrap">
+          <table class="portfolio-table">
+            <thead><tr>
+              <th scope="col">Activo</th><th scope="col">Posición</th><th scope="col">Inversión base</th>
+              <th scope="col">Precio actual</th><th scope="col">Valor actual</th>
+              <th scope="col">Cierre 1D</th><th scope="col">Rend. 1D</th>
+              <th scope="col">Cierre 1W</th><th scope="col">Rend. 1W</th>
+              <th scope="col">Cierre 1M</th><th scope="col">Rend. 1M</th>
+              <th scope="col">Cierre 6M</th><th scope="col">Rend. 6M</th>
+              <th scope="col">Cierre 1Y</th><th scope="col">Rend. 1Y</th>
+              <th scope="col">Ganancia MAX</th><th scope="col">Rend. MAX</th>
+            </tr></thead>
+            <tbody>{portfolio_rows or '<tr><td colspan="17">No hay posiciones definidas.</td></tr>'}</tbody>
+          </table>
+        </div>
+        <p class="portfolio-note">Cierres históricos de Yahoo Finance. Los tickers estadounidenses se convierten a EUR con el tipo de cambio USD/EUR de cada fecha; se usa el último cierre disponible en o antes de cada periodo de calendario. MAX se calcula frente a la inversión base fija indicada.</p>
+        {portfolio_warning_html}
+      </div>
     </section>
     <section aria-labelledby="stocks-title">
       <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2>
@@ -650,7 +957,7 @@ def render_dashboard(
         </select></div>
       <div class="grid" id="stock-grid">{"".join(cards)}</div>
     </section>
-    <footer>Fuentes: Google News RSS y Yahoo Finance (vía yfinance). Datos informativos, no asesoramiento financiero.</footer>
+    <footer>Fuentes: Google News RSS, Google Translate y Yahoo Finance (vía yfinance). Datos informativos, no asesoramiento financiero.</footer>
   </main>
 {SORT_SCRIPT}
 </body>
@@ -672,7 +979,8 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args()
     reports = collect_reports()
-    report_html = render_dashboard(reports)
+    portfolio = fetch_portfolio()
+    report_html = render_dashboard(reports, portfolio=portfolio)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as output_file:
