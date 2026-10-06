@@ -28,7 +28,7 @@ GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_CACHE_FILE = Path("gemini_cache.json")
-GEMINI_CACHE_TTL = timedelta(hours=3)
+TARGET_HOURS = (0, 9, 12, 15, 18, 21)
 MAX_HEADLINES = 4
 MAX_WORKERS = 8
 PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
@@ -621,14 +621,28 @@ def _read_gemini_cache(
     cache_path: Path,
     now_utc: datetime,
 ) -> PortfolioAnalysis | None:
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("now_utc debe incluir una zona horaria")
+    now_local = now_utc.astimezone(TIMEZONE)
+    latest_target_hour = max(hour for hour in TARGET_HOURS if hour <= now_local.hour)
+    latest_target = now_local.replace(
+        hour=latest_target_hour,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         timestamp = datetime.fromisoformat(cached.pop("timestamp"))
-        if timestamp.tzinfo is None:
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("timestamp sin zona horaria")
-        age = now_utc - timestamp.astimezone(timezone.utc)
-        if age < timedelta(0) or age >= GEMINI_CACHE_TTL:
-            logging.info("La caché Gemini ha expirado o tiene una fecha futura.")
+        timestamp_local = timestamp.astimezone(TIMEZONE)
+        if timestamp_local < latest_target:
+            logging.info(
+                "La caché Gemini es anterior al último hito horario (%s).",
+                latest_target.isoformat(),
+            )
             return None
         analysis = PortfolioAnalysis(**cached)
         if (

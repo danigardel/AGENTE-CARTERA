@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,6 +19,8 @@ from daily_report import (
     PORTFOLIO_PERIODS,
     Quote,
     StockReport,
+    TIMEZONE,
+    _read_gemini_cache,
     analyze_portfolio,
     classify_peg,
     classify_sentiment,
@@ -423,9 +425,11 @@ class SentimentTests(unittest.TestCase):
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_returns_fresh_cache_without_calling_gemini(self, post_mock):
-        now_utc = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+        now_utc = datetime(2026, 10, 6, 10, 5, tzinfo=TIMEZONE).astimezone(
+            timezone.utc
+        )
         cached_data = {
-            "timestamp": (now_utc - timedelta(hours=2, minutes=59)).isoformat(),
+            "timestamp": datetime(2026, 10, 6, 9, 1, tzinfo=TIMEZONE).isoformat(),
             "portfolio_assessment": "Análisis desde caché.",
             "diversification": "Diversificación desde caché.",
             "recommended_changes": "Sin cambios.",
@@ -454,11 +458,71 @@ class SentimentTests(unittest.TestCase):
         self.assertIsNone(analysis.warning)
         post_mock.assert_not_called()
 
+    def test_gemini_cache_schedule_uses_local_midnight_and_evening_milestones(self):
+        cached_data = {
+            "timestamp": datetime(2026, 10, 6, 0, 0, tzinfo=TIMEZONE).isoformat(),
+            "portfolio_assessment": "Análisis almacenado.",
+            "diversification": "Diversificación almacenada.",
+            "recommended_changes": "Sin cambios.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto almacenado.",
+            "risks": [],
+            "warning": None,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+
+            cached_data["timestamp"] = datetime(
+                2026, 10, 6, 9, 0, tzinfo=TIMEZONE
+            ).isoformat()
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            exactly_at_nine = _read_gemini_cache(
+                cache_path,
+                datetime(2026, 10, 6, 9, 0, tzinfo=TIMEZONE),
+            )
+
+            cached_data["timestamp"] = datetime(
+                2026, 10, 6, 0, 0, tzinfo=TIMEZONE
+            ).isoformat()
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            before_nine_am = _read_gemini_cache(
+                cache_path,
+                datetime(2026, 10, 6, 7, 30, tzinfo=TIMEZONE),
+            )
+            cached_data["timestamp"] = datetime(
+                2026, 10, 6, 21, 0, tzinfo=TIMEZONE
+            ).isoformat()
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            at_2350 = _read_gemini_cache(
+                cache_path,
+                datetime(2026, 10, 6, 23, 50, tzinfo=TIMEZONE),
+            )
+
+            cached_data["timestamp"] = datetime(
+                2026, 10, 6, 20, 59, 59, tzinfo=TIMEZONE
+            ).isoformat()
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            just_before_nine_pm = _read_gemini_cache(
+                cache_path,
+                datetime(2026, 10, 6, 23, 50, tzinfo=TIMEZONE),
+            )
+
+        self.assertIsNotNone(exactly_at_nine)
+        self.assertIsNotNone(before_nine_am)
+        self.assertIsNotNone(at_2350)
+        self.assertIsNone(just_before_nine_pm)
+
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_refreshes_expired_cache_and_persists_success(self, post_mock):
-        now_utc = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+        now_utc = datetime(2026, 10, 6, 9, 5, tzinfo=TIMEZONE).astimezone(
+            timezone.utc
+        )
         cached_data = {
-            "timestamp": (now_utc - timedelta(hours=3)).isoformat(),
+            "timestamp": datetime(
+                2026, 10, 6, 8, 59, 59, tzinfo=TIMEZONE
+            ).isoformat(),
             "portfolio_assessment": "Expirado.",
             "diversification": "Expirado.",
             "recommended_changes": "Expirado.",
