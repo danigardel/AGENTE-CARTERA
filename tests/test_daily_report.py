@@ -12,7 +12,9 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from daily_report import (
     Company,
+    COMPANIES,
     Headline,
+    DashboardCharts,
     PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
@@ -24,6 +26,7 @@ from daily_report import (
     analyze_portfolio,
     classify_peg,
     classify_sentiment,
+    collect_chart_data,
     executive_summary,
     fetch_portfolio,
     fetch_headlines,
@@ -192,7 +195,13 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("<strong>—</strong></div>", html)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;", html)
         self.assertIn('<section aria-labelledby="portfolio-title">', html)
-        self.assertLess(html.index("Mi cartera"), html.index("Lista de seguimiento"))
+        self.assertLess(
+            html.index('<h2 id="portfolio-title">Mi cartera'),
+            html.index('<h2 id="stocks-title">Lista de seguimiento'),
+        )
+        self.assertIn("d3@7.9.0/dist/d3.min.js", html)
+        self.assertIn('id="watchlist-heatmap"', html)
+        self.assertIn('id="portfolio-heatmap"', html)
 
     def test_dashboard_styles_high_peg_as_bearish_and_missing_peg_as_unavailable(self):
         reports = [
@@ -297,16 +306,121 @@ class SentimentTests(unittest.TestCase):
         html = render_dashboard([], portfolio=[position])
 
         self.assertIn('<th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>', html)
-        self.assertIn('data-portfolio-period="1D" data-portfolio-kind="close">110.00 €</td>', html)
-        self.assertIn('data-portfolio-period="1Y" data-portfolio-kind="close">70.00 €</td>', html)
+        self.assertIn('data-portfolio-period="1D" data-portfolio-kind="return" class="text-bullish">+9.09%', html)
+        self.assertIn('data-portfolio-period="1Y" data-portfolio-kind="return" class="text-bullish">+71.43%', html)
         self.assertIn('data-portfolio-period="1W" data-portfolio-kind="return" class="text-bullish">+20.00%', html)
         self.assertIn('data-portfolio-period="MAX" data-portfolio-kind="profit" class="text-bullish">80.00 €', html)
         self.assertIn('<select id="portfolio-period" class="sort-select">', html)
         self.assertIn('<option value="MAX">MAX</option>', html)
         self.assertIn("portfolio-period", html)
         self.assertIn("portfolio-metric", html)
-        self.assertIn('<th scope="col">Valor actual</th>', html)
+        self.assertIn('<th scope="col" data-portfolio-max-only="true" hidden>Inversión base</th>', html)
+        self.assertIn('<th scope="col" data-portfolio-max-only="true" hidden>Valor actual</th>', html)
+        self.assertIn('data-label="Precio actual">120.00 €', html)
+        self.assertIn('data-label="Valor actual" data-portfolio-max-only="true" hidden>180.00 €', html)
         self.assertIn("80.00 €", html)
+
+    def test_dashboard_embeds_chart_data_safely_and_shows_last_ai_query_time(self):
+        charts = DashboardCharts(
+            watchlist=[
+                {"ticker": "</script>", "name": "Unsafe", "change_pct": 1.2}
+            ],
+            portfolio=[
+                {"ticker": "EX", "name": "Example", "change_pct": -0.5}
+            ],
+            watchlist_series=[
+                {"timestamp": "2026-10-07T09:00:00+00:00", "value": 0.25}
+            ],
+            portfolio_series=[
+                {"timestamp": "2026-10-07T09:00:00+00:00", "value": -0.5}
+            ],
+        )
+        analysis = PortfolioAnalysis(
+            portfolio_assessment="Evaluación",
+            diversification="Diversificación",
+            recommended_changes="Cambios",
+            market_context="Mercado",
+            last_updated_utc="2026-10-07T09:15:00+00:00",
+        )
+
+        html = render_dashboard([], analysis=analysis, chart_data=charts)
+
+        self.assertIn('id="dashboard-chart-data"', html)
+        self.assertIn(r"\u003c/script\u003e", html)
+        self.assertIn("Rendimiento medio de la lista de seguimiento", html)
+        self.assertIn("07/10/2026 · 11:15 CEST", html)
+
+    def test_watchlist_contains_requested_unique_assets(self):
+        tickers = {company.ticker for company in COMPANIES}
+        self.assertEqual(len(COMPANIES), 49)
+        for ticker in (
+            "INTC", "NFLX", "MSFT", "AMZN", "AAPL", "RSP", "META", "UBER",
+            "SXR8.DE", "GOOGL", "MP", "DIS", "PLTR", "MELI", "NVDA", "EQQU.L",
+            "SWDA.L", "XDWT.DE", "VWRP.L", "CNDX.L", "VVSM.DE", "SOFI", "CSH2.PA",
+            "MOD", "GS", "QTUM", "IS3N.DE", "YODA.L", "CAT", "NEO.TO", "TEM",
+            "GEV", "ORCL", "AMD", "MRVL", "VST", "DELL", "SMCI", "AVGO", "VRT",
+            "ASML.AS", "TSM", "MRNA", "MU", "RKLB", "NBIS", "BE", "LITE",
+        ):
+            with self.subTest(ticker=ticker):
+                self.assertIn(ticker, tickers)
+        self.assertIsNone(next(company.ticker for company in COMPANIES if company.name == "SpaceX"))
+
+    @patch("daily_report.yf.download")
+    def test_collect_chart_data_aggregates_intraday_returns_for_watchlist_and_portfolio(self, download_mock):
+        index = pd.date_range(
+            "2026-10-07 08:00",
+            periods=2,
+            freq="5min",
+            tz="UTC",
+        )
+        columns = pd.MultiIndex.from_product(
+            [["AAA", "BBB"], ["Close"]],
+            names=["Ticker", "Price"],
+        )
+        history = pd.DataFrame(
+            [[101, 99], [102, 98]],
+            index=index,
+            columns=columns,
+        )
+        download_mock.return_value = history
+        reports = [
+            StockReport(
+                Company("Alpha", "AAA"),
+                quote=Quote(
+                    current_price_eur=102,
+                    previous_close=100,
+                    daily_change_pct=2,
+                ),
+            ),
+            StockReport(
+                Company("Beta", "BBB"),
+                quote=Quote(
+                    current_price_eur=98,
+                    previous_close=100,
+                    daily_change_pct=-2,
+                ),
+            ),
+        ]
+        portfolio = [
+            PortfolioPosition(
+                asset=PortfolioAsset("Alpha", "AAA", 1, 100, "EUR"),
+                prices_eur={"Hoy": 102, "1D": 100},
+                returns_pct={"1D": 2},
+            )
+        ]
+
+        charts = collect_chart_data(reports, portfolio)
+
+        self.assertEqual(len(charts.watchlist), 2)
+        self.assertEqual([point["value"] for point in charts.watchlist_series], [0, 0])
+        for actual, expected in zip(
+            [point["value"] for point in charts.portfolio_series],
+            [1, 2],
+            strict=True,
+        ):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(charts.portfolio[0]["ticker"], "AAA")
+        download_mock.assert_called_once()
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_calls_standard_flash_api_with_portfolio_and_watchlist(self, post_mock):
@@ -369,7 +483,7 @@ class SentimentTests(unittest.TestCase):
         endpoint, = post_mock.call_args.args
         self.assertEqual(
             endpoint,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
         )
         self.assertNotIn("secret-test-key", endpoint)
         self.assertEqual(post_mock.call_args.kwargs["headers"]["x-goog-api-key"], "secret-test-key")

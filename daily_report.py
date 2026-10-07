@@ -17,6 +17,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import feedparser
+import pandas as pd
 import requests
 import yfinance as yf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -66,6 +67,8 @@ class Company:
 
 @dataclass
 class Quote:
+    current_price_native: float | None = None
+    previous_close: float | None = None
     current_price_eur: float | None = None
     daily_change_pct: float | None = None
     daily_change_abs_eur: float | None = None
@@ -127,6 +130,16 @@ class PortfolioAnalysis:
     market_context: str | None = None
     risks: list[str] = field(default_factory=list)
     warning: str | None = None
+    last_updated_utc: str | None = None
+
+
+@dataclass
+class DashboardCharts:
+    watchlist: list[dict[str, Any]] = field(default_factory=list)
+    portfolio: list[dict[str, Any]] = field(default_factory=list)
+    watchlist_series: list[dict[str, float | str]] = field(default_factory=list)
+    portfolio_series: list[dict[str, float | str]] = field(default_factory=list)
+    timezone: str = TIMEZONE.key
 
 
 PORTFOLIO = (
@@ -142,51 +155,57 @@ PORTFOLIO = (
 )
 
 
-# LISTA DE ACCIONES ACTUALIZADA
+# LISTA DE SEGUIMIENTO
 COMPANIES = (
-    Company("Bloom Energy", "BE"),
+    Company("Intel", "INTC"),
+    Company("Netflix", "NFLX"),
+    Company("Microsoft", "MSFT"),
+    Company("Amazon.com", "AMZN"),
+    Company("Apple", "AAPL"),
+    Company("S&P 500 Equal Weight US", "RSP"),
+    Company("Meta Platforms (A)", "META"),
+    Company("Uber", "UBER"),
+    Company("S&P 500 EUR (Acc)", "SXR8.DE"),
+    Company("Alphabet (A)", "GOOGL"),
+    Company("MP Materials", "MP"),
+    Company("Walt Disney", "DIS"),
+    Company("Palantir Technologies", "PLTR"),
+    Company("MercadoLibre", "MELI"),
+    Company("NVIDIA", "NVDA"),
+    Company("EQQQ Nasdaq 100 USD (Acc)", "EQQU.L"),
+    Company("Core MSCI World USD (Acc)", "SWDA.L"),
+    Company("MSCI World Information Tech.", "XDWT.DE"),
+    Company("FTSE All-World USD (Acc)", "VWRP.L"),
+    Company("NASDAQ 100 USD (Acc)", "CNDX.L"),
+    Company("Semiconductor USD (Acc)", "VVSM.DE"),
+    Company("SoFi Technologies", "SOFI"),
+    Company("Smart Overnight Return ETF", "CSH2.PA"),
+    Company("Modine Manufacturing", "MOD"),
+    Company("Goldman Sachs", "GS"),
+    Company("Quantum Computing USD", "QTUM"),
+    Company("MSCI Emerging Markets (Acc)", "IS3N.DE"),
+    Company("Space Innovators USD (Acc)", "YODA.L"),
+    Company("Caterpillar", "CAT"),
+    Company("Neo Performance Materials", "NEO.TO"),
+    Company("Tempus AI", "TEM"),
+    Company("GE Vernova", "GEV"),
+    Company("Oracle", "ORCL"),
+    Company("AMD", "AMD"),
+    Company("Marvell Technology", "MRVL"),
+    Company("Vistra", "VST"),
+    Company("Dell Technologies", "DELL"),
+    Company("Super Micro Computer", "SMCI"),
+    Company("Broadcom", "AVGO"),
     Company("Vertiv", "VRT"),
-    Company("ASML", "ASML"),
-    Company("Semiconductor ETF", "SMH"), # Ticker genérico de semiconductores
+    Company("ASML", "ASML.AS"),
+    Company("TSMC (ADR)", "TSM"),
+    Company("Moderna", "MRNA"),
     Company("Micron Technology", "MU"),
     Company("Rocket Lab", "RKLB"),
-    Company("Dell Technologies", "DELL"),
-    Company("GE Vernova", "GEV"),
-    Company("Netflix", "NFLX"),
-    Company("AMD", "AMD"),
-    Company("Meta Platforms", "META"),
-    Company("Quantum Computing ETF", "QTUM"),
-    Company("Caterpillar", "CAT"),
-    Company("Broadcom", "AVGO"),
-    Company("Space Innovators ETF", "YODA.L"),
-    Company("Intel", "INTC"),
-    Company("Vistra", "VST"),
-    Company("MP Materials", "MP"),
-    Company("SoFi Technologies", "SOFI"),
-    Company("SpaceX", "SPCX"),
-    Company("NVIDIA", "NVDA"),
-    Company("Modine Manufacturing", "MOD"),
-    Company("MSCI World Info Tech", "XDWT.DE"), # Ticker de Xetra para World IT
-    Company("Tempus AI", "TEM"),
-    Company("MSCI Emerging Markets", "IS3N.DE"),
-    Company("Tesla", "TSLA"),
-    Company("Walt Disney", "DIS"),
-    Company("MercadoLibre", "MELI"),
-    Company("Uber", "UBER"),
-    Company("Oracle", "ORCL"),
-    Company("S&P 500 Equal Weight", "XDEW.DE"),
-    Company("S&P 500 EUR Acc", "SXR8.DE"),
-    Company("Amazon", "AMZN"),
-    Company("Alphabet (A)", "GOOGL"),
-    Company("Palantir Technologies", "PLTR"),
-    Company("Core MSCI World", "EUNL.DE"),
-    Company("FTSE All-World", "VWCE.DE"),
-    Company("TSMC (ADR)", "TSM"),
-    Company("Microsoft", "MSFT"),
-    Company("Smart Overnight Return", "CSH2.PA"), # Ticker de Euronext París para Amundi
-    Company("Apple", "AAPL"),
-    Company("Moderna", "MRNA"),
-    Company("Neo Performance Materials", "NEO.TO"),
+    Company("SpaceX", None),
+    Company("Nebius Group (A)", "NBIS"),
+    Company("Bloom Energy", "BE"),
+    Company("Lumentum Holdings", "LITE"),
 )
 
 ANALYST_LABELS = {
@@ -301,6 +320,7 @@ def fetch_quote(company: Company) -> Quote:
     fx_rate = get_fx_rate(currency)
 
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+    previous_close = info.get("previousClose")
     daily_change_abs = info.get("regularMarketChange")
     daily_change_pct = info.get("regularMarketChangePercent")
     target_mean = info.get("targetMeanPrice")
@@ -313,6 +333,8 @@ def fetch_quote(company: Company) -> Quote:
     analyst_count = info.get("numberOfAnalystOpinions")
     
     return Quote(
+        current_price_native=_finite_float(current_price),
+        previous_close=_finite_float(previous_close),
         current_price_eur=_finite_float(current_price, multiplier=fx_rate),
         daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
         daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
@@ -644,6 +666,7 @@ def _read_gemini_cache(
                 latest_target.isoformat(),
             )
             return None
+        cached["last_updated_utc"] = timestamp.astimezone(timezone.utc).isoformat()
         analysis = PortfolioAnalysis(**cached)
         if (
             analysis.warning is not None
@@ -701,7 +724,9 @@ def _write_gemini_cache(
     now_utc: datetime,
 ) -> None:
     cached = asdict(analysis)
-    cached["timestamp"] = now_utc.astimezone(timezone.utc).isoformat()
+    timestamp = now_utc.astimezone(timezone.utc).isoformat()
+    cached["timestamp"] = timestamp
+    cached["last_updated_utc"] = timestamp
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -766,6 +791,7 @@ def analyze_portfolio(
             "responseMimeType": "application/json",
         },
     }
+    analysis.last_updated_utc = datetime.now(timezone.utc).isoformat()
     try:
         response = requests.post(
             f"{GEMINI_API_URL}/{quote(model, safe='')}:generateContent",
@@ -870,7 +896,9 @@ def analyze_portfolio(
             "lista de seguimiento o de la cartera."
         )
         logging.warning("Gemini devolvió recomendaciones fuera de los tickers autorizados.")
-    _write_gemini_cache(cache_path, analysis, datetime.now(timezone.utc))
+    updated_at = datetime.now(timezone.utc)
+    analysis.last_updated_utc = updated_at.isoformat()
+    _write_gemini_cache(cache_path, analysis, updated_at)
     return analysis
 
 
@@ -919,6 +947,183 @@ def collect_reports(
             if warning and warning not in report.warnings:
                 report.warnings.append(warning)
     return reports
+
+
+def _intraday_close_series(history: Any, ticker: str) -> Any | None:
+    if history is None or getattr(history, "empty", True):
+        return None
+    if isinstance(history.columns, pd.MultiIndex):
+        for column in history.columns:
+            if ticker in column and "Close" in column:
+                return history[column].dropna()
+        return None
+    if "Close" in history.columns:
+        return history["Close"].dropna()
+    return None
+
+
+def collect_chart_data(
+    reports: list[StockReport],
+    portfolio: list[PortfolioPosition],
+) -> DashboardCharts:
+    report_by_ticker = {
+        report.company.ticker: report
+        for report in reports
+        if report.company.ticker
+    }
+    portfolio_by_ticker = {position.asset.ticker: position for position in portfolio}
+    tickers = list(
+        dict.fromkeys(
+            [
+                *report_by_ticker,
+                *portfolio_by_ticker,
+            ]
+        )
+    )
+
+    chart_data = DashboardCharts()
+    if not tickers:
+        return chart_data
+
+    closes_by_ticker: dict[str, Any] = {}
+    try:
+        history = yf.download(
+            tickers=tickers,
+            period="1d",
+            interval="5m",
+            group_by="ticker",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+            timeout=20,
+        )
+        for ticker in tickers:
+            close_series = _intraday_close_series(history, ticker)
+            if close_series is not None:
+                closes_by_ticker[ticker] = close_series
+    except (
+        yf.exceptions.YFException,
+        requests.RequestException,
+        TimeoutError,
+        OSError,
+        ValueError,
+        KeyError,
+    ) as error:
+        logging.warning(
+            "No se pudieron obtener los datos intradía para los gráficos: %s: %s",
+            type(error).__name__,
+            error,
+        )
+
+    report_descriptors: list[tuple[str | None, str, float | None, float | None]] = []
+    for report in reports:
+        ticker = report.company.ticker
+        quote = report.quote
+        previous_close = quote.previous_close
+        if (
+            previous_close is None
+            and quote.current_price_native is not None
+            and quote.daily_change_pct is not None
+            and quote.daily_change_pct != -100
+        ):
+            previous_close = quote.current_price_native / (
+                1 + quote.daily_change_pct / 100
+            )
+        report_descriptors.append(
+            (
+                ticker,
+                report.company.name,
+                quote.daily_change_pct,
+                previous_close,
+            )
+        )
+
+    portfolio_descriptors: list[tuple[str, str, float | None, float | None]] = []
+    for position in portfolio:
+        ticker = position.asset.ticker
+        report = report_by_ticker.get(ticker)
+        if report is None:
+            report = next(
+                (
+                    candidate
+                    for candidate in reports
+                    if candidate.company.name.casefold()
+                    == position.asset.name.casefold()
+                ),
+                None,
+            )
+        daily_return = position.returns_pct.get("1D")
+        current_price = position.prices_eur.get("Hoy")
+        previous_close = position.prices_eur.get("1D")
+        if report is not None and report.company.ticker == ticker:
+            if daily_return is None:
+                daily_return = report.quote.daily_change_pct
+            previous_close = report.quote.previous_close
+            if (
+                previous_close is None
+                and report.quote.current_price_native is not None
+                and report.quote.daily_change_pct is not None
+                and report.quote.daily_change_pct != -100
+            ):
+                previous_close = report.quote.current_price_native / (
+                    1 + report.quote.daily_change_pct / 100
+                )
+        if (
+            previous_close is None
+            and current_price is not None
+            and daily_return is not None
+            and daily_return != -100
+        ):
+            previous_close = current_price / (1 + daily_return / 100)
+        portfolio_descriptors.append(
+            (ticker, position.asset.name, daily_return, previous_close)
+        )
+
+    watchlist_samples: dict[str, list[float]] = {}
+    portfolio_samples: dict[str, list[float]] = {}
+    for group, descriptors, samples in (
+        ("watchlist", report_descriptors, watchlist_samples),
+        ("portfolio", portfolio_descriptors, portfolio_samples),
+    ):
+        for ticker, name, current_change, previous_close in descriptors:
+            if current_change is None:
+                current_change = (
+                    report_by_ticker[ticker].quote.daily_change_pct
+                    if ticker is not None and ticker in report_by_ticker
+                    else None
+                )
+            chart_item = {
+                "ticker": ticker or name,
+                "name": name,
+                "change_pct": current_change,
+            }
+            getattr(chart_data, group).append(chart_item)
+
+            close_series = closes_by_ticker.get(ticker) if ticker is not None else None
+            if close_series is None or previous_close is None or previous_close <= 0:
+                continue
+            for timestamp, close in close_series.items():
+                close_value = _finite_float(close)
+                if close_value is None or close_value <= 0:
+                    continue
+                date_time = timestamp.to_pydatetime() if hasattr(timestamp, "to_pydatetime") else timestamp
+                if date_time.tzinfo is None:
+                    date_time = date_time.replace(tzinfo=timezone.utc)
+                date_time = date_time.astimezone(timezone.utc)
+                timestamp_key = date_time.isoformat()
+                samples.setdefault(timestamp_key, []).append(
+                    (close_value / previous_close - 1) * 100
+                )
+
+    chart_data.watchlist_series = [
+        {"timestamp": timestamp, "value": fmean(values)}
+        for timestamp, values in sorted(watchlist_samples.items())
+    ]
+    chart_data.portfolio_series = [
+        {"timestamp": timestamp, "value": fmean(values)}
+        for timestamp, values in sorted(portfolio_samples.items())
+    ]
+    return chart_data
 
 
 def executive_summary(reports: list[StockReport]) -> dict[str, Any]:
@@ -1034,6 +1239,17 @@ def _analysis_recommendations(
 def _analysis_section(analysis: PortfolioAnalysis | None) -> str:
     if analysis is None:
         return ""
+    last_updated_text = "Sin consulta confirmada"
+    if analysis.last_updated_utc:
+        try:
+            last_updated = datetime.fromisoformat(analysis.last_updated_utc)
+            if last_updated.tzinfo is None or last_updated.utcoffset() is None:
+                raise ValueError("timestamp sin zona horaria")
+            last_updated_text = last_updated.astimezone(TIMEZONE).strftime(
+                "%d/%m/%Y · %H:%M %Z"
+            )
+        except ValueError as error:
+            logging.warning("Timestamp de análisis IA no válido: %s", error)
     if analysis.warning:
         content = (
             '<div class="analysis-warning" role="status">'
@@ -1062,7 +1278,7 @@ def _analysis_section(analysis: PortfolioAnalysis | None) -> str:
     return (
         '<section aria-labelledby="ai-analysis-title">'
         '<div class="section-heading"><h2 id="ai-analysis-title">Análisis de cartera con Gemini Flash</h2>'
-        '<span>Generado con los datos de esta actualización</span></div>'
+        f'<span>Última consulta: {_esc(last_updated_text)}</span></div>'
         f'<div class="analysis-panel">{content}'
         '<p class="portfolio-note">Análisis informativo generado por IA; no constituye asesoramiento financiero personalizado. '
         "Puede contener errores y no conoce tus objetivos, horizonte ni tolerancia al riesgo.</p></div></section>"
@@ -1121,12 +1337,10 @@ PORTFOLIO_SCRIPT = """<script>
   const metricSelect = document.getElementById('portfolio-metric');
   const heading = document.getElementById('portfolio-selected-heading');
   const cells = Array.from(document.querySelectorAll('[data-portfolio-period]'));
+  const maxOnlyCells = Array.from(document.querySelectorAll('[data-portfolio-max-only]'));
   if (!periodSelect || !metricSelect || !heading) return;
 
-  const historicalOptions = [
-    ['close', 'Precio de cierre'],
-    ['return', 'Rendimiento (%)'],
-  ];
+  const historicalOptions = [['return', 'Rendimiento (%)']];
   const maxOptions = [
     ['profit', 'Ganancia absoluta (€)'],
     ['return', 'Rendimiento (%)'],
@@ -1148,7 +1362,10 @@ PORTFOLIO_SCRIPT = """<script>
     const kind = metricSelect.value;
     heading.textContent = period === 'MAX'
       ? (kind === 'profit' ? 'Ganancia MAX' : 'Rendimiento MAX')
-      : (kind === 'close' ? `Cierre ${period}` : `Rendimiento ${period}`);
+      : `Rendimiento ${period}`;
+    maxOnlyCells.forEach((cell) => {
+      cell.hidden = period !== 'MAX';
+    });
     cells.forEach((cell) => {
       cell.hidden = cell.dataset.portfolioPeriod !== period
         || cell.dataset.portfolioKind !== kind;
@@ -1161,15 +1378,158 @@ PORTFOLIO_SCRIPT = """<script>
 })();
 </script>"""
 
+CHARTS_SCRIPT = """<script>
+(() => {
+  const payloadNode = document.getElementById('dashboard-chart-data');
+  if (!payloadNode || !window.d3) return;
+  const payload = JSON.parse(payloadNode.textContent);
+  const d3 = window.d3;
+
+  function returnColor(value, extent) {
+    if (value === null || !Number.isFinite(value)) return '#354052';
+    const magnitude = Math.max(extent, 0.5);
+    return d3.scaleDiverging()
+      .domain([-magnitude, 0, magnitude])
+      .interpolator(d3.interpolateRdYlGn)
+      (Math.max(-magnitude, Math.min(magnitude, value)));
+  }
+
+  function renderHeatmap(id, items) {
+    const node = document.getElementById(id);
+    if (!node) return;
+    const width = Math.max(280, node.clientWidth || 280);
+    const height = Math.max(240, Math.min(420, Math.ceil(items.length / Math.max(4, Math.floor(width / 110))) * 56));
+    const svg = d3.select(node).attr('viewBox', `0 0 ${width} ${height}`).attr('height', height);
+    svg.selectAll('*').remove();
+    if (!items.length) {
+      svg.append('text').attr('x', 12).attr('y', 28).attr('class', 'chart-empty')
+        .text('No hay instrumentos para mostrar.');
+      return;
+    }
+
+    const extent = d3.max(items, (item) => Math.abs(item.change_pct || 0)) || 0.5;
+    const root = d3.hierarchy({children: items}).sum(() => 1);
+    d3.treemap().size([width, height]).paddingInner(3).round(true)(root);
+    const groups = svg.selectAll('g').data(root.leaves()).join('g')
+      .attr('transform', (item) => `translate(${item.x0},${item.y0})`);
+    groups.append('rect')
+      .attr('width', (item) => Math.max(0, item.x1 - item.x0))
+      .attr('height', (item) => Math.max(0, item.y1 - item.y0))
+      .attr('rx', 5)
+      .attr('fill', (item) => returnColor(item.data.change_pct, extent));
+    groups.append('title').text((item) => {
+      const change = item.data.change_pct;
+      return `${item.data.name} (${item.data.ticker}): ${
+        change === null ? 'sin datos' : `${change > 0 ? '+' : ''}${change.toFixed(2)}%`
+      }`;
+    });
+    groups.filter((item) => item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 38)
+      .append('text').attr('x', 8).attr('y', 18).attr('class', 'heatmap-ticker')
+      .text((item) => item.data.ticker);
+    groups.filter((item) => item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 55)
+      .append('text').attr('x', 8).attr('y', 37).attr('class', 'heatmap-return')
+      .text((item) => item.data.change_pct === null
+        ? '—'
+        : `${item.data.change_pct > 0 ? '+' : ''}${item.data.change_pct.toFixed(2)}%`);
+  }
+
+  function renderAverageLine(id, series) {
+    const node = document.getElementById(id);
+    if (!node) return;
+    const width = Math.max(280, node.clientWidth || 280);
+    const height = 230;
+    const margin = {top: 14, right: 12, bottom: 23, left: 12};
+    const svg = d3.select(node).attr('viewBox', `0 0 ${width} ${height}`);
+    svg.selectAll('*').remove();
+    const validSeries = series.filter((point) => Number.isFinite(point.value));
+    const status = document.getElementById(`${id}-status`);
+    if (!validSeries.length) {
+      if (status) status.textContent = 'No hay histórico intradía disponible.';
+      svg.append('text').attr('x', margin.left).attr('y', 28).attr('class', 'chart-empty')
+        .text('Sin datos intradía.');
+      return;
+    }
+
+    const lastPoint = validSeries[validSeries.length - 1];
+    const mean = lastPoint.value;
+    const color = mean > 0 ? '#20d69a' : mean < 0 ? '#ff647c' : '#8b98ac';
+    if (status) {
+      status.textContent = `Media actual ${mean > 0 ? '+' : ''}${mean.toFixed(2)}% · ${
+        validSeries.length
+      } intervalos`;
+      status.style.color = color;
+    }
+    const x = d3.scaleUtc()
+      .domain(d3.extent(validSeries, (point) => new Date(point.timestamp)))
+      .range([margin.left, width - margin.right]);
+    const min = d3.min(validSeries, (point) => point.value);
+    const max = d3.max(validSeries, (point) => point.value);
+    const padding = Math.max((max - min) * 0.15, 0.1);
+    const y = d3.scaleLinear()
+      .domain([Math.min(0, min - padding), Math.max(0, max + padding)])
+      .range([height - margin.bottom, margin.top]);
+
+    const gradientId = `${id}-gradient`;
+    const defs = svg.append('defs');
+    const gradient = defs.append('linearGradient')
+      .attr('id', gradientId).attr('x1', '0').attr('x2', '0').attr('y1', '0').attr('y2', '1');
+    gradient.append('stop').attr('offset', '0%').attr('stop-color', color).attr('stop-opacity', 0.3);
+    gradient.append('stop').attr('offset', '100%').attr('stop-color', color).attr('stop-opacity', 0);
+
+    const area = d3.area()
+      .x((point) => x(new Date(point.timestamp)))
+      .y0(height - margin.bottom)
+      .y1((point) => y(point.value))
+      .curve(d3.curveMonotoneX);
+    const line = d3.line()
+      .x((point) => x(new Date(point.timestamp)))
+      .y((point) => y(point.value))
+      .curve(d3.curveMonotoneX);
+    svg.append('path').datum(validSeries).attr('d', area).attr('fill', `url(#${gradientId})`);
+    svg.append('path').datum(validSeries).attr('d', line).attr('fill', 'none')
+      .attr('stroke', color).attr('stroke-width', 2.5).attr('stroke-linecap', 'round');
+    const firstTime = new Date(validSeries[0].timestamp);
+    const lastTime = new Date(lastPoint.timestamp);
+    const formatTime = (date) => new Intl.DateTimeFormat('es-ES', {
+      timeZone: payload.timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(date);
+    svg.append('text').attr('x', margin.left).attr('y', height - 4)
+      .attr('class', 'chart-time').text(formatTime(firstTime));
+    svg.append('text').attr('x', width - margin.right).attr('y', height - 4)
+      .attr('text-anchor', 'end').attr('class', 'chart-time').text(formatTime(lastTime));
+  }
+
+  function renderAll() {
+    renderHeatmap('watchlist-heatmap', payload.watchlist);
+    renderHeatmap('portfolio-heatmap', payload.portfolio);
+    renderAverageLine('watchlist-average-chart', payload.watchlist_series);
+    renderAverageLine('portfolio-average-chart', payload.portfolio_series);
+  }
+
+  renderAll();
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(renderAll);
+    document.querySelectorAll('.chart-resize-target').forEach((node) => observer.observe(node));
+  } else {
+    window.addEventListener('resize', renderAll, {passive: true});
+  }
+})();
+</script>"""
+
 
 def render_dashboard(
     reports: list[StockReport],
     generated_at: datetime | None = None,
     portfolio: list[PortfolioPosition] | None = None,
     analysis: PortfolioAnalysis | None = None,
+    chart_data: DashboardCharts | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     portfolio = portfolio or []
+    chart_data = chart_data or DashboardCharts()
     
     # ORDENACIÓN POR RENDIMIENTO DIARIO ACTUAL
     def performance_sort_key(report: StockReport) -> float:
@@ -1281,25 +1641,31 @@ def render_dashboard(
     ) or "<li>Aún no hay titulares con fecha de hoy.</li>"
     portfolio_rows = "".join(
         "<tr>"
-        f"<th scope=\"row\">{_esc(position.asset.name)}<span>{_esc(position.asset.ticker)}</span></th>"
-        f"<td>{_format_number(position.asset.shares, 6)}</td>"
-        f"<td>{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
-        f"<td>{_portfolio_cell(position.prices_eur.get('Hoy'), ' €')}</td>"
-        f"<td>{_portfolio_cell(position.current_value_eur, ' €')}</td>"
+        f'<th scope="row" data-label="Activo">{_esc(position.asset.name)}'
+        f'<span>{_esc(position.asset.ticker)}</span></th>'
+        f'<td data-label="Posición">{_format_number(position.asset.shares, 6)}</td>'
+        f'<td data-label="Inversión base" data-portfolio-max-only="true" hidden>'
+        f"{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
+        f'<td data-label="Precio actual">{_portfolio_cell(position.prices_eur.get("Hoy"), " €")}</td>'
+        f'<td data-label="Valor actual" data-portfolio-max-only="true" hidden>'
+        f"{_portfolio_cell(position.current_value_eur, ' €')}</td>"
         + "".join(
-            _portfolio_value(position.prices_eur.get(period), "close").replace(
-                "<td", f'<td data-portfolio-period="{period}" data-portfolio-kind="close"'
-            )
-            + _portfolio_value(position.returns_pct.get(period), "return").replace(
-                "<td", f'<td data-portfolio-period="{period}" data-portfolio-kind="return"'
+            _portfolio_value(position.returns_pct.get(period), "return").replace(
+                "<td",
+                f'<td hidden data-label="Rendimiento {period}" data-portfolio-period="{period}" '
+                'data-portfolio-kind="return"',
             )
             for period, _ in PORTFOLIO_PERIODS
         )
         + _portfolio_value(position.max_profit_eur, "profit").replace(
-            "<td", '<td data-portfolio-period="MAX" data-portfolio-kind="profit"'
+            "<td",
+            '<td hidden data-label="Ganancia MAX" data-portfolio-period="MAX" '
+            'data-portfolio-kind="profit"',
         )
         + _portfolio_value(position.max_return_pct, "return").replace(
-            "<td", '<td data-portfolio-period="MAX" data-portfolio-kind="return"'
+            "<td",
+            '<td hidden data-label="Rendimiento MAX" data-portfolio-period="MAX" '
+            'data-portfolio-kind="return"',
         )
         + "</tr>"
         for position in portfolio
@@ -1336,6 +1702,11 @@ def render_dashboard(
     else:
         portfolio_total = '<p class="portfolio-total">No hay datos de cartera disponibles.</p>'
     warnings_count = sum(len(report.warnings) for report in reports)
+    chart_payload = json.dumps(
+        asdict(chart_data),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
     return f"""<!doctype html>
 <html lang="es">
@@ -1344,6 +1715,7 @@ def render_dashboard(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Informe diario de noticias y sentimiento para la lista de seguimiento de acciones.">
   <title>Radar bursátil · Informe diario</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
   <style>
     :root {{
       color-scheme: dark;
@@ -1389,7 +1761,7 @@ def render_dashboard(
     .portfolio-controls .sort-select {{ min-width: 125px; }}
     .portfolio-total {{ color: var(--muted); font-size: 13px; margin: 0 0 12px; }}
     .portfolio-table-wrap {{ overflow-x: auto; }}
-    .portfolio-table {{ border-collapse: collapse; min-width: 900px; width: 100%; font-size: 12px; white-space: nowrap; }}
+    .portfolio-table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
     .portfolio-table th, .portfolio-table td {{ border-bottom: 1px solid var(--line); padding: 9px 10px; text-align: right; }}
     .portfolio-table thead th {{ color: var(--muted); font-size: 10px; line-height: 1.35; position: sticky; top: 0; background: var(--panel); }}
     .portfolio-table th:first-child, .portfolio-table td:first-child {{ text-align: left; }}
@@ -1397,6 +1769,19 @@ def render_dashboard(
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
+    .market-charts {{ margin: 0 0 28px; }}
+    .market-visualization-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 340px); gap: 12px; }}
+    .market-chart-card {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 14px; min-width: 0; }}
+    .market-chart-card h3 {{ margin: 0 0 4px; font-size: 14px; }}
+    .chart-subtitle, .chart-status {{ color: var(--muted); font-size: 11px; margin: 0 0 9px; }}
+    .chart-status {{ font-variant-numeric: tabular-nums; }}
+    .heatmap-chart {{ display: block; width: 100%; min-height: 240px; overflow: visible; }}
+    .average-chart {{ display: block; width: 100%; height: auto; overflow: visible; }}
+    .heatmap-ticker {{ fill: #fff; font-size: 11px; font-weight: 750; pointer-events: none; }}
+    .heatmap-return {{ fill: #fff; font-size: 10px; font-variant-numeric: tabular-nums; pointer-events: none; }}
+    .chart-empty {{ fill: var(--muted); font-size: 12px; }}
+    .chart-time {{ fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }}
+    .portfolio-visualizations {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 300px); gap: 12px; margin: 0 0 14px; }}
     .analysis-panel {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; }}
     .analysis-warning {{ border: 1px solid #fb923c66; border-radius: 10px; background: #fb923c12; color: #fdba74; padding: 12px; }}
     .analysis-grid, .analysis-recommendations {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; }}
@@ -1434,7 +1819,17 @@ def render_dashboard(
       .updated {{ text-align: left; margin-top: 12px; }} .summary {{ grid-template-columns: 1fr; gap: 9px; }}
       .summary-card {{ min-height: 0; }} .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }}
       .metrics div {{ padding: 8px; }} .sort-select {{ width: 100%; }}
-      .portfolio-controls .sort-select {{ width: auto; }} }}
+      .portfolio-controls .sort-select {{ width: auto; }}
+      .market-visualization-grid, .portfolio-visualizations {{ grid-template-columns: minmax(0, 1fr); }}
+      .market-chart-card {{ padding: 11px; }}
+      .portfolio-table-wrap {{ overflow: visible; }}
+      .portfolio-table, .portfolio-table tbody {{ display: block; width: 100%; }}
+      .portfolio-table thead {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
+      .portfolio-table tbody tr {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 8px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-2); margin: 0 0 10px; padding: 8px; }}
+      .portfolio-table tbody th, .portfolio-table tbody td {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; border: 0; padding: 7px 3px; text-align: right; font-size: 11px; min-width: 0; overflow-wrap: anywhere; }}
+      .portfolio-table tbody th[data-label="Activo"] {{ display: block; grid-column: 1 / -1; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }}
+      .portfolio-table tbody td::before {{ content: attr(data-label); color: var(--muted); text-align: left; font-size: 10px; }}
+      .portfolio-table tbody th span {{ font-size: 9px; }} }}
   </style>
 </head>
 <body>
@@ -1445,6 +1840,22 @@ def render_dashboard(
         <div class="subtitle">Noticias y sentimiento para {len(reports)} empresas</div></div>
       <div class="updated">Actualizado<br><strong>{_esc(generated_at.strftime("%d/%m/%Y · %H:%M %Z"))}</strong></div>
     </header>
+    <section class="market-charts" aria-label="Visualizaciones del mercado">
+      <div class="section-heading"><h2>Mercado de un vistazo</h2>
+        <span>{len(reports)} instrumentos seguidos · bloques de igual tamaño</span></div>
+      <div class="market-visualization-grid">
+        <article class="market-chart-card chart-resize-target">
+          <h3>Mapa de calor · Lista de seguimiento</h3>
+          <p class="chart-subtitle">Rendimiento diario · verde: subida · rojo: bajada · gris: sin datos</p>
+          <svg id="watchlist-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la lista de seguimiento"></svg>
+        </article>
+        <article class="market-chart-card chart-resize-target">
+          <h3>Media intradía · Lista de seguimiento</h3>
+          <p id="watchlist-average-chart-status" class="chart-status" aria-live="polite">Calculando media…</p>
+          <svg id="watchlist-average-chart" class="average-chart" role="img" aria-label="Rendimiento medio de la lista de seguimiento a lo largo del día"></svg>
+        </article>
+      </div>
+    </section>
     <section class="summary" aria-label="Resumen ejecutivo">
       <article class="summary-card"><div class="summary-label">Sentimiento de noticias</div>
         <div class="summary-value"><span class="dot {signal}"></span>{label}</div>
@@ -1482,11 +1893,25 @@ def render_dashboard(
         </div></div>
       <div class="portfolio-panel">
         {portfolio_total}
+        <div class="portfolio-visualizations">
+          <article class="market-chart-card chart-resize-target">
+            <h3>Mapa de calor · Mi cartera</h3>
+            <p class="chart-subtitle">Rendimiento diario de las posiciones</p>
+            <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la cartera"></svg>
+          </article>
+          <article class="market-chart-card chart-resize-target">
+            <h3>Media intradía · Mi cartera</h3>
+            <p id="portfolio-average-chart-status" class="chart-status" aria-live="polite">Calculando media…</p>
+            <svg id="portfolio-average-chart" class="average-chart" role="img" aria-label="Evolución intradía del rendimiento medio de la cartera"></svg>
+          </article>
+        </div>
         <div class="portfolio-table-wrap">
           <table class="portfolio-table">
             <thead><tr>
-              <th scope="col">Activo</th><th scope="col">Posición</th><th scope="col">Inversión base</th>
-              <th scope="col">Precio actual</th><th scope="col">Valor actual</th>
+              <th scope="col">Activo</th><th scope="col">Posición</th>
+              <th scope="col" data-portfolio-max-only="true" hidden>Inversión base</th>
+              <th scope="col">Precio actual</th>
+              <th scope="col" data-portfolio-max-only="true" hidden>Valor actual</th>
               <th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>
             </tr></thead>
             <tbody>{portfolio_rows or '<tr><td colspan="6">No hay posiciones definidas.</td></tr>'}</tbody>
@@ -1509,8 +1934,10 @@ def render_dashboard(
     </section>
     <footer>Fuentes: Google News RSS, Google Translate, Yahoo Finance (vía yfinance) y Gemini API. Datos informativos, no asesoramiento financiero.</footer>
   </main>
+<script type="application/json" id="dashboard-chart-data">{chart_payload}</script>
 {SORT_SCRIPT}
 {PORTFOLIO_SCRIPT}
+{CHARTS_SCRIPT}
 </body>
 </html>
 """
@@ -1532,7 +1959,13 @@ def main() -> int:
     reports = collect_reports()
     portfolio = fetch_portfolio()
     analysis = analyze_portfolio(reports, portfolio)
-    report_html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
+    chart_data = collect_chart_data(reports, portfolio)
+    report_html = render_dashboard(
+        reports,
+        portfolio=portfolio,
+        analysis=analysis,
+        chart_data=chart_data,
+    )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as output_file:
