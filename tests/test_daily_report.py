@@ -115,6 +115,17 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(quote.peg_ratio, 2.4)
 
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_quote_turns_json_decode_error_into_quote_warning(self, ticker_mock):
+        ticker_mock.return_value.get_info.side_effect = json.JSONDecodeError(
+            "Invalid JSON", "{", 1
+        )
+
+        quote = fetch_quote(Company("Invalid ticker", "INVALID"))
+
+        self.assertIn("JSONDecodeError", quote.warning)
+        self.assertIn("Yahoo Finance", quote.warning)
+
     @patch("daily_report.requests.get")
     def test_translate_headline_requests_spanish_and_joins_translation_parts(self, get_mock):
         get_mock.return_value = SimpleNamespace(
@@ -352,12 +363,12 @@ class SentimentTests(unittest.TestCase):
 
     def test_watchlist_contains_requested_unique_assets(self):
         tickers = {company.ticker for company in COMPANIES}
-        self.assertEqual(len(COMPANIES), 49)
+        self.assertEqual(len(COMPANIES), 48)
         for ticker in (
             "INTC", "NFLX", "MSFT", "AMZN", "AAPL", "RSP", "META", "UBER",
             "SXR8.DE", "GOOGL", "MP", "DIS", "PLTR", "MELI", "NVDA", "EQQU.L",
             "SWDA.L", "XDWT.DE", "VWRP.L", "CNDX.L", "VVSM.DE", "SOFI", "CSH2.PA",
-            "MOD", "GS", "QTUM", "IS3N.DE", "YODA.L", "CAT", "NEO.TO", "TEM",
+            "MOD", "GS", "QTUM", "IS3N.DE", "CAT", "NEO.TO", "TEM",
             "GEV", "ORCL", "AMD", "MRVL", "VST", "DELL", "SMCI", "AVGO", "VRT",
             "ASML.AS", "TSM", "MRNA", "MU", "RKLB", "NBIS", "BE", "LITE",
         ):

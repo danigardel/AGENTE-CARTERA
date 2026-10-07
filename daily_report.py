@@ -184,7 +184,7 @@ COMPANIES = (
     Company("Goldman Sachs", "GS"),
     Company("Quantum Computing USD", "QTUM"),
     Company("MSCI Emerging Markets (Acc)", "IS3N.DE"),
-    Company("Space Innovators USD (Acc)", "YODA.L"),
+    # Company("Space Innovators ETF", "YODA.L"),  # Yahoo Finance no reconoce este ticker.
     Company("Caterpillar", "CAT"),
     Company("Neo Performance Materials", "NEO.TO"),
     Company("Tempus AI", "TEM"),
@@ -306,12 +306,7 @@ def fetch_quote(company: Company) -> Quote:
         return Quote(warning="Sin ticker público configurado")
     try:
         info = yf.Ticker(company.ticker).get_info()
-    except (
-        yf.exceptions.YFException,
-        requests.RequestException,
-        TimeoutError,
-        OSError,
-    ) as error:
+    except Exception as error:
         message = f"Yahoo Finance: {type(error).__name__}: {error}"
         logging.warning("%s (%s) - %s", company.name, company.ticker, message)
         return Quote(warning=message)
