@@ -6,10 +6,12 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -654,6 +656,29 @@ def _read_gemini_cache(
         timestamp = datetime.fromisoformat(cached.pop("timestamp"))
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("timestamp sin zona horaria")
+        retry_after = cached.get("retry_after_utc")
+        if retry_after is not None:
+            retry_after_datetime = datetime.fromisoformat(retry_after)
+            if (
+                retry_after_datetime.tzinfo is None
+                or retry_after_datetime.utcoffset() is None
+            ):
+                raise ValueError("retry_after_utc sin zona horaria")
+            if now_utc.astimezone(timezone.utc) < retry_after_datetime.astimezone(
+                timezone.utc
+            ):
+                return PortfolioAnalysis(
+                    warning=(
+                        f"{cached.get('failure_warning', 'Gemini no está disponible.')}"
+                        " Se aplaza el siguiente intento hasta "
+                        f"{retry_after_datetime.astimezone(TIMEZONE).strftime('%d/%m/%Y %H:%M')} "
+                        f"({TIMEZONE.key})."
+                    ),
+                    last_updated_utc=timestamp.astimezone(timezone.utc).isoformat(),
+                )
+            if "failure_warning" in cached:
+                return None
+
         timestamp_local = timestamp.astimezone(TIMEZONE)
         if timestamp_local < latest_target:
             logging.info(
@@ -732,6 +757,95 @@ def _write_gemini_cache(
         os.replace(temporary_path, cache_path)
     except (OSError, TypeError, ValueError) as error:
         logging.error("No se pudo guardar la caché Gemini %s: %s", cache_path, error)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            logging.error(
+                "No se pudo limpiar el archivo temporal de caché %s: %s",
+                temporary_path,
+                cleanup_error,
+            )
+
+
+def _gemini_retry_delay(
+    error: requests.RequestException,
+    now_utc: datetime,
+) -> timedelta:
+    response = error.response if isinstance(error, requests.HTTPError) else None
+    if response is not None:
+        retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
+        if retry_after:
+            try:
+                return max(timedelta(0), timedelta(seconds=float(retry_after)))
+            except (TypeError, ValueError, OverflowError):
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    return max(
+                        timedelta(0),
+                        retry_at.astimezone(timezone.utc)
+                        - now_utc.astimezone(timezone.utc),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+        try:
+            body = response.json()
+        except (ValueError, AttributeError):
+            body = {}
+        serialized_body = json.dumps(body, ensure_ascii=False)
+        retry_match = re.search(
+            r"retry in\s+((?:\d+(?:\.\d+)?h)?(?:\d+(?:\.\d+)?m)?"
+            r"(?:\d+(?:\.\d+)?s)?)",
+            serialized_body,
+            re.IGNORECASE,
+        )
+        if retry_match:
+            duration_match = re.fullmatch(
+                r"(?:(\d+(?:\.\d+)?)h)?"
+                r"(?:(\d+(?:\.\d+)?)m)?"
+                r"(?:(\d+(?:\.\d+)?)s)?",
+                retry_match.group(1),
+                re.IGNORECASE,
+            )
+            if duration_match:
+                hours, minutes, seconds = (
+                    float(value or 0) for value in duration_match.groups()
+                )
+                return timedelta(
+                    hours=hours,
+                    minutes=minutes,
+                    seconds=seconds,
+                )
+
+        if response.status_code == 429:
+            return timedelta(hours=3)
+    return timedelta(minutes=15)
+
+
+def _write_gemini_failure_cache(
+    cache_path: Path,
+    warning: str,
+    now_utc: datetime,
+    retry_delay: timedelta,
+) -> None:
+    timestamp = now_utc.astimezone(timezone.utc)
+    cached = {
+        "timestamp": timestamp.isoformat(),
+        "failure_warning": warning,
+        "retry_after_utc": (timestamp + retry_delay).isoformat(),
+    }
+    temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path.write_text(
+            json.dumps(cached, ensure_ascii=False, allow_nan=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, cache_path)
+    except (OSError, TypeError, ValueError) as error:
+        logging.error("No se pudo guardar la pausa de Gemini %s: %s", cache_path, error)
         try:
             temporary_path.unlink(missing_ok=True)
         except OSError as cleanup_error:
@@ -823,6 +937,12 @@ def analyze_portfolio(
             f"{provider_message}"
         )
         logging.warning("%s (%s)", analysis.warning, type(error).__name__)
+        _write_gemini_failure_cache(
+            cache_path,
+            analysis.warning,
+            now_utc,
+            _gemini_retry_delay(error, now_utc),
+        )
         return analysis
 
     try:
@@ -861,6 +981,12 @@ def analyze_portfolio(
             "o no válida."
         )
         logging.warning("%s (%s)", analysis.warning, error)
+        _write_gemini_failure_cache(
+            cache_path,
+            analysis.warning,
+            now_utc,
+            timedelta(minutes=15),
+        )
         return analysis
 
     allowed_buys = {

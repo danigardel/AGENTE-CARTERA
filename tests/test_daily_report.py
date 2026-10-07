@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -547,6 +547,100 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("HTTP 429", analysis.warning)
         self.assertIn("Quota exceeded", analysis.warning)
         self.assertNotIn("secret-test-key", analysis.warning)
+
+    @patch("daily_report.requests.post")
+    def test_gemini_429_persists_provider_retry_delay_and_suppresses_retries(
+        self, post_mock
+    ):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        response = SimpleNamespace(
+            status_code=429,
+            headers={},
+            json=lambda: {
+                "error": {
+                    "message": (
+                        "Quota exceeded. Please retry in 10h49m15.795500506s."
+                    )
+                }
+            },
+        )
+        post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
+            response=response
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            failed = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+            suppressed = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=cache_path,
+                now_utc=now + timedelta(minutes=5),
+            )
+
+            cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+            retry_at = datetime.fromisoformat(cache_data["retry_after_utc"])
+            retried = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=cache_path,
+                now_utc=retry_at + timedelta(minutes=1),
+            )
+
+        self.assertIn("HTTP 429", failed.warning)
+        self.assertIn("10h49m15.795500506s", cache_data["failure_warning"])
+        self.assertIn("Se aplaza el siguiente intento", suppressed.warning)
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertIn("HTTP 429", retried.warning)
+
+    @patch("daily_report.requests.post")
+    def test_gemini_transient_error_uses_persisted_cooldown(self, post_mock):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        response = SimpleNamespace(
+            status_code=503,
+            headers={},
+            json=lambda: {"error": {"message": "Service unavailable"}},
+        )
+        post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
+            response=response
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            failed = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+            suppressed = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=cache_path,
+                now_utc=now + timedelta(minutes=10),
+            )
+            retried = analyze_portfolio(
+                [],
+                [],
+                api_key="secret-test-key",
+                cache_path=cache_path,
+                now_utc=now + timedelta(minutes=16),
+            )
+
+        self.assertIn("HTTP 503", failed.warning)
+        self.assertIn("Se aplaza el siguiente intento", suppressed.warning)
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertIn("HTTP 503", retried.warning)
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_returns_fresh_cache_without_calling_gemini(self, post_mock):
