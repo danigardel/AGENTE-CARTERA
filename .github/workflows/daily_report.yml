@@ -73,6 +73,8 @@ jobs:
       - name: Prepare Gemini cache key
         id: gemini-cache-after
         if: always()
+        env:
+          GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
         run: |
           python - <<'PY'
           import json

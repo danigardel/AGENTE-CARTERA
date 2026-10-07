@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import logging
@@ -639,6 +640,7 @@ Datos actuales:
 def _read_gemini_cache(
     cache_path: Path,
     now_utc: datetime,
+    api_key_fingerprint: str | None = None,
 ) -> PortfolioAnalysis | None:
     if now_utc.tzinfo is None or now_utc.utcoffset() is None:
         raise ValueError("now_utc debe incluir una zona horaria")
@@ -656,6 +658,19 @@ def _read_gemini_cache(
         timestamp = datetime.fromisoformat(cached.pop("timestamp"))
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("timestamp sin zona horaria")
+        cached_fingerprint = cached.get("api_key_fingerprint")
+        if (
+            "retry_after_utc" in cached
+            and (
+                "api_key_fingerprint" not in cached
+                or cached_fingerprint != api_key_fingerprint
+            )
+        ):
+            logging.info(
+                "La clave Gemini cambió o la caché es anterior al control de claves; "
+                "se omite la pausa asociada al fallo anterior."
+            )
+            return None
         retry_after = cached.get("retry_after_utc")
         if retry_after is not None:
             retry_after_datetime = datetime.fromisoformat(retry_after)
@@ -829,12 +844,14 @@ def _write_gemini_failure_cache(
     warning: str,
     now_utc: datetime,
     retry_delay: timedelta,
+    api_key_fingerprint: str | None,
 ) -> None:
     timestamp = now_utc.astimezone(timezone.utc)
     cached = {
         "timestamp": timestamp.isoformat(),
         "failure_warning": warning,
         "retry_after_utc": (timestamp + retry_delay).isoformat(),
+        "api_key_fingerprint": api_key_fingerprint,
     }
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
@@ -868,12 +885,21 @@ def analyze_portfolio(
     analysis = PortfolioAnalysis()
     cache_path = cache_path or GEMINI_CACHE_FILE
     now_utc = now_utc or datetime.now(timezone.utc)
-    cached_analysis = _read_gemini_cache(cache_path, now_utc)
+    api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
+    api_key_fingerprint = (
+        hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+        if api_key
+        else None
+    )
+    cached_analysis = _read_gemini_cache(
+        cache_path,
+        now_utc,
+        api_key_fingerprint,
+    )
     if cached_analysis is not None:
         logging.info("Se reutiliza el análisis Gemini almacenado en %s.", cache_path)
         return cached_analysis
 
-    api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
     if not api_key:
         analysis.warning = (
             "Análisis IA no disponible: configura el secreto GEMINI_API_KEY "
@@ -942,6 +968,7 @@ def analyze_portfolio(
             analysis.warning,
             now_utc,
             _gemini_retry_delay(error, now_utc),
+            api_key_fingerprint,
         )
         return analysis
 
@@ -986,6 +1013,7 @@ def analyze_portfolio(
             analysis.warning,
             now_utc,
             timedelta(minutes=15),
+            api_key_fingerprint,
         )
         return analysis
 

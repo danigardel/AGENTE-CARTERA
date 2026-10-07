@@ -643,6 +643,77 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("HTTP 503", retried.warning)
 
     @patch("daily_report.requests.post")
+    def test_new_api_key_bypasses_failure_cooldown(self, post_mock):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        error_response = SimpleNamespace(
+            status_code=429,
+            headers={},
+            json=lambda: {
+                "error": {
+                    "message": "Quota exceeded. Please retry in 10h."
+                }
+            },
+        )
+        post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
+            response=error_response
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            analyze_portfolio(
+                [],
+                [],
+                api_key="old-account-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+
+            success = {
+                "portfolio_assessment": "Evaluación",
+                "diversification": "Diversificación",
+                "recommended_changes": "Sin cambios",
+                "top_buys": [],
+                "sell_candidates": [],
+                "market_context": "Contexto",
+                "risks": [],
+            }
+            post_mock.return_value.raise_for_status.side_effect = None
+            post_mock.return_value.json.return_value = {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(success)}]}}
+                ]
+            }
+            result = analyze_portfolio(
+                [],
+                [],
+                api_key="new-account-key",
+                cache_path=cache_path,
+                now_utc=now + timedelta(minutes=1),
+            )
+
+        self.assertEqual(result.portfolio_assessment, "Evaluación")
+        self.assertEqual(post_mock.call_count, 2)
+
+    def test_legacy_failure_cache_is_not_allowed_to_block_new_key(self):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        cached_failure = {
+            "timestamp": now.isoformat(),
+            "failure_warning": "Análisis IA no disponible (HTTP 429).",
+            "retry_after_utc": (now + timedelta(hours=10)).isoformat(),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_failure), encoding="utf-8")
+
+            result = _read_gemini_cache(
+                cache_path,
+                now + timedelta(minutes=1),
+                api_key_fingerprint="new-key-fingerprint",
+            )
+
+        self.assertIsNone(result)
+
+    @patch("daily_report.requests.post")
     def test_analyze_portfolio_returns_fresh_cache_without_calling_gemini(self, post_mock):
         now_utc = datetime(2026, 10, 6, 10, 5, tzinfo=TIMEZONE).astimezone(
             timezone.utc
