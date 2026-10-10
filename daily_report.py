@@ -7,12 +7,10 @@ import json
 import logging
 import math
 import os
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -699,6 +697,7 @@ def _read_gemini_cache(
     cache_path: Path,
     now_utc: datetime,
     api_key_fingerprint: str | None = None,
+    rotation_state: dict[str, int] | None = None,
 ) -> PortfolioAnalysis | None:
     if now_utc.tzinfo is None or now_utc.utcoffset() is None:
         raise ValueError("now_utc debe incluir una zona horaria")
@@ -719,6 +718,13 @@ def _read_gemini_cache(
         timestamp_local = timestamp.astimezone(TIMEZONE)
         cached_fingerprint = cached.get("api_key_fingerprint")
         if (
+            rotation_state is not None
+            and cached_fingerprint == api_key_fingerprint
+            and isinstance(cached.get("next_api_key_index"), int)
+            and not isinstance(cached.get("next_api_key_index"), bool)
+        ):
+            rotation_state["next_api_key_index"] = cached["next_api_key_index"]
+        if (
             (
                 cached.get("warning") is not None
                 or cached.get("failure_warning") is not None
@@ -729,8 +735,8 @@ def _read_gemini_cache(
             )
         ):
             logging.info(
-                "La clave Gemini cambió o la caché es anterior al control de claves; "
-                "se omite la pausa asociada al fallo anterior."
+                "El pool Gemini cambió o la caché es anterior al control del pool; "
+                "se omite el fallo almacenado."
             )
             return None
         failure_warning = cached.get("warning") or cached.get("failure_warning")
@@ -738,25 +744,11 @@ def _read_gemini_cache(
             if not isinstance(failure_warning, str) or not failure_warning:
                 raise ValueError("el aviso almacenado no es válido")
 
-            retry_after_datetime = None
-            retry_after = cached.get("retry_after_utc")
-            if retry_after is not None:
-                retry_after_datetime = datetime.fromisoformat(retry_after)
-                if (
-                    retry_after_datetime.tzinfo is None
-                    or retry_after_datetime.utcoffset() is None
-                ):
-                    raise ValueError("retry_after_utc sin zona horaria")
-
             next_target = _next_gemini_target(timestamp_local)
-            cache_until = next_target
-            if retry_after_datetime is not None:
-                retry_local = retry_after_datetime.astimezone(TIMEZONE)
-                cache_until = max(cache_until, retry_local)
-            if now_local < cache_until:
+            if now_local < next_target:
                 warning = (
                     f"{failure_warning} Se mantiene este aviso hasta el siguiente "
-                    f"reintento permitido: {cache_until.strftime('%d/%m/%Y %H:%M')} "
+                    f"hito de análisis: {next_target.strftime('%d/%m/%Y %H:%M')} "
                     f"({TIMEZONE.key})."
                 )
                 return PortfolioAnalysis(
@@ -765,35 +757,14 @@ def _read_gemini_cache(
                 )
             return None
 
-        retry_after = cached.get("retry_after_utc")
-        if retry_after is not None:
-            retry_after_datetime = datetime.fromisoformat(retry_after)
-            if (
-                retry_after_datetime.tzinfo is None
-                or retry_after_datetime.utcoffset() is None
-            ):
-                raise ValueError("retry_after_utc sin zona horaria")
-            if now_utc.astimezone(timezone.utc) < retry_after_datetime.astimezone(
-                timezone.utc
-            ):
-                return PortfolioAnalysis(
-                    warning=(
-                        f"{cached.get('failure_warning', 'Gemini no está disponible.')}"
-                        " Se aplaza el siguiente intento hasta "
-                        f"{retry_after_datetime.astimezone(TIMEZONE).strftime('%d/%m/%Y %H:%M')} "
-                        f"({TIMEZONE.key})."
-                    ),
-                    last_updated_utc=timestamp.astimezone(timezone.utc).isoformat(),
-                )
-            if "failure_warning" in cached:
-                return None
-
         if timestamp_local < latest_target:
             logging.info(
                 "La caché Gemini es anterior al último hito horario (%s).",
                 latest_target.isoformat(),
             )
             return None
+        cached.pop("api_key_fingerprint", None)
+        cached.pop("next_api_key_index", None)
         cached["last_updated_utc"] = timestamp.astimezone(timezone.utc).isoformat()
         analysis = PortfolioAnalysis(**cached)
         if (
@@ -870,11 +841,15 @@ def _write_gemini_cache(
     cache_path: Path,
     analysis: PortfolioAnalysis,
     now_utc: datetime,
+    api_key_fingerprint: str | None,
+    next_api_key_index: int,
 ) -> None:
     cached = asdict(analysis)
     timestamp = now_utc.astimezone(timezone.utc).isoformat()
     cached["timestamp"] = timestamp
     cached["last_updated_utc"] = timestamp
+    cached["api_key_fingerprint"] = api_key_fingerprint
+    cached["next_api_key_index"] = next_api_key_index
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -895,67 +870,12 @@ def _write_gemini_cache(
             )
 
 
-def _gemini_retry_delay(
-    error: requests.RequestException,
-    now_utc: datetime,
-) -> timedelta | None:
-    response = error.response if isinstance(error, requests.HTTPError) else None
-    if response is not None:
-        retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
-        if retry_after:
-            try:
-                return max(timedelta(0), timedelta(seconds=float(retry_after)))
-            except (TypeError, ValueError, OverflowError):
-                try:
-                    retry_at = parsedate_to_datetime(retry_after)
-                    if retry_at.tzinfo is None:
-                        retry_at = retry_at.replace(tzinfo=timezone.utc)
-                    return max(
-                        timedelta(0),
-                        retry_at.astimezone(timezone.utc)
-                        - now_utc.astimezone(timezone.utc),
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    pass
-
-        try:
-            body = response.json()
-        except (ValueError, AttributeError):
-            body = {}
-        serialized_body = json.dumps(body, ensure_ascii=False)
-        retry_match = re.search(
-            r"retry in\s+((?:\d+(?:\.\d+)?h)?(?:\d+(?:\.\d+)?m)?"
-            r"(?:\d+(?:\.\d+)?s)?)",
-            serialized_body,
-            re.IGNORECASE,
-        )
-        if retry_match:
-            duration_match = re.fullmatch(
-                r"(?:(\d+(?:\.\d+)?)h)?"
-                r"(?:(\d+(?:\.\d+)?)m)?"
-                r"(?:(\d+(?:\.\d+)?)s)?",
-                retry_match.group(1),
-                re.IGNORECASE,
-            )
-            if duration_match:
-                hours, minutes, seconds = (
-                    float(value or 0) for value in duration_match.groups()
-                )
-                return timedelta(
-                    hours=hours,
-                    minutes=minutes,
-                    seconds=seconds,
-                )
-
-    return None
-
-
 def _write_gemini_failure_cache(
     cache_path: Path,
     warning: str,
     now_utc: datetime,
-    retry_delay: timedelta | None,
     api_key_fingerprint: str | None,
+    next_api_key_index: int,
 ) -> None:
     timestamp = now_utc.astimezone(timezone.utc)
     cached = {
@@ -963,9 +883,8 @@ def _write_gemini_failure_cache(
         "warning": warning,
         "failure_warning": warning,
         "api_key_fingerprint": api_key_fingerprint,
+        "next_api_key_index": next_api_key_index,
     }
-    if retry_delay is not None and retry_delay > timedelta(0):
-        cached["retry_after_utc"] = (timestamp + retry_delay).isoformat()
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -975,7 +894,7 @@ def _write_gemini_failure_cache(
         )
         os.replace(temporary_path, cache_path)
     except (OSError, TypeError, ValueError) as error:
-        logging.error("No se pudo guardar la pausa de Gemini %s: %s", cache_path, error)
+        logging.error("No se pudo guardar el fallo de Gemini %s: %s", cache_path, error)
         try:
             temporary_path.unlink(missing_ok=True)
         except OSError as cleanup_error:
@@ -997,11 +916,14 @@ def _parse_gemini_api_keys(api_key_value: str | None) -> tuple[str, ...]:
 def _gemini_api_key_fingerprint(api_keys: tuple[str, ...]) -> str | None:
     if not api_keys:
         return None
-    fingerprint_input = api_keys[0] if len(api_keys) == 1 else "\0".join(sorted(api_keys))
+    fingerprint_input = "\0".join(api_keys)
     return hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
 
 
-def _gemini_request_warning(error: requests.RequestException) -> str:
+def _gemini_request_warning(
+    error: requests.RequestException,
+    api_keys: tuple[str, ...] = (),
+) -> str:
     response = error.response if isinstance(error, requests.HTTPError) else None
     status = f" (HTTP {response.status_code})" if response is not None else ""
     provider_message = ""
@@ -1015,10 +937,13 @@ def _gemini_request_warning(error: requests.RequestException) -> str:
                 f" (no se pudo leer el detalle del proveedor: "
                 f"{type(detail_error).__name__})"
             )
-    return (
+    warning = (
         f"Análisis IA no disponible{status}: error de conexión con Gemini."
         f"{provider_message}"
     )
+    for api_key in api_keys:
+        warning = warning.replace(api_key, "[clave oculta]")
+    return warning
 
 
 def analyze_portfolio(
@@ -1036,10 +961,12 @@ def analyze_portfolio(
     api_key_value = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
     api_keys = _parse_gemini_api_keys(api_key_value)
     api_key_fingerprint = _gemini_api_key_fingerprint(api_keys)
+    rotation_state = {"next_api_key_index": 0}
     cached_analysis = _read_gemini_cache(
         cache_path,
         now_utc,
         api_key_fingerprint,
+        rotation_state,
     )
     if cached_analysis is not None:
         logging.info("Se reutiliza el análisis Gemini almacenado en %s.", cache_path)
@@ -1072,8 +999,12 @@ def analyze_portfolio(
         },
     }
     response = None
-    quota_errors: list[requests.RequestException] = []
-    for key_index, key in enumerate(api_keys, start=1):
+    request_errors: list[requests.RequestException] = []
+    successful_key_index: int | None = None
+    start_index = rotation_state["next_api_key_index"] % len(api_keys)
+    for offset in range(len(api_keys)):
+        key_index = (start_index + offset) % len(api_keys)
+        key = api_keys[key_index]
         try:
             response = requests.post(
                 f"{GEMINI_API_URL}/{quote(model, safe='')}:generateContent",
@@ -1085,51 +1016,39 @@ def analyze_portfolio(
                 timeout=(10, 45),
             )
             response.raise_for_status()
+            successful_key_index = key_index
             break
         except requests.RequestException as error:
-            if (
-                isinstance(error, requests.HTTPError)
+            request_errors.append(error)
+            status = (
+                error.response.status_code
+                if isinstance(error, requests.HTTPError)
                 and error.response is not None
-                and error.response.status_code == 429
-            ):
-                quota_errors.append(error)
-                logging.warning(
-                    "La clave Gemini %d/%d alcanzó el límite de cuota; "
-                    "se probará la siguiente clave.",
-                    key_index,
-                    len(api_keys),
-                )
-                continue
-
-            analysis.warning = _gemini_request_warning(error)
-            logging.warning("%s (%s)", analysis.warning, type(error).__name__)
-            _write_gemini_failure_cache(
-                cache_path,
-                analysis.warning,
-                now_utc,
-                _gemini_retry_delay(error, now_utc),
-                api_key_fingerprint,
+                else None
             )
-            return analysis
-    else:
+            logging.warning(
+                "La clave Gemini %d/%d falló%s%s.",
+                offset + 1,
+                len(api_keys),
+                f" (HTTP {status})" if status is not None else "",
+                "; se probará la siguiente clave"
+                if offset + 1 < len(api_keys)
+                else "; pool agotado",
+            )
+            continue
+    if successful_key_index is None:
         analysis.warning = (
-            f"Análisis IA no disponible: las {len(api_keys)} claves configuradas "
-            "alcanzaron la cuota (HTTP 429). "
-            f"{_gemini_request_warning(quota_errors[-1])}"
+            f"Análisis IA no disponible: se agotaron los intentos con las "
+            f"{len(api_keys)} claves configuradas. "
+            f"{_gemini_request_warning(request_errors[-1], api_keys)}"
         )
-        retry_delays = [
-            delay
-            for error in quota_errors
-            if (delay := _gemini_retry_delay(error, now_utc)) is not None
-        ]
-        retry_delay = max(retry_delays) if retry_delays else None
         logging.warning("%s", analysis.warning)
         _write_gemini_failure_cache(
             cache_path,
             analysis.warning,
             now_utc,
-            retry_delay,
             api_key_fingerprint,
+            (start_index + 1) % len(api_keys),
         )
         return analysis
 
@@ -1176,8 +1095,8 @@ def analyze_portfolio(
             cache_path,
             analysis.warning,
             now_utc,
-            None,
             api_key_fingerprint,
+            (successful_key_index + 1) % len(api_keys),
         )
         return analysis
 
@@ -1211,7 +1130,13 @@ def analyze_portfolio(
         logging.warning("Gemini devolvió recomendaciones fuera de los tickers autorizados.")
     updated_at = datetime.now(timezone.utc)
     analysis.last_updated_utc = updated_at.isoformat()
-    _write_gemini_cache(cache_path, analysis, updated_at)
+    _write_gemini_cache(
+        cache_path,
+        analysis,
+        updated_at,
+        api_key_fingerprint,
+        (successful_key_index + 1) % len(api_keys),
+    )
     return analysis
 
 

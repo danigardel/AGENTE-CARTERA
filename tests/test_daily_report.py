@@ -692,7 +692,7 @@ class SentimentTests(unittest.TestCase):
         )
 
     @patch("daily_report.requests.post")
-    def test_gemini_pool_stops_on_503_and_negative_caches_all_429(
+    def test_gemini_pool_exhausts_keys_on_503_and_negative_caches_all_429(
         self, post_mock
     ):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -714,8 +714,9 @@ class SentimentTests(unittest.TestCase):
                 cache_path=cache_path,
                 now_utc=now,
             )
+            self.assertIn("se agotaron los intentos", service_failure.warning)
             self.assertIn("HTTP 503", service_failure.warning)
-            self.assertEqual(post_mock.call_count, 1)
+            self.assertEqual(post_mock.call_count, 2)
 
             quota_response = SimpleNamespace(
                 status_code=429,
@@ -745,14 +746,82 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn("las 2 claves configuradas", all_quota.warning)
         self.assertEqual(post_mock.call_count, 2)
-        self.assertIn("siguiente reintento permitido", suppressed.warning)
+        self.assertIn("siguiente hito de análisis", suppressed.warning)
         self.assertEqual(post_mock.call_count, 2)
         self.assertNotIn("primary", json.dumps(cached))
         self.assertNotIn("backup", json.dumps(cached))
         self.assertIn("api_key_fingerprint", cached)
 
     @patch("daily_report.requests.post")
-    def test_gemini_429_persists_provider_retry_delay_and_suppresses_retries(
+    def test_gemini_successful_requests_rotate_starting_key_across_milestones(
+        self, post_mock
+    ):
+        success_data = {
+            "portfolio_assessment": "Evaluación",
+            "diversification": "Diversificación",
+            "recommended_changes": "Cambios",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto",
+            "risks": [],
+        }
+        post_mock.return_value.raise_for_status.return_value = None
+        post_mock.return_value.json.return_value = {
+            "candidates": [
+                {"content": {"parts": [{"text": json.dumps(success_data)}]}}
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            key_pool = "key1,key2,key3,key4,key5"
+            first_time = datetime(2026, 10, 7, 8, 55, tzinfo=TIMEZONE)
+            analyze_portfolio(
+                [],
+                [],
+                api_key=key_pool,
+                cache_path=cache_path,
+                now_utc=first_time,
+            )
+            stored = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["next_api_key_index"], 1)
+
+            stored["timestamp"] = datetime(
+                2026, 10, 7, 8, 59, tzinfo=TIMEZONE
+            ).isoformat()
+            cache_path.write_text(json.dumps(stored), encoding="utf-8")
+            analyze_portfolio(
+                [],
+                [],
+                api_key=key_pool,
+                cache_path=cache_path,
+                now_utc=datetime(2026, 10, 7, 9, 5, tzinfo=TIMEZONE),
+            )
+            stored = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["next_api_key_index"], 2)
+
+            stored["timestamp"] = datetime(
+                2026, 10, 7, 11, 59, tzinfo=TIMEZONE
+            ).isoformat()
+            cache_path.write_text(json.dumps(stored), encoding="utf-8")
+            analyze_portfolio(
+                [],
+                [],
+                api_key=key_pool,
+                cache_path=cache_path,
+                now_utc=datetime(2026, 10, 7, 12, 5, tzinfo=TIMEZONE),
+            )
+
+        self.assertEqual(
+            [
+                call.kwargs["headers"]["x-goog-api-key"]
+                for call in post_mock.call_args_list
+            ],
+            ["key1", "key2", "key3"],
+        )
+
+    @patch("daily_report.requests.post")
+    def test_gemini_429_negative_cache_ignores_cooldown_until_next_milestone(
         self, post_mock
     ):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -789,23 +858,23 @@ class SentimentTests(unittest.TestCase):
             )
 
             cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
-            retry_at = datetime.fromisoformat(cache_data["retry_after_utc"])
             retried = analyze_portfolio(
                 [],
                 [],
                 api_key="secret-test-key",
                 cache_path=cache_path,
-                now_utc=retry_at + timedelta(minutes=1),
+                now_utc=datetime(2026, 10, 7, 13, 1, tzinfo=timezone.utc),
             )
 
         self.assertIn("HTTP 429", failed.warning)
         self.assertIn("10h49m15.795500506s", cache_data["failure_warning"])
-        self.assertIn("siguiente reintento permitido", suppressed.warning)
+        self.assertNotIn("retry_after_utc", cache_data)
+        self.assertIn("siguiente hito de análisis: 07/10/2026 15:00", suppressed.warning)
         self.assertEqual(post_mock.call_count, 2)
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
-    def test_gemini_transient_error_uses_persisted_cooldown(self, post_mock):
+    def test_gemini_transient_error_caches_until_next_milestone(self, post_mock):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
         response = SimpleNamespace(
             status_code=503,
@@ -844,7 +913,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("HTTP 503", failed.warning)
         self.assertEqual(cache_data["warning"], failed.warning)
         self.assertNotIn("retry_after_utc", cache_data)
-        self.assertIn("siguiente reintento permitido: 07/10/2026 15:00", suppressed.warning)
+        self.assertIn("siguiente hito de análisis: 07/10/2026 15:00", suppressed.warning)
         self.assertEqual(post_mock.call_count, 2)
         self.assertIn("HTTP 503", retried.warning)
 
