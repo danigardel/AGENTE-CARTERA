@@ -694,7 +694,7 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn("HTTP 429", failed.warning)
         self.assertIn("10h49m15.795500506s", cache_data["failure_warning"])
-        self.assertIn("Se aplaza el siguiente intento", suppressed.warning)
+        self.assertIn("siguiente reintento permitido", suppressed.warning)
         self.assertEqual(post_mock.call_count, 2)
         self.assertIn("HTTP 429", retried.warning)
 
@@ -726,16 +726,19 @@ class SentimentTests(unittest.TestCase):
                 cache_path=cache_path,
                 now_utc=now + timedelta(minutes=10),
             )
+            cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
             retried = analyze_portfolio(
                 [],
                 [],
                 api_key="secret-test-key",
                 cache_path=cache_path,
-                now_utc=now + timedelta(minutes=16),
+                now_utc=datetime(2026, 10, 7, 13, 1, tzinfo=timezone.utc),
             )
 
         self.assertIn("HTTP 503", failed.warning)
-        self.assertIn("Se aplaza el siguiente intento", suppressed.warning)
+        self.assertEqual(cache_data["warning"], failed.warning)
+        self.assertNotIn("retry_after_utc", cache_data)
+        self.assertIn("siguiente reintento permitido: 07/10/2026 15:00", suppressed.warning)
         self.assertEqual(post_mock.call_count, 2)
         self.assertIn("HTTP 503", retried.warning)
 
@@ -795,6 +798,7 @@ class SentimentTests(unittest.TestCase):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
         cached_failure = {
             "timestamp": now.isoformat(),
+            "warning": "Análisis IA no disponible (HTTP 503).",
             "failure_warning": "Análisis IA no disponible (HTTP 429).",
             "retry_after_utc": (now + timedelta(hours=10)).isoformat(),
         }

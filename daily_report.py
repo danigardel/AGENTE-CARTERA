@@ -716,9 +716,13 @@ def _read_gemini_cache(
         timestamp = datetime.fromisoformat(cached.pop("timestamp"))
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("timestamp sin zona horaria")
+        timestamp_local = timestamp.astimezone(TIMEZONE)
         cached_fingerprint = cached.get("api_key_fingerprint")
         if (
-            "retry_after_utc" in cached
+            (
+                cached.get("warning") is not None
+                or cached.get("failure_warning") is not None
+            )
             and (
                 "api_key_fingerprint" not in cached
                 or cached_fingerprint != api_key_fingerprint
@@ -729,6 +733,38 @@ def _read_gemini_cache(
                 "se omite la pausa asociada al fallo anterior."
             )
             return None
+        failure_warning = cached.get("warning") or cached.get("failure_warning")
+        if failure_warning is not None:
+            if not isinstance(failure_warning, str) or not failure_warning:
+                raise ValueError("el aviso almacenado no es válido")
+
+            retry_after_datetime = None
+            retry_after = cached.get("retry_after_utc")
+            if retry_after is not None:
+                retry_after_datetime = datetime.fromisoformat(retry_after)
+                if (
+                    retry_after_datetime.tzinfo is None
+                    or retry_after_datetime.utcoffset() is None
+                ):
+                    raise ValueError("retry_after_utc sin zona horaria")
+
+            next_target = _next_gemini_target(timestamp_local)
+            cache_until = next_target
+            if retry_after_datetime is not None:
+                retry_local = retry_after_datetime.astimezone(TIMEZONE)
+                cache_until = max(cache_until, retry_local)
+            if now_local < cache_until:
+                warning = (
+                    f"{failure_warning} Se mantiene este aviso hasta el siguiente "
+                    f"reintento permitido: {cache_until.strftime('%d/%m/%Y %H:%M')} "
+                    f"({TIMEZONE.key})."
+                )
+                return PortfolioAnalysis(
+                    warning=warning,
+                    last_updated_utc=timestamp.astimezone(timezone.utc).isoformat(),
+                )
+            return None
+
         retry_after = cached.get("retry_after_utc")
         if retry_after is not None:
             retry_after_datetime = datetime.fromisoformat(retry_after)
@@ -752,7 +788,6 @@ def _read_gemini_cache(
             if "failure_warning" in cached:
                 return None
 
-        timestamp_local = timestamp.astimezone(TIMEZONE)
         if timestamp_local < latest_target:
             logging.info(
                 "La caché Gemini es anterior al último hito horario (%s).",
@@ -811,6 +846,26 @@ def _read_gemini_cache(
         return None
 
 
+def _next_gemini_target(timestamp_local: datetime) -> datetime:
+    next_hour = next(
+        (hour for hour in TARGET_HOURS if hour > timestamp_local.hour),
+        None,
+    )
+    if next_hour is not None:
+        return timestamp_local.replace(
+            hour=next_hour,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    return (timestamp_local + timedelta(days=1)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
 def _write_gemini_cache(
     cache_path: Path,
     analysis: PortfolioAnalysis,
@@ -843,7 +898,7 @@ def _write_gemini_cache(
 def _gemini_retry_delay(
     error: requests.RequestException,
     now_utc: datetime,
-) -> timedelta:
+) -> timedelta | None:
     response = error.response if isinstance(error, requests.HTTPError) else None
     if response is not None:
         retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
@@ -892,25 +947,25 @@ def _gemini_retry_delay(
                     seconds=seconds,
                 )
 
-        if response.status_code == 429:
-            return timedelta(hours=3)
-    return timedelta(minutes=15)
+    return None
 
 
 def _write_gemini_failure_cache(
     cache_path: Path,
     warning: str,
     now_utc: datetime,
-    retry_delay: timedelta,
+    retry_delay: timedelta | None,
     api_key_fingerprint: str | None,
 ) -> None:
     timestamp = now_utc.astimezone(timezone.utc)
     cached = {
         "timestamp": timestamp.isoformat(),
+        "warning": warning,
         "failure_warning": warning,
-        "retry_after_utc": (timestamp + retry_delay).isoformat(),
         "api_key_fingerprint": api_key_fingerprint,
     }
+    if retry_delay is not None and retry_delay > timedelta(0):
+        cached["retry_after_utc"] = (timestamp + retry_delay).isoformat()
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1070,7 +1125,7 @@ def analyze_portfolio(
             cache_path,
             analysis.warning,
             now_utc,
-            timedelta(minutes=15),
+            None,
             api_key_fingerprint,
         )
         return analysis
