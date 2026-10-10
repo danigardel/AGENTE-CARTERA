@@ -94,12 +94,18 @@ class SentimentTests(unittest.TestCase):
             "currency": "USD",
             "pegRatio": 1.15,
             "trailingPE": 28.5,
+            "regularMarketTime": datetime(
+                2026, 10, 9, 15, 30, tzinfo=timezone.utc
+            ).timestamp(),
+            "exchangeTimezoneName": "America/New_York",
         }
 
         quote = fetch_quote(Company("Example Co", "EX"))
 
         self.assertEqual(quote.peg_ratio, 1.15)
         self.assertEqual(quote.pe_ratio, 28.5)
+        self.assertEqual(quote.market_date, date(2026, 10, 9))
+        self.assertEqual(quote.market_timezone, "America/New_York")
         self.assertIsNone(quote.warning)
 
     @patch("daily_report.get_fx_rate", return_value=1.0)
@@ -245,6 +251,37 @@ class SentimentTests(unittest.TestCase):
             'data-daily="1.5000" data-peg="0.9000" data-consensus="Compra" data-analysts="12" data-news="Alcista"',
             html,
         )
+
+    def test_dashboard_separates_stale_market_quotes_after_fresh_quotes(self):
+        generated_at = datetime(2026, 10, 9, 10, 0, tzinfo=TIMEZONE)
+        reports = [
+            StockReport(
+                Company("US company", "US"),
+                quote=Quote(
+                    daily_change_pct=10,
+                    market_date=date(2026, 10, 8),
+                    market_timezone="America/New_York",
+                ),
+            ),
+            StockReport(
+                Company("European company", "EU"),
+                quote=Quote(
+                    daily_change_pct=-1,
+                    market_date=date(2026, 10, 9),
+                    market_timezone="Europe/Paris",
+                ),
+            ),
+            StockReport(Company("Unknown quote", "NONE")),
+        ]
+
+        html = render_dashboard(reports, generated_at=generated_at)
+
+        self.assertLess(html.index(">EU</p>"), html.index(">US</p>"))
+        self.assertLess(html.index(">US</p>"), html.index(">NONE</p>"))
+        self.assertIn('data-current-day="true"', html)
+        self.assertIn('data-current-day="false"', html)
+        self.assertIn("Cotizaciones pendientes de actualización", html)
+        self.assertIn("último dato: 08/10/2026", html)
 
     def test_dashboard_orders_by_daily_performance_and_shows_report_price(self):
         reports = [
@@ -432,6 +469,66 @@ class SentimentTests(unittest.TestCase):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(charts.portfolio[0]["ticker"], "AAA")
         download_mock.assert_called_once()
+
+    @patch("daily_report.yf.download", return_value=pd.DataFrame())
+    def test_portfolio_heatmap_items_use_portfolio_weights_and_quote_freshness(
+        self, _download_mock
+    ):
+        reports = [
+            StockReport(
+                Company("Current asset", "CUR"),
+                quote=Quote(
+                    daily_change_pct=1.5,
+                    market_date=date(2026, 10, 9),
+                    market_timezone="Europe/Paris",
+                ),
+            ),
+            StockReport(
+                Company("Stale asset", "OLD"),
+                quote=Quote(
+                    daily_change_pct=9,
+                    market_date=date(2026, 10, 8),
+                    market_timezone="America/New_York",
+                ),
+            ),
+        ]
+        portfolio = [
+            PortfolioPosition(
+                asset=PortfolioAsset("Current asset", "CUR", 1, 50, "EUR"),
+                current_value_eur=50,
+                price_date=date(2026, 10, 9),
+            ),
+            PortfolioPosition(
+                asset=PortfolioAsset("Stale asset", "OLD", 1, 50, "USD"),
+                current_value_eur=50,
+                price_date=date(2026, 10, 8),
+            ),
+        ]
+
+        charts = collect_chart_data(reports, portfolio)
+        html = render_dashboard(
+            reports,
+            generated_at=datetime(2026, 10, 9, 10, 0, tzinfo=TIMEZONE),
+            portfolio=portfolio,
+            chart_data=charts,
+        )
+        payload = json.loads(
+            html.split('id="dashboard-chart-data">', 1)[1].split("</script>", 1)[0]
+        )
+
+        self.assertEqual(
+            [item["weight_pct"] for item in charts.portfolio],
+            [50, 50],
+        )
+        self.assertEqual(
+            [item["current_day"] for item in payload["portfolio"]],
+            [True, False],
+        )
+        self.assertIsNone(payload["portfolio"][1]["change_pct"])
+        self.assertIn(".attr('class', 'heatmap-name')", html)
+        self.assertIn("Number(item.weight_pct)", html)
+        self.assertIn("'var(--bg)'", html)
+        self.assertIn(".heatmap-name, .heatmap-return { fill: #000;", html)
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_calls_standard_flash_api_with_portfolio_and_watchlist(self, post_mock):

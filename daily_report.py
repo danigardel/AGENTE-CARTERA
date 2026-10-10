@@ -17,7 +17,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import feedparser
 import pandas as pd
@@ -74,6 +74,8 @@ class Quote:
     previous_close: float | None = None
     current_price_eur: float | None = None
     daily_change_pct: float | None = None
+    market_date: date | None = None
+    market_timezone: str | None = None
     daily_change_abs_eur: float | None = None
     peg_ratio: float | None = None
     pe_ratio: float | None = None
@@ -121,6 +123,8 @@ class PortfolioPosition:
     max_profit_eur: float | None = None
     max_return_pct: float | None = None
     warning: str | None = None
+    price_date: date | None = None
+    market_timezone: str | None = None
 
 
 @dataclass
@@ -316,6 +320,7 @@ def fetch_quote(company: Company) -> Quote:
 
     currency = info.get("currency", "USD")
     fx_rate = get_fx_rate(currency)
+    market_date = _market_date(info)
 
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
     previous_close = info.get("previousClose")
@@ -335,6 +340,8 @@ def fetch_quote(company: Company) -> Quote:
         previous_close=_finite_float(previous_close),
         current_price_eur=_finite_float(current_price, multiplier=fx_rate),
         daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
+        market_date=market_date,
+        market_timezone=_market_timezone(info).key,
         daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
         peg_ratio=peg_ratio_value,
         pe_ratio=pe_ratio_value,
@@ -354,6 +361,50 @@ def fetch_quote(company: Company) -> Quote:
             else "Yahoo Finance no devolvió cotización, consenso, PEG ni PER"
         ),
     )
+
+
+def _market_date(info: dict[str, Any]) -> date | None:
+    market_time = info.get("regularMarketTime")
+    if market_time is None:
+        return None
+    try:
+        if isinstance(market_time, datetime):
+            market_datetime = market_time
+            if market_datetime.tzinfo is None or market_datetime.utcoffset() is None:
+                market_datetime = market_datetime.replace(tzinfo=timezone.utc)
+        else:
+            market_datetime = datetime.fromtimestamp(
+                float(market_time),
+                tz=timezone.utc,
+            )
+        market_datetime = market_datetime.astimezone(_market_timezone(info))
+        return market_datetime.date()
+    except (OverflowError, OSError, TypeError, ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+def _market_timezone(info: dict[str, Any]) -> ZoneInfo:
+    timezone_name = info.get("exchangeTimezoneName")
+    if timezone_name:
+        try:
+            return ZoneInfo(str(timezone_name))
+        except ZoneInfoNotFoundError:
+            logging.warning("Zona horaria de mercado no reconocida: %s", timezone_name)
+    return TIMEZONE
+
+
+def _market_data_is_current(
+    market_date: date | None,
+    market_timezone: str | None,
+    generated_at: datetime,
+) -> bool:
+    if market_date is None:
+        return False
+    try:
+        market_zone = ZoneInfo(market_timezone) if market_timezone else TIMEZONE
+    except ZoneInfoNotFoundError:
+        market_zone = TIMEZONE
+    return market_date == generated_at.astimezone(market_zone).date()
 
 
 def translate_headline(title: str) -> tuple[str | None, str | None]:
@@ -447,6 +498,11 @@ def fetch_portfolio(
         try:
             history = yf.Ticker(asset.ticker).history(period="2y", auto_adjust=False)
             closes = _dated_closes(history)
+            exchange_timezone = getattr(history.index, "tz", None)
+            if exchange_timezone is not None:
+                position.market_timezone = str(
+                    getattr(exchange_timezone, "zone", exchange_timezone)
+                )
         except (
             yf.exceptions.YFException,
             requests.RequestException,
@@ -475,6 +531,8 @@ def fetch_portfolio(
             if dated_close is None:
                 continue
             price_date, close = dated_close
+            if label == "Hoy":
+                position.price_date = price_date
             if asset.currency == "USD":
                 dated_fx_rate = _close_on_or_before(fx_closes, price_date)
                 if dated_fx_rate is None:
@@ -1164,7 +1222,9 @@ def collect_chart_data(
             error,
         )
 
-    report_descriptors: list[tuple[str | None, str, float | None, float | None]] = []
+    report_descriptors: list[
+        tuple[str | None, str, float | None, float | None, date | None, str | None]
+    ] = []
     for report in reports:
         ticker = report.company.ticker
         quote = report.quote
@@ -1184,10 +1244,22 @@ def collect_chart_data(
                 report.company.name,
                 quote.daily_change_pct,
                 previous_close,
+                quote.market_date,
+                quote.market_timezone,
             )
         )
 
-    portfolio_descriptors: list[tuple[str, str, float | None, float | None]] = []
+    portfolio_descriptors: list[
+        tuple[
+            str,
+            str,
+            float | None,
+            float | None,
+            date | None,
+            str | None,
+            float | None,
+        ]
+    ] = []
     for position in portfolio:
         ticker = position.asset.ticker
         report = report_by_ticker.get(ticker)
@@ -1204,6 +1276,11 @@ def collect_chart_data(
         daily_return = position.returns_pct.get("1D")
         current_price = position.prices_eur.get("Hoy")
         previous_close = position.prices_eur.get("1D")
+        market_date = position.price_date
+        market_timezone = position.market_timezone
+        if report is not None and report.company.ticker == ticker:
+            market_date = report.quote.market_date or market_date
+            market_timezone = report.quote.market_timezone or market_timezone
         if report is not None and report.company.ticker == ticker:
             if daily_return is None:
                 daily_return = report.quote.daily_change_pct
@@ -1225,16 +1302,36 @@ def collect_chart_data(
         ):
             previous_close = current_price / (1 + daily_return / 100)
         portfolio_descriptors.append(
-            (ticker, position.asset.name, daily_return, previous_close)
+            (
+                ticker,
+                position.asset.name,
+                daily_return,
+                previous_close,
+                market_date,
+                market_timezone,
+                position.current_value_eur,
+            )
         )
 
+    portfolio_value = sum(
+        max(value or 0, 0) for *_, value in portfolio_descriptors
+    )
     watchlist_samples: dict[str, list[float]] = {}
     portfolio_samples: dict[str, list[float]] = {}
     for group, descriptors, samples in (
         ("watchlist", report_descriptors, watchlist_samples),
         ("portfolio", portfolio_descriptors, portfolio_samples),
     ):
-        for ticker, name, current_change, previous_close in descriptors:
+        for descriptor in descriptors:
+            (
+                ticker,
+                name,
+                current_change,
+                previous_close,
+                market_date,
+                market_timezone,
+            ) = descriptor[:6]
+            allocation_value = descriptor[6] if group == "portfolio" else None
             if current_change is None:
                 current_change = (
                     report_by_ticker[ticker].quote.daily_change_pct
@@ -1245,7 +1342,15 @@ def collect_chart_data(
                 "ticker": ticker or name,
                 "name": name,
                 "change_pct": current_change,
+                "market_date": market_date.isoformat() if market_date else None,
+                "market_timezone": market_timezone,
             }
+            if allocation_value is not None and portfolio_value > 0:
+                chart_item["weight_pct"] = (
+                    max(allocation_value, 0) / portfolio_value * 100
+                )
+            else:
+                chart_item["weight_pct"] = 0.0
             getattr(chart_data, group).append(chart_item)
 
             close_series = closes_by_ticker.get(ticker) if ticker is not None else None
@@ -1442,6 +1547,7 @@ SORT_SCRIPT = """<script>
 
   const cards = Array.from(grid.querySelectorAll('.stock-card'));
   const origin = new Map(cards.map((card, i) => [card, i]));
+  const divider = document.getElementById('stale-market-divider');
 
   // Pesos: menor = mejor. Lo que no esté en el mapa ("Sin datos") va al final.
   const CONSENSUS = { 'Compra fuerte': 1, 'Compra': 2, 'Mantener': 3, 'Rendimiento inferior': 4, 'Venta': 5, 'Venta fuerte': 6 };
@@ -1466,12 +1572,24 @@ SORT_SCRIPT = """<script>
   function sortCards(mode) {
     const key = keys[mode] || keys.daily;
     const sorted = cards.slice().sort((a, b) => {
+      const aCurrent = a.dataset.currentDay === 'true';
+      const bCurrent = b.dataset.currentDay === 'true';
+      if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
       const ka = key(a), kb = key(b);
       if (ka === null || kb === null) return ka === kb ? origin.get(a) - origin.get(b) : (ka === null ? 1 : -1);
       return ka - kb || origin.get(a) - origin.get(b);
     });
     const frag = document.createDocumentFragment();
-    sorted.forEach((c) => frag.appendChild(c));
+    const fresh = sorted.filter((card) => card.dataset.currentDay === 'true');
+    const stale = sorted.filter((card) => card.dataset.currentDay !== 'true');
+    fresh.forEach((card) => frag.appendChild(card));
+    if (stale.length && divider) {
+      divider.hidden = false;
+      frag.appendChild(divider);
+    } else if (divider) {
+      divider.hidden = true;
+    }
+    stale.forEach((card) => frag.appendChild(card));
     grid.appendChild(frag);
   }
 
@@ -1543,7 +1661,7 @@ CHARTS_SCRIPT = """<script>
       (Math.max(-magnitude, Math.min(magnitude, value)));
   }
 
-  function renderHeatmap(id, items) {
+  function renderHeatmap(id, items, proportional = false) {
     const node = document.getElementById(id);
     if (!node) return;
     const width = Math.max(280, node.clientWidth || 280);
@@ -1557,7 +1675,9 @@ CHARTS_SCRIPT = """<script>
     }
 
     const extent = d3.max(items, (item) => Math.abs(item.change_pct || 0)) || 0.5;
-    const root = d3.hierarchy({children: items}).sum(() => 1);
+    const root = d3.hierarchy({children: items}).sum((item) => (
+      proportional ? Math.max(0, Number(item.weight_pct) || 0) : 1
+    ));
     d3.treemap().size([width, height]).paddingInner(3).round(true)(root);
     const groups = svg.selectAll('g').data(root.leaves()).join('g')
       .attr('transform', (item) => `translate(${item.x0},${item.y0})`);
@@ -1565,17 +1685,21 @@ CHARTS_SCRIPT = """<script>
       .attr('width', (item) => Math.max(0, item.x1 - item.x0))
       .attr('height', (item) => Math.max(0, item.y1 - item.y0))
       .attr('rx', 5)
-      .attr('fill', (item) => returnColor(item.data.change_pct, extent));
+      .attr('fill', (item) => item.data.current_day
+        ? returnColor(item.data.change_pct, extent)
+        : 'var(--bg)');
     groups.append('title').text((item) => {
       const change = item.data.change_pct;
       return `${item.data.name} (${item.data.ticker}): ${
         change === null ? 'sin datos' : `${change > 0 ? '+' : ''}${change.toFixed(2)}%`
       }`;
     });
-    groups.filter((item) => item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 38)
-      .append('text').attr('x', 8).attr('y', 18).attr('class', 'heatmap-ticker')
-      .text((item) => item.data.ticker);
-    groups.filter((item) => item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 55)
+    groups.filter((item) => item.data.current_day
+      && item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 38)
+      .append('text').attr('x', 8).attr('y', 18).attr('class', 'heatmap-name')
+      .text((item) => item.data.name);
+    groups.filter((item) => item.data.current_day
+      && item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 55)
       .append('text').attr('x', 8).attr('y', 37).attr('class', 'heatmap-return')
       .text((item) => item.data.change_pct === null
         ? '—'
@@ -1653,7 +1777,7 @@ CHARTS_SCRIPT = """<script>
 
   function renderAll() {
     renderHeatmap('watchlist-heatmap', payload.watchlist);
-    renderHeatmap('portfolio-heatmap', payload.portfolio);
+    renderHeatmap('portfolio-heatmap', payload.portfolio, true);
     renderAverageLine('watchlist-average-chart', payload.watchlist_series);
     renderAverageLine('portfolio-average-chart', payload.portfolio_series);
   }
@@ -1680,13 +1804,23 @@ def render_dashboard(
     portfolio = portfolio or []
     chart_data = chart_data or DashboardCharts()
     
-    # ORDENACIÓN POR RENDIMIENTO DIARIO ACTUAL
-    def performance_sort_key(report: StockReport) -> float:
-        if report.quote.daily_change_pct is None:
-            return -math.inf
-        return report.quote.daily_change_pct
-        
-    reports = sorted(reports, key=performance_sort_key, reverse=True)
+    def quote_is_current(report: StockReport) -> bool:
+        return _market_data_is_current(
+            report.quote.market_date,
+            report.quote.market_timezone,
+            generated_at,
+        ) and report.quote.daily_change_pct is not None
+
+    reports = sorted(
+        reports,
+        key=lambda report: (
+            quote_is_current(report),
+            report.quote.daily_change_pct
+            if report.quote.daily_change_pct is not None
+            else -math.inf,
+        ),
+        reverse=True,
+    )
 
     summary = executive_summary(reports)
     label = _esc(summary["sentiment_label"])
@@ -1747,9 +1881,24 @@ def render_dashboard(
             if company.ticker is None
             else ""
         )
+        quote_is_current_today = quote_is_current(report)
+        quote_stale_note = (
+            ""
+            if quote_is_current_today
+            else (
+                '<p class="quote-stale-note">Cotización pendiente de actualización'
+                + (
+                    f' · último dato: {_esc(quote.market_date.strftime("%d/%m/%Y"))}'
+                    if quote.market_date
+                    else " · no hay datos de hoy"
+                )
+                + "</p>"
+            )
+        )
         
         cards.append(
-            f'<article class="stock-card" data-sentiment="{sentiment_signal}" '
+            f'<article class="stock-card" data-current-day="{str(quote_is_current_today).lower()}" '
+            f'data-sentiment="{sentiment_signal}" '
             f'data-daily="{_num_attr(quote.daily_change_pct)}" '
             f'data-peg="{_num_attr(quote.peg_ratio)}" '
             f'data-consensus="{_esc(quote.analyst_consensus or "")}" '
@@ -1770,6 +1919,7 @@ def render_dashboard(
             f'<div><span title="PER basado en beneficios de los últimos doce meses">PER (TTM)</span>'
             f'<strong>{_esc(pe_text)}</strong></div>'
             "</div>"
+            f"{quote_stale_note}"
             f"{private_note}<h3>Titulares clave</h3><ul class=\"headlines\">{headline_list}</ul>"
             f"{warnings_html}</article>"
         )
@@ -1851,8 +2001,32 @@ def render_dashboard(
     else:
         portfolio_total = '<p class="portfolio-total">No hay datos de cartera disponibles.</p>'
     warnings_count = sum(len(report.warnings) for report in reports)
+    stale_report_count = sum(not quote_is_current(report) for report in reports)
+    stale_divider_html = (
+        '<div id="stale-market-divider" class="stock-stale-divider" hidden>'
+        "Cotizaciones pendientes de actualización: mercados aún no abiertos o sin datos de hoy"
+        "</div>"
+        if stale_report_count
+        else ""
+    )
+    chart_payload_data = asdict(chart_data)
+    for group in ("watchlist", "portfolio"):
+        for item in chart_payload_data[group]:
+            market_date = (
+                date.fromisoformat(item["market_date"])
+                if item.get("market_date")
+                else None
+            )
+            current_day = _market_data_is_current(
+                market_date,
+                item.get("market_timezone"),
+                generated_at,
+            ) and item.get("change_pct") is not None
+            item["current_day"] = current_day
+            if not current_day:
+                item["change_pct"] = None
     chart_payload = json.dumps(
-        asdict(chart_data),
+        chart_payload_data,
         ensure_ascii=False,
         allow_nan=False,
     ).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
@@ -1926,8 +2100,10 @@ def render_dashboard(
     .chart-status {{ font-variant-numeric: tabular-nums; }}
     .heatmap-chart {{ display: block; width: 100%; min-height: 240px; overflow: visible; }}
     .average-chart {{ display: block; width: 100%; height: auto; overflow: visible; }}
-    .heatmap-ticker {{ fill: #fff; font-size: 11px; font-weight: 750; pointer-events: none; }}
-    .heatmap-return {{ fill: #fff; font-size: 10px; font-variant-numeric: tabular-nums; pointer-events: none; }}
+    .heatmap-name, .heatmap-return {{ fill: #000; stroke: #fff; stroke-width: 2px; paint-order: stroke;
+      stroke-linejoin: round; pointer-events: none; }}
+    .heatmap-name {{ font-size: 10px; font-weight: 750; }}
+    .heatmap-return {{ font-size: 10px; font-variant-numeric: tabular-nums; }}
     .chart-empty {{ fill: var(--muted); font-size: 12px; }}
     .chart-time {{ fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }}
     .portfolio-visualizations {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 300px); gap: 12px; margin: 0 0 14px; }}
@@ -1944,6 +2120,11 @@ def render_dashboard(
     .analysis-recommendations strong {{ color: var(--text); }}
     .analysis-recommendations li p {{ margin-top: 3px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 15px; }}
+    .stock-stale-divider {{ grid-column: 1 / -1; border-top: 1px dashed var(--muted); color: var(--muted);
+      font-size: 12px; padding-top: 10px; }}
+    .stock-stale-divider[hidden] {{ display: none; }}
+    .quote-stale-note {{ border-left: 2px solid var(--yellow); color: var(--muted); font-size: 11px;
+      margin: 10px 0 0; padding-left: 8px; }}
     .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; }}
     .card-top {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
     .ticker {{ margin: 0 0 3px; }} .stock-card h2 {{ font-size: 17px; line-height: 1.3; margin: 0; }}
@@ -1991,11 +2172,11 @@ def render_dashboard(
     </header>
     <section class="market-charts" aria-label="Visualizaciones del mercado">
       <div class="section-heading"><h2>Mercado de un vistazo</h2>
-        <span>{len(reports)} instrumentos seguidos · bloques de igual tamaño</span></div>
+        <span>{len(reports)} instrumentos seguidos</span></div>
       <div class="market-visualization-grid">
         <article class="market-chart-card chart-resize-target">
           <h3>Mapa de calor · Lista de seguimiento</h3>
-          <p class="chart-subtitle">Rendimiento diario · verde: subida · rojo: bajada · gris: sin datos</p>
+          <p class="chart-subtitle">Rendimiento de hoy · verde: subida · rojo: bajada · datos antiguos o ausentes: fondo oculto</p>
           <svg id="watchlist-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la lista de seguimiento"></svg>
         </article>
         <article class="market-chart-card chart-resize-target">
@@ -2045,7 +2226,7 @@ def render_dashboard(
         <div class="portfolio-visualizations">
           <article class="market-chart-card chart-resize-target">
             <h3>Mapa de calor · Mi cartera</h3>
-            <p class="chart-subtitle">Rendimiento diario de las posiciones</p>
+            <p class="chart-subtitle">Tamaño proporcional al peso actual de cada posición · rendimiento de hoy</p>
             <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la cartera"></svg>
           </article>
           <article class="market-chart-card chart-resize-target">
@@ -2079,7 +2260,7 @@ def render_dashboard(
           <option value="consensus">Consenso de analistas</option>
           <option value="sentiment">Sentimiento de noticias</option>
         </select></div>
-      <div class="grid" id="stock-grid">{"".join(cards)}</div>
+      <div class="grid" id="stock-grid">{stale_divider_html}{"".join(cards)}</div>
     </section>
     <footer>Fuentes: Google News RSS, Google Translate, Yahoo Finance (vía yfinance) y Gemini API. Datos informativos, no asesoramiento financiero.</footer>
   </main>
