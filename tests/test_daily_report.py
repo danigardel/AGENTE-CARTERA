@@ -24,10 +24,15 @@ from daily_report import (
     TIMEZONE,
     _read_gemini_cache,
     analyze_portfolio,
+    build_request_body,
     classify_peg,
     classify_sentiment,
     collect_chart_data,
+    extra_quote_fields,
+    external_ideas_html,
     executive_summary,
+    parse_external_ideas,
+    post_gemini,
     fetch_portfolio,
     fetch_headlines,
     fetch_quote,
@@ -542,6 +547,10 @@ class SentimentTests(unittest.TestCase):
                     analyst_consensus="Compra",
                     target_mean_eur=50,
                     sector="Technology",
+                    extra={
+                        "earnings_date": "2026-10-20",
+                        "pct_from_52w_high": -12.5,
+                    },
                 ),
                 news_sentiment=0.3,
             )
@@ -566,6 +575,13 @@ class SentimentTests(unittest.TestCase):
             ],
             "market_context": "Sentimiento positivo.",
             "risks": [],
+            "external_ideas": [
+                {
+                    "category": "<script>alert(1)</script>",
+                    "examples": "ETF global & defensivo",
+                    "reason": "Diversifica <b>riesgo</b>.",
+                }
+            ],
         }
         post_mock.return_value = SimpleNamespace(
             raise_for_status=lambda: None,
@@ -587,6 +603,7 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(analysis.portfolio_assessment, "Posición pequeña y positiva.")
         self.assertEqual([item["ticker"] for item in analysis.top_buys], ["EX"])
         self.assertEqual(analysis.sell_candidates, [])
+        self.assertEqual(len(analysis.external_ideas), 1)
         self.assertTrue(any("Se omitieron recomendaciones" in risk for risk in analysis.risks))
         endpoint, = post_mock.call_args.args
         self.assertEqual(
@@ -601,11 +618,77 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('"global_news_sentiment": "Alcista"', prompt)
         self.assertIn('"sector": "Technology"', prompt)
         self.assertIn("3 a 5 mejores candidatas", prompt)
+        self.assertIn('"external_ideas"', prompt)
+        self.assertIn('"investment_base_eur": 80', prompt)
+        self.assertIn('"weight_pct": 100.0', prompt)
+        self.assertIn('"earnings_date"', prompt)
 
         html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
         self.assertIn("Análisis de cartera con Gemini Flash", html)
         self.assertIn("Posición pequeña y positiva.", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertNotIn("<script>alert(1)</script>", html)
         self.assertNotIn("Invented Co.", html)
+
+    def test_yahoo_quote_enrichment_and_optional_external_ideas_are_safe(self):
+        now = datetime(2026, 10, 8, 12, 0, tzinfo=TIMEZONE)
+        metrics = extra_quote_fields(
+            {
+                "currentPrice": 90,
+                "fiftyTwoWeekHigh": 100,
+                "fiftyTwoWeekLow": 60,
+                "fiftyDayAverage": 80,
+                "twoHundredDayAverage": 75,
+                "forwardPE": 20,
+                "revenueGrowth": 0.12,
+                "beta": 1.25,
+                "industry": "Semiconductors",
+            },
+            now,
+        )
+        self.assertEqual(metrics["pct_from_52w_high"], -10.0)
+        self.assertEqual(metrics["pct_above_52w_low"], 50.0)
+        self.assertEqual(metrics["pct_vs_sma50"], 12.5)
+        self.assertEqual(metrics["pct_vs_sma200"], 20.0)
+        self.assertEqual(metrics["revenue_growth_pct"], 12.0)
+        self.assertEqual(metrics["industry"], "Semiconductors")
+
+        valid = {
+            "category": "Salud",
+            "examples": "<img src=x>",
+            "reason": "Un hueco diversificador.",
+        }
+        ideas = parse_external_ideas(
+            {"external_ideas": [valid, {"category": "inválida"}]}
+        )
+        self.assertEqual(len(ideas), 1)
+        safe_html = external_ideas_html(ideas)
+        self.assertIn("&lt;img src=x&gt;", safe_html)
+        self.assertNotIn("<img src=x>", safe_html)
+
+    @patch("daily_report.requests.post")
+    def test_gemini_grounding_falls_back_without_rotating_on_tool_rejection(
+        self, post_mock
+    ):
+        unavailable = SimpleNamespace(
+            status_code=403,
+            json=lambda: {"error": {"message": "Google Search tool unavailable"}},
+        )
+        first = SimpleNamespace(
+            raise_for_status=lambda: (_ for _ in ()).throw(
+                requests.HTTPError(response=unavailable)
+            )
+        )
+        second = SimpleNamespace(raise_for_status=lambda: None)
+        post_mock.side_effect = [first, second]
+
+        response, grounded = post_gemini("https://example.test", "key", "prompt")
+
+        self.assertIs(response, second)
+        self.assertFalse(grounded)
+        self.assertIn("google_search", post_mock.call_args_list[0].kwargs["json"]["tools"][0])
+        self.assertNotIn("tools", post_mock.call_args_list[1].kwargs["json"])
+        self.assertIn("thinkingConfig", build_request_body("prompt")["generationConfig"])
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_reports_missing_api_key_without_calling_provider(self, post_mock):
