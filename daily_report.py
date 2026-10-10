@@ -986,6 +986,41 @@ def _write_gemini_failure_cache(
             )
 
 
+def _parse_gemini_api_keys(api_key_value: str | None) -> tuple[str, ...]:
+    if not api_key_value:
+        return ()
+    return tuple(dict.fromkeys(
+        key.strip() for key in api_key_value.split(",") if key.strip()
+    ))
+
+
+def _gemini_api_key_fingerprint(api_keys: tuple[str, ...]) -> str | None:
+    if not api_keys:
+        return None
+    fingerprint_input = api_keys[0] if len(api_keys) == 1 else "\0".join(sorted(api_keys))
+    return hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
+
+
+def _gemini_request_warning(error: requests.RequestException) -> str:
+    response = error.response if isinstance(error, requests.HTTPError) else None
+    status = f" (HTTP {response.status_code})" if response is not None else ""
+    provider_message = ""
+    if response is not None:
+        try:
+            provider_error = response.json().get("error", {})
+            if isinstance(provider_error, dict) and provider_error.get("message"):
+                provider_message = f" {provider_error['message']}"
+        except (ValueError, AttributeError) as detail_error:
+            provider_message = (
+                f" (no se pudo leer el detalle del proveedor: "
+                f"{type(detail_error).__name__})"
+            )
+    return (
+        f"Análisis IA no disponible{status}: error de conexión con Gemini."
+        f"{provider_message}"
+    )
+
+
 def analyze_portfolio(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
@@ -998,12 +1033,9 @@ def analyze_portfolio(
     analysis = PortfolioAnalysis()
     cache_path = cache_path or GEMINI_CACHE_FILE
     now_utc = now_utc or datetime.now(timezone.utc)
-    api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
-    api_key_fingerprint = (
-        hashlib.sha256(api_key.encode("utf-8")).hexdigest()
-        if api_key
-        else None
-    )
+    api_key_value = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
+    api_keys = _parse_gemini_api_keys(api_key_value)
+    api_key_fingerprint = _gemini_api_key_fingerprint(api_keys)
     cached_analysis = _read_gemini_cache(
         cache_path,
         now_utc,
@@ -1013,7 +1045,7 @@ def analyze_portfolio(
         logging.info("Se reutiliza el análisis Gemini almacenado en %s.", cache_path)
         return cached_analysis
 
-    if not api_key:
+    if not api_keys:
         analysis.warning = (
             "Análisis IA no disponible: configura el secreto GEMINI_API_KEY "
             "en GitHub Actions o la variable de entorno local."
@@ -1039,51 +1071,70 @@ def analyze_portfolio(
             "responseMimeType": "application/json",
         },
     }
-    analysis.last_updated_utc = datetime.now(timezone.utc).isoformat()
-    try:
-        response = requests.post(
-            f"{GEMINI_API_URL}/{quote(model, safe='')}:generateContent",
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key,
-            },
-            json=request_body,
-            timeout=(10, 45),
-        )
-        response.raise_for_status()
-    except requests.RequestException as error:
-        status = (
-            f" (HTTP {error.response.status_code})"
-            if isinstance(error, requests.HTTPError) and error.response is not None
-            else ""
-        )
-        provider_message = ""
-        if isinstance(error, requests.HTTPError) and error.response is not None:
-            try:
-                provider_error = error.response.json().get("error", {})
-                provider_message = (
-                    f" {provider_error['message']}"
-                    if isinstance(provider_error, dict) and provider_error.get("message")
-                    else ""
+    response = None
+    quota_errors: list[requests.RequestException] = []
+    for key_index, key in enumerate(api_keys, start=1):
+        try:
+            response = requests.post(
+                f"{GEMINI_API_URL}/{quote(model, safe='')}:generateContent",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": key,
+                },
+                json=request_body,
+                timeout=(10, 45),
+            )
+            response.raise_for_status()
+            break
+        except requests.RequestException as error:
+            if (
+                isinstance(error, requests.HTTPError)
+                and error.response is not None
+                and error.response.status_code == 429
+            ):
+                quota_errors.append(error)
+                logging.warning(
+                    "La clave Gemini %d/%d alcanzó el límite de cuota; "
+                    "se probará la siguiente clave.",
+                    key_index,
+                    len(api_keys),
                 )
-            except (ValueError, AttributeError) as detail_error:
-                provider_message = (
-                    f" (no se pudo leer el detalle del proveedor: "
-                    f"{type(detail_error).__name__})"
-                )
+                continue
+
+            analysis.warning = _gemini_request_warning(error)
+            logging.warning("%s (%s)", analysis.warning, type(error).__name__)
+            _write_gemini_failure_cache(
+                cache_path,
+                analysis.warning,
+                now_utc,
+                _gemini_retry_delay(error, now_utc),
+                api_key_fingerprint,
+            )
+            return analysis
+    else:
         analysis.warning = (
-            f"Análisis IA no disponible{status}: error de conexión con Gemini."
-            f"{provider_message}"
+            f"Análisis IA no disponible: las {len(api_keys)} claves configuradas "
+            "alcanzaron la cuota (HTTP 429). "
+            f"{_gemini_request_warning(quota_errors[-1])}"
         )
-        logging.warning("%s (%s)", analysis.warning, type(error).__name__)
+        retry_delays = [
+            delay
+            for error in quota_errors
+            if (delay := _gemini_retry_delay(error, now_utc)) is not None
+        ]
+        retry_delay = max(retry_delays) if retry_delays else None
+        logging.warning("%s", analysis.warning)
         _write_gemini_failure_cache(
             cache_path,
             analysis.warning,
             now_utc,
-            _gemini_retry_delay(error, now_utc),
+            retry_delay,
             api_key_fingerprint,
         )
         return analysis
+
+    if response is None:
+        raise RuntimeError("La petición a Gemini terminó sin respuesta ni error.")
 
     try:
         response_body = response.json()

@@ -646,6 +646,112 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("secret-test-key", analysis.warning)
 
     @patch("daily_report.requests.post")
+    def test_gemini_pool_rotates_after_429_and_succeeds_with_next_key(self, post_mock):
+        quota_response = SimpleNamespace(
+            status_code=429,
+            headers={},
+            json=lambda: {"error": {"message": "Quota exceeded"}},
+        )
+        quota_result = SimpleNamespace(
+            raise_for_status=lambda: (_ for _ in ()).throw(
+                requests.HTTPError(response=quota_response)
+            )
+        )
+        success_data = {
+            "portfolio_assessment": "Evaluación válida",
+            "diversification": "Diversificada",
+            "recommended_changes": "Sin cambios",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Mixto",
+            "risks": [],
+        }
+        success_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(success_data)}]}}
+                ]
+            },
+        )
+        post_mock.side_effect = [quota_result, success_response]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key=" first-key ,second-key,first-key ",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
+
+        self.assertEqual(analysis.portfolio_assessment, "Evaluación válida")
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["headers"]["x-goog-api-key"] for call in post_mock.call_args_list],
+            ["first-key", "second-key"],
+        )
+
+    @patch("daily_report.requests.post")
+    def test_gemini_pool_stops_on_503_and_negative_caches_all_429(
+        self, post_mock
+    ):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        service_error_response = SimpleNamespace(
+            status_code=503,
+            headers={},
+            json=lambda: {"error": {"message": "Temporary outage"}},
+        )
+        post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
+            response=service_error_response
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            service_failure = analyze_portfolio(
+                [],
+                [],
+                api_key="primary,backup",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+            self.assertIn("HTTP 503", service_failure.warning)
+            self.assertEqual(post_mock.call_count, 1)
+
+            quota_response = SimpleNamespace(
+                status_code=429,
+                headers={},
+                json=lambda: {"error": {"message": "Quota exceeded"}},
+            )
+            post_mock.reset_mock()
+            post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
+                response=quota_response
+            )
+            quota_cache_path = Path(temp_dir) / "quota-cache.json"
+            all_quota = analyze_portfolio(
+                [],
+                [],
+                api_key="primary,backup",
+                cache_path=quota_cache_path,
+                now_utc=now + timedelta(minutes=1),
+            )
+            cached = json.loads(quota_cache_path.read_text(encoding="utf-8"))
+            suppressed = analyze_portfolio(
+                [],
+                [],
+                api_key="primary,backup",
+                cache_path=quota_cache_path,
+                now_utc=now + timedelta(minutes=5),
+            )
+
+        self.assertIn("las 2 claves configuradas", all_quota.warning)
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertIn("siguiente reintento permitido", suppressed.warning)
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertNotIn("primary", json.dumps(cached))
+        self.assertNotIn("backup", json.dumps(cached))
+        self.assertIn("api_key_fingerprint", cached)
+
+    @patch("daily_report.requests.post")
     def test_gemini_429_persists_provider_retry_delay_and_suppresses_retries(
         self, post_mock
     ):
