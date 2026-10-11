@@ -1109,6 +1109,31 @@ def _read_gemini_cache(
             if not isinstance(failure_warning, str) or not failure_warning:
                 raise ValueError("el aviso almacenado no es válido")
 
+            retry_after_value = cached.get("retry_after_utc")
+            if retry_after_value is not None:
+                retry_after = datetime.fromisoformat(retry_after_value)
+                if retry_after.tzinfo is None or retry_after.utcoffset() is None:
+                    raise ValueError("retry_after_utc sin zona horaria")
+                retry_after_local = retry_after.astimezone(TIMEZONE)
+            elif cached.get("failure_policy") in {"daily", "milestone"}:
+                retry_after_local = None
+            else:
+                retry_after_local = timestamp_local + timedelta(minutes=5)
+
+            if retry_after_local is not None:
+                if now_local < retry_after_local:
+                    warning = (
+                        f"{failure_warning} Reintento breve pendiente; se podrá "
+                        f"volver a consultar a partir de "
+                        f"{retry_after_local.strftime('%d/%m/%Y %H:%M:%S')} "
+                        f"({TIMEZONE.key})."
+                    )
+                    return PortfolioAnalysis(
+                        warning=warning,
+                        last_updated_utc=timestamp.astimezone(timezone.utc).isoformat(),
+                    )
+                return None
+
             next_target = _next_gemini_target(timestamp_local)
             if now_local < next_target:
                 warning = (
@@ -1252,6 +1277,8 @@ def _write_gemini_failure_cache(
     now_utc: datetime,
     api_key_fingerprint: str | None,
     next_api_key_index: int,
+    retry_after_utc: datetime | None = None,
+    failure_policy: str = "milestone",
 ) -> None:
     timestamp = now_utc.astimezone(timezone.utc)
     cached = {
@@ -1260,7 +1287,14 @@ def _write_gemini_failure_cache(
         "failure_warning": warning,
         "api_key_fingerprint": api_key_fingerprint,
         "next_api_key_index": next_api_key_index,
+        "failure_policy": (
+            "short_retry" if retry_after_utc is not None else failure_policy
+        ),
     }
+    if retry_after_utc is not None:
+        if retry_after_utc.tzinfo is None or retry_after_utc.utcoffset() is None:
+            raise ValueError("retry_after_utc debe incluir una zona horaria")
+        cached["retry_after_utc"] = retry_after_utc.astimezone(timezone.utc).isoformat()
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1390,6 +1424,63 @@ def _gemini_request_warning(
     return warning
 
 
+def _is_explicit_daily_quota_error(error: requests.RequestException) -> bool:
+    if (
+        not isinstance(error, requests.HTTPError)
+        or error.response is None
+        or error.response.status_code != 429
+    ):
+        return False
+    try:
+        payload = error.response.json()
+    except (ValueError, AttributeError):
+        return False
+    provider_error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    if not isinstance(provider_error, dict):
+        return False
+    details = provider_error.get("details", [])
+    if not isinstance(details, list):
+        return False
+    daily_markers = (
+        "requestsperday",
+        "requestperday",
+        "tokensperday",
+        "tokenperday",
+        "requests_per_day",
+        "request_per_day",
+        "tokens_per_day",
+        "token_per_day",
+        "perday",
+        "per_day",
+        "daily",
+        "rpd",
+    )
+    for detail in details:
+        if not isinstance(detail, dict) or "QuotaFailure" not in str(detail.get("@type", "")):
+            continue
+        violations = detail.get("violations", [])
+        if not isinstance(violations, list):
+            continue
+        for violation in violations:
+            if not isinstance(violation, dict):
+                continue
+            quota_identifiers = " ".join(
+                str(violation.get(field, ""))
+                for field in ("quotaMetric", "quotaId")
+            ).lower()
+            if any(marker in quota_identifiers for marker in daily_markers):
+                return True
+    return False
+
+
+def _pool_exhausted_on_daily_quota(
+    request_errors: list[requests.RequestException],
+) -> bool:
+    return bool(request_errors) and all(
+        _is_explicit_daily_quota_error(error) for error in request_errors
+    )
+
+
 def analyze_portfolio(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
@@ -1469,6 +1560,10 @@ def analyze_portfolio(
             )
             continue
     if successful_key_index is None:
+        daily_quota_exhausted = _pool_exhausted_on_daily_quota(request_errors)
+        retry_after_utc = None
+        if not daily_quota_exhausted:
+            retry_after_utc = now_utc + timedelta(minutes=5)
         analysis.warning = (
             f"Análisis IA no disponible: se agotaron los intentos con las "
             f"{len(api_keys)} claves configuradas. "
@@ -1481,6 +1576,8 @@ def analyze_portfolio(
             now_utc,
             api_key_fingerprint,
             (start_index + 1) % len(api_keys),
+            retry_after_utc=retry_after_utc,
+            failure_policy="daily" if daily_quota_exhausted else "short_retry",
         )
         return analysis
 
