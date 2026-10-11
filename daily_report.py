@@ -1112,8 +1112,10 @@ def _read_gemini_cache(
             next_target = _next_gemini_target(timestamp_local)
             if now_local < next_target:
                 warning = (
-                    f"{failure_warning} Se mantiene este aviso hasta el siguiente "
-                    f"hito de análisis: {next_target.strftime('%d/%m/%Y %H:%M')} "
+                    f"{failure_warning} Este aviso se conserva localmente para "
+                    f"evitar reintentos cada cinco minutos; no es un cooldown "
+                    f"impuesto por Gemini. El siguiente intento se hará en el "
+                    f"siguiente hito de análisis: {next_target.strftime('%d/%m/%Y %H:%M')} "
                     f"({TIMEZONE.key})."
                 )
                 return PortfolioAnalysis(
@@ -1297,13 +1299,17 @@ def _gemini_api_key_fingerprint(api_keys: tuple[str, ...]) -> str | None:
 def _gemini_request_warning(
     error: requests.RequestException,
     api_keys: tuple[str, ...] = (),
+    request_errors: list[requests.RequestException] | None = None,
 ) -> str:
     response = error.response if isinstance(error, requests.HTTPError) else None
     status = f" (HTTP {response.status_code})" if response is not None else ""
     provider_message = ""
+    provider_error: dict[str, Any] = {}
     if response is not None:
         try:
-            provider_error = response.json().get("error", {})
+            payload = response.json()
+            candidate_error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            provider_error = candidate_error if isinstance(candidate_error, dict) else {}
             if isinstance(provider_error, dict) and provider_error.get("message"):
                 provider_message = f" {provider_error['message']}"
         except (ValueError, AttributeError) as detail_error:
@@ -1315,6 +1321,70 @@ def _gemini_request_warning(
         f"Análisis IA no disponible{status}: error de conexión con Gemini."
         f"{provider_message}"
     )
+    errors = request_errors or [error]
+    if errors and all(
+        isinstance(item, requests.HTTPError)
+        and item.response is not None
+        and item.response.status_code == 429
+        for item in errors
+    ):
+        warning += (
+            " Google aplica los límites de Gemini por proyecto (RPM, TPM y RPD), "
+            "no por clave API. Si varias claves del pool pertenecen al mismo "
+            "proyecto, rotarlas no aumenta la cuota. Comprueba en AI Studio el "
+            "proyecto asociado a cada clave y el límite de este modelo; también "
+            "puede haberse excedido el límite por minuto o por tokens, no solo "
+            "el diario."
+        )
+    quota_details: list[str] = []
+    for request_error in errors:
+        if not isinstance(request_error, requests.HTTPError) or request_error.response is None:
+            continue
+        try:
+            payload = request_error.response.json()
+        except (ValueError, AttributeError):
+            continue
+        response_error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if not isinstance(response_error, dict):
+            continue
+        details = response_error.get("details", [])
+        if not isinstance(details, list):
+            continue
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            detail_type = str(detail.get("@type", ""))
+            if "QuotaFailure" in detail_type:
+                violations = detail.get("violations", [])
+                if not isinstance(violations, list):
+                    continue
+                for violation in violations:
+                    if not isinstance(violation, dict):
+                        continue
+                    fields = []
+                    for source, label in (
+                        ("quotaMetric", "métrica"),
+                        ("quotaId", "límite"),
+                        ("quotaValue", "valor"),
+                    ):
+                        value = violation.get(source)
+                        if isinstance(value, (str, int, float)):
+                            fields.append(f"{label}={value}")
+                    dimensions = violation.get("quotaDimensions", {})
+                    if isinstance(dimensions, dict):
+                        for name in ("model", "location"):
+                            value = dimensions.get(name)
+                            if isinstance(value, str):
+                                fields.append(f"{name}={value}")
+                    if fields:
+                        quota_details.append("; ".join(fields))
+            elif "RetryInfo" in detail_type:
+                retry_delay = detail.get("retryDelay")
+                if isinstance(retry_delay, str):
+                    quota_details.append(f"espera indicada por Google={retry_delay}")
+    if quota_details:
+        unique_details = list(dict.fromkeys(quota_details))
+        warning += " Detalle de cuota del proveedor: " + " | ".join(unique_details[:8]) + "."
     for api_key in api_keys:
         warning = warning.replace(api_key, "[clave oculta]")
     return warning
@@ -1402,7 +1472,7 @@ def analyze_portfolio(
         analysis.warning = (
             f"Análisis IA no disponible: se agotaron los intentos con las "
             f"{len(api_keys)} claves configuradas. "
-            f"{_gemini_request_warning(request_errors[-1], api_keys)}"
+            f"{_gemini_request_warning(request_errors[-1], api_keys, request_errors)}"
         )
         logging.warning("%s", analysis.warning)
         _write_gemini_failure_cache(

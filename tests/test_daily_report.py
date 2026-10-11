@@ -23,6 +23,7 @@ from daily_report import (
     StockReport,
     TIMEZONE,
     _read_gemini_cache,
+    _gemini_request_warning,
     analyze_portfolio,
     build_request_body,
     classify_peg,
@@ -690,6 +691,49 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("tools", post_mock.call_args_list[1].kwargs["json"])
         self.assertIn("thinkingConfig", build_request_body("prompt")["generationConfig"])
 
+    def test_gemini_quota_warning_includes_provider_quota_dimensions(self):
+        response = SimpleNamespace(
+            status_code=429,
+            json=lambda: {
+                "error": {
+                    "message": "Quota exceeded",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                            "violations": [
+                                {
+                                    "quotaMetric": "generate_content_free_tier_requests",
+                                    "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                    "quotaValue": "20",
+                                    "quotaDimensions": {
+                                        "model": "gemini-3.8-flash",
+                                        "location": "global",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                            "retryDelay": "10h",
+                        },
+                    ],
+                }
+            },
+        )
+        error = requests.HTTPError(response=response)
+
+        warning = _gemini_request_warning(
+            error,
+            api_keys=("secret-key",),
+            request_errors=[error],
+        )
+
+        self.assertIn("generate_content_free_tier_requests", warning)
+        self.assertIn("model=gemini-3.8-flash", warning)
+        self.assertIn("valor=20", warning)
+        self.assertIn("espera indicada por Google=10h", warning)
+        self.assertNotIn("secret-key", warning)
+
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_reports_missing_api_key_without_calling_provider(self, post_mock):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -828,6 +872,9 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertIn("las 2 claves configuradas", all_quota.warning)
+        self.assertIn("por proyecto", all_quota.warning)
+        self.assertIn("no por clave API", all_quota.warning)
+        self.assertIn("límite por minuto o por tokens", all_quota.warning)
         self.assertEqual(post_mock.call_count, 2)
         self.assertIn("siguiente hito de análisis", suppressed.warning)
         self.assertEqual(post_mock.call_count, 2)
