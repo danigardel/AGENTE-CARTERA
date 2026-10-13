@@ -1189,14 +1189,46 @@ def _build_analysis_prompt(inputs: dict[str, Any]) -> str:
     return build_analysis_prompt(inputs, datetime.now(TIMEZONE))
 
 
-def build_request_body(prompt: str) -> dict[str, Any]:
-    return {
+def build_request_body(prompt: str, *, grounded: bool = True) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "thinkingConfig": {"thinkingBudget": THINKING_BUDGET},
         },
     }
+    if grounded:
+        body["tools"] = [{"google_search": {}}]
+    return body
+
+
+def _grounding_rejected(error: requests.HTTPError) -> bool:
+    response = error.response
+    if response is None or response.status_code not in (400, 403, 429):
+        return False
+    try:
+        payload = response.json()
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    rejection_text = json.dumps(payload, ensure_ascii=False).lower()
+    return any(
+        marker in rejection_text
+        for marker in ("ground", "search", "tool", "limit: 0", "limit:0")
+    )
+
+
+def _http_status(error: requests.RequestException) -> int | None:
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        return error.response.status_code
+    return None
+
+
+def _model_pool_allows_fallback(
+    errors: list[requests.RequestException],
+) -> bool:
+    return bool(errors) and all(_http_status(error) in (429, 503) for error in errors)
 
 
 def _model_not_found(error: requests.RequestException) -> bool:
@@ -1224,11 +1256,28 @@ def post_gemini(
     prompt: str,
 ) -> requests.Response:
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=build_request_body(prompt, grounded=True),
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+        return response
+    except requests.HTTPError as error:
+        if not _grounding_rejected(error):
+            raise
+        logging.warning(
+            "Grounding de Google Search rechazado por Gemini; se reintenta "
+            "inmediatamente con la misma clave y modelo, sin Grounding."
+        )
+
     response = requests.post(
         url,
         headers=headers,
-        json=build_request_body(prompt),
-        timeout=(10, 60),
+        json=build_request_body(prompt, grounded=False),
+        timeout=(10, 45),
     )
     response.raise_for_status()
     return response
@@ -1771,63 +1820,79 @@ def analyze_portfolio(
     )
     response = None
     request_errors: list[requests.RequestException] = []
+    final_model_errors: list[requests.RequestException] = []
     successful_key_index: int | None = None
-    active_model = model
-    fallback_model_used = False
     start_index = rotation_state["next_api_key_index"] % len(api_keys)
-    for offset in range(len(api_keys)):
-        key_index = (start_index + offset) % len(api_keys)
-        key = api_keys[key_index]
-        while True:
-            url = (
-                f"{GEMINI_API_URL}/{quote(active_model, safe='')}:generateContent"
-            )
+    active_model = model
+    models_to_try = [model]
+    if model != GEMINI_FALLBACK_MODEL:
+        models_to_try.append(GEMINI_FALLBACK_MODEL)
+
+    for model_index, active_model in enumerate(models_to_try):
+        model_errors: list[requests.RequestException] = []
+        model_not_found = False
+        for offset in range(len(api_keys)):
+            key_index = (start_index + offset) % len(api_keys)
+            key = api_keys[key_index]
+            url = f"{GEMINI_API_URL}/{quote(active_model, safe='')}:generateContent"
             try:
                 response = post_gemini(url, key, prompt)
                 successful_key_index = key_index
                 break
             except requests.RequestException as error:
-                if (
-                    not fallback_model_used
-                    and _model_not_found(error)
-                    and active_model != GEMINI_FALLBACK_MODEL
-                ):
-                    active_model = GEMINI_FALLBACK_MODEL
-                    fallback_model_used = True
+                if _model_not_found(error):
+                    model_not_found = True
                     logging.warning(
-                        "El modelo Gemini configurado no está disponible; "
-                        "se reintenta con %s.",
+                        "El modelo Gemini %s no está disponible; se probará %s.",
                         active_model,
+                        GEMINI_FALLBACK_MODEL,
                     )
-                    continue
-                request_errors.append(error)
-                status = (
-                    error.response.status_code
-                    if isinstance(error, requests.HTTPError)
-                    and error.response is not None
-                    else None
-                )
+                    model_errors.append(error)
+                    break
+                model_errors.append(error)
+                status = _http_status(error)
                 logging.warning(
-                    "La clave Gemini %d/%d falló%s%s.",
+                    "La clave Gemini %d/%d falló para %s%s%s.",
                     offset + 1,
                     len(api_keys),
+                    active_model,
                     f" (HTTP {status})" if status is not None else "",
                     "; se probará la siguiente clave"
                     if offset + 1 < len(api_keys)
                     else "; pool agotado",
                 )
-                break
         if successful_key_index is not None:
             break
+
+        request_errors.extend(model_errors)
+        final_model_errors = model_errors
+        can_retry_model = (
+            model_index == 0
+            and len(models_to_try) > 1
+            and (
+                model_not_found
+                or _model_pool_allows_fallback(model_errors)
+            )
+        )
+        if not can_retry_model:
+            break
+        logging.warning(
+            "Se agotaron los intentos con %s; se reinicia la rotación de claves "
+            "con el modelo de respaldo %s.",
+            active_model,
+            GEMINI_FALLBACK_MODEL,
+        )
+
     if successful_key_index is None:
-        daily_quota_exhausted = _pool_exhausted_on_daily_quota(request_errors)
+        daily_quota_exhausted = _pool_exhausted_on_daily_quota(final_model_errors)
         retry_after_utc = None
         if not daily_quota_exhausted:
             retry_after_utc = now_utc + timedelta(minutes=5)
         analysis.warning = (
             f"Análisis IA no disponible: se agotaron los intentos con las "
-            f"{len(api_keys)} claves configuradas. "
-            f"{_gemini_request_warning(request_errors[-1], api_keys, request_errors)}"
+            f"{len(api_keys)} claves configuradas en los modelos "
+            f"{model} y {active_model}. "
+            f"{_gemini_request_warning(final_model_errors[-1], api_keys, request_errors)}"
         )
         logging.warning("%s", analysis.warning)
         _write_gemini_failure_cache(
