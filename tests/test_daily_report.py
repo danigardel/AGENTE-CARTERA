@@ -26,6 +26,7 @@ from daily_report import (
     StockReport,
     TIMEZONE,
     _grounding_rejected,
+    _model_pool_allows_fallback,
     _read_gemini_cache,
     _gemini_request_warning,
     analyze_portfolio,
@@ -1293,6 +1294,91 @@ class SentimentTests(unittest.TestCase):
             ],
             ["first", "second", "first"],
         )
+
+    @patch("daily_report.requests.post")
+    def test_timeout_in_primary_pool_retries_with_fallback_model(self, post_mock):
+        result = {
+            "portfolio_assessment": "Evaluación válida",
+            "diversification": "Diversificada",
+            "recommended_changes": "Sin cambios",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto actual",
+            "risks": [],
+        }
+        successful_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+        post_mock.side_effect = [
+            requests.Timeout("Connection timed out"),
+            successful_response,
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
+
+        self.assertEqual(analysis.portfolio_assessment, "Evaluación válida")
+        self.assertEqual(
+            [call.args[0].split("/models/")[-1] for call in post_mock.call_args_list],
+            [
+                "gemini-3.8-flash:generateContent",
+                "gemini-3.7-flash:generateContent",
+            ],
+        )
+
+    def test_model_pool_allows_network_and_server_errors_for_fallback(self):
+        for error in (
+            requests.Timeout("Connection timed out"),
+            requests.ConnectionError("Connection failed"),
+            *(
+                requests.HTTPError(
+                    response=SimpleNamespace(status_code=status_code)
+                )
+                for status_code in (429, 500, 502, 503, 504)
+            ),
+        ):
+            with self.subTest(error=error):
+                self.assertTrue(_model_pool_allows_fallback([error]))
+
+        client_error = requests.HTTPError(
+            response=SimpleNamespace(status_code=400)
+        )
+        self.assertFalse(_model_pool_allows_fallback([client_error]))
+
+    @patch("daily_report.requests.post")
+    def test_failure_warning_lists_only_models_actually_attempted(self, post_mock):
+        bad_request = SimpleNamespace(
+            status_code=400,
+            json=lambda: {"error": {"message": "Invalid request"}},
+        )
+        failed_response = SimpleNamespace(
+            raise_for_status=lambda: (_ for _ in ()).throw(
+                requests.HTTPError(response=bad_request)
+            )
+        )
+        post_mock.return_value = failed_response
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="single-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
+
+        self.assertIn("en los modelos gemini-3.8-flash.", analysis.warning)
+        self.assertNotIn("gemini-3.8-flash y gemini-3.8-flash", analysis.warning)
+        self.assertEqual(post_mock.call_count, 2)
 
     @patch("daily_report.requests.post")
     def test_gemini_successful_requests_rotate_starting_key_across_milestones(

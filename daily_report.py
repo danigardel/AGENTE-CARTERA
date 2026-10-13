@@ -1216,7 +1216,11 @@ def _http_status(error: requests.RequestException) -> int | None:
 def _model_pool_allows_fallback(
     errors: list[requests.RequestException],
 ) -> bool:
-    return bool(errors) and all(_http_status(error) in (429, 503) for error in errors)
+    return bool(errors) and all(
+        (status := _http_status(error)) is None
+        or status in (429, 500, 502, 503, 504)
+        for error in errors
+    )
 
 
 def _model_not_found(error: requests.RequestException) -> bool:
@@ -1815,8 +1819,10 @@ def analyze_portfolio(
     models_to_try = [model]
     if model != GEMINI_FALLBACK_MODEL:
         models_to_try.append(GEMINI_FALLBACK_MODEL)
+    attempted_models: list[str] = []
 
     for model_index, active_model in enumerate(models_to_try):
+        attempted_models.append(active_model)
         model_errors: list[requests.RequestException] = []
         model_not_found = False
         for offset in range(len(api_keys)):
@@ -1879,7 +1885,7 @@ def analyze_portfolio(
         analysis.warning = (
             f"Análisis IA no disponible: se agotaron los intentos con las "
             f"{len(api_keys)} claves configuradas en los modelos "
-            f"{model} y {active_model}. "
+            f"{' y '.join(attempted_models)}. "
             f"{_gemini_request_warning(final_model_errors[-1], api_keys, request_errors)}"
         )
         logging.warning("%s", analysis.warning)
