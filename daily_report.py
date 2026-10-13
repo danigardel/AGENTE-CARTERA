@@ -1204,19 +1204,7 @@ def build_request_body(prompt: str, *, grounded: bool = True) -> dict[str, Any]:
 
 def _grounding_rejected(error: requests.HTTPError) -> bool:
     response = error.response
-    if response is None or response.status_code not in (400, 403, 429):
-        return False
-    try:
-        payload = response.json()
-    except (ValueError, AttributeError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    rejection_text = json.dumps(payload, ensure_ascii=False).lower()
-    return any(
-        marker in rejection_text
-        for marker in ("ground", "search", "tool", "limit: 0", "limit:0")
-    )
+    return response is not None and response.status_code in (400, 403, 429)
 
 
 def _http_status(error: requests.RequestException) -> int | None:
