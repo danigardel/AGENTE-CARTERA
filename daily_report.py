@@ -1189,22 +1189,14 @@ def _build_analysis_prompt(inputs: dict[str, Any]) -> str:
     return build_analysis_prompt(inputs, datetime.now(TIMEZONE))
 
 
-def build_request_body(prompt: str, *, grounded: bool = True) -> dict[str, Any]:
-    body: dict[str, Any] = {
+def build_request_body(prompt: str) -> dict[str, Any]:
+    return {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "thinkingConfig": {"thinkingBudget": THINKING_BUDGET},
         },
     }
-    if grounded:
-        body["tools"] = [{"google_search": {}}]
-    return body
-
-
-def _grounding_rejected(error: requests.HTTPError) -> bool:
-    response = error.response
-    return response is not None and response.status_code in (400, 403, 429)
 
 
 def _http_status(error: requests.RequestException) -> int | None:
@@ -1248,28 +1240,11 @@ def post_gemini(
     prompt: str,
 ) -> requests.Response:
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=build_request_body(prompt, grounded=True),
-            timeout=(10, 60),
-        )
-        response.raise_for_status()
-        return response
-    except requests.HTTPError as error:
-        if not _grounding_rejected(error):
-            raise
-        logging.warning(
-            "Grounding de Google Search rechazado por Gemini; se reintenta "
-            "inmediatamente con la misma clave y modelo, sin Grounding."
-        )
-
     response = requests.post(
         url,
         headers=headers,
-        json=build_request_body(prompt, grounded=False),
-        timeout=(10, 45),
+        json=build_request_body(prompt),
+        timeout=(10, 60),
     )
     response.raise_for_status()
     return response

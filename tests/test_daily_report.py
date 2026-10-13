@@ -25,7 +25,6 @@ from daily_report import (
     Quote,
     StockReport,
     TIMEZONE,
-    _grounding_rejected,
     _model_pool_allows_fallback,
     _read_gemini_cache,
     _gemini_request_warning,
@@ -805,7 +804,7 @@ class SentimentTests(unittest.TestCase):
             post_mock.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
             {"thinkingBudget": 2048},
         )
-        self.assertIn("google_search", post_mock.call_args.kwargs["json"]["tools"][0])
+        self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
         html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
         self.assertIn("Análisis de cartera con Gemini Flash", html)
@@ -868,7 +867,7 @@ class SentimentTests(unittest.TestCase):
             post_mock.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
             {"thinkingBudget": 2048},
         )
-        self.assertIn("google_search", post_mock.call_args.kwargs["json"]["tools"][0])
+        self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
     def test_yahoo_quote_enrichment_and_optional_external_ideas_are_safe(self):
         now = datetime(2026, 10, 8, 12, 0, tzinfo=TIMEZONE)
@@ -907,7 +906,7 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("<img src=x>", safe_html)
 
     @patch("daily_report.requests.post")
-    def test_gemini_request_uses_google_search_and_returns_response(self, post_mock):
+    def test_gemini_request_sends_standard_payload_and_returns_response(self, post_mock):
         response = SimpleNamespace(raise_for_status=lambda: None)
         post_mock.return_value = response
 
@@ -915,98 +914,12 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIs(actual_response, response)
         self.assertEqual(post_mock.call_count, 1)
-        self.assertIn("google_search", post_mock.call_args.kwargs["json"]["tools"][0])
+        self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
         self.assertEqual(post_mock.call_args.kwargs["timeout"], (10, 60))
-        self.assertNotIn("tools", build_request_body("prompt", grounded=False))
         self.assertEqual(
             build_request_body("prompt")["generationConfig"]["thinkingConfig"],
             {"thinkingBudget": 2048},
         )
-
-    @patch("daily_report.requests.post")
-    def test_grounding_quota_rejection_retries_without_grounding_same_key(
-        self, post_mock
-    ):
-        rejection = SimpleNamespace(
-            status_code=429,
-            json=lambda: {
-                "error": {
-                    "message": "Google Search tool quota exceeded (limit: 0)"
-                }
-            },
-        )
-        grounded_failure = SimpleNamespace(
-            raise_for_status=lambda: (_ for _ in ()).throw(
-                requests.HTTPError(response=rejection)
-            )
-        )
-        plain_success = SimpleNamespace(raise_for_status=lambda: None)
-        post_mock.side_effect = [grounded_failure, plain_success]
-
-        result = post_gemini(
-            "https://example.test/model:generateContent",
-            "test-key",
-            "prompt",
-        )
-
-        self.assertIs(result, plain_success)
-        self.assertEqual(post_mock.call_count, 2)
-        grounded_call, plain_call = post_mock.call_args_list
-        self.assertEqual(grounded_call.args, plain_call.args)
-        self.assertEqual(
-            grounded_call.kwargs["headers"]["x-goog-api-key"],
-            plain_call.kwargs["headers"]["x-goog-api-key"],
-        )
-        self.assertIn("tools", grounded_call.kwargs["json"])
-        self.assertNotIn("tools", plain_call.kwargs["json"])
-        self.assertEqual(grounded_call.kwargs["timeout"], (10, 60))
-        self.assertEqual(plain_call.kwargs["timeout"], (10, 45))
-
-    @patch("daily_report.requests.post")
-    def test_generic_429_triggers_grounding_retry_without_keyword_match(
-        self, post_mock
-    ):
-        quota = SimpleNamespace(
-            status_code=429,
-            json=lambda: {"error": {"message": "You exceeded your current quota"}},
-        )
-        grounded_failure = SimpleNamespace(
-            raise_for_status=lambda: (_ for _ in ()).throw(
-                requests.HTTPError(response=quota)
-            )
-        )
-        fallback_quota = SimpleNamespace(
-            status_code=429,
-            json=lambda: {"error": {"message": "You exceeded your current quota"}},
-        )
-        fallback_failure = SimpleNamespace(
-            raise_for_status=lambda: (_ for _ in ()).throw(
-                requests.HTTPError(response=fallback_quota)
-            )
-        )
-        post_mock.side_effect = [grounded_failure, fallback_failure]
-
-        with self.assertRaises(requests.HTTPError):
-            post_gemini("https://example.test/model:generateContent", "test-key", "prompt")
-
-        self.assertEqual(post_mock.call_count, 2)
-        self.assertIn("tools", post_mock.call_args_list[0].kwargs["json"])
-        self.assertNotIn("tools", post_mock.call_args_list[1].kwargs["json"])
-
-    def test_grounding_rejection_uses_only_http_status(self):
-        for status_code in (400, 403, 429):
-            with self.subTest(status_code=status_code):
-                response = SimpleNamespace(status_code=status_code)
-                error = requests.HTTPError(response=response)
-                self.assertTrue(_grounding_rejected(error))
-
-        for status_code in (None, 500, 503):
-            with self.subTest(status_code=status_code):
-                response = (
-                    None if status_code is None else SimpleNamespace(status_code=status_code)
-                )
-                error = requests.HTTPError(response=response)
-                self.assertFalse(_grounding_rejected(error))
 
     def test_gemini_quota_warning_includes_provider_quota_dimensions(self):
         response = SimpleNamespace(
@@ -1118,7 +1031,7 @@ class SentimentTests(unittest.TestCase):
                 ]
             },
         )
-        post_mock.side_effect = [quota_result, quota_result, success_response]
+        post_mock.side_effect = [quota_result, success_response]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             analysis = analyze_portfolio(
@@ -1129,10 +1042,10 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertEqual(analysis.portfolio_assessment, "Evaluación válida")
-        self.assertEqual(post_mock.call_count, 3)
+        self.assertEqual(post_mock.call_count, 2)
         self.assertEqual(
             [call.kwargs["headers"]["x-goog-api-key"] for call in post_mock.call_args_list],
-            ["first-key", "first-key", "second-key"],
+            ["first-key", "second-key"],
         )
 
     @patch("daily_report.requests.post")
@@ -1200,7 +1113,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("no por clave API", all_quota.warning)
         self.assertIn("límite por minuto o por tokens", all_quota.warning)
         self.assertIn("Reintento breve pendiente", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 16)
+        self.assertEqual(post_mock.call_count, 8)
         self.assertIn("HTTP 429", retried.warning)
         self.assertEqual(cached["next_api_key_index"], 1)
         self.assertEqual(cached["failure_policy"], "short_retry")
@@ -1211,20 +1124,12 @@ class SentimentTests(unittest.TestCase):
             ],
             [
                 "primary",
-                "primary",
                 "backup",
-                "backup",
-                "primary",
-                "primary",
-                "backup",
-                "backup",
-                "backup",
-                "backup",
-                "primary",
                 "primary",
                 "backup",
                 "backup",
                 "primary",
+                "backup",
                 "primary",
             ],
         )
@@ -1378,7 +1283,7 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn("en los modelos gemini-3.8-flash.", analysis.warning)
         self.assertNotIn("gemini-3.8-flash y gemini-3.8-flash", analysis.warning)
-        self.assertEqual(post_mock.call_count, 2)
+        self.assertEqual(post_mock.call_count, 1)
 
     @patch("daily_report.requests.post")
     def test_gemini_successful_requests_rotate_starting_key_across_milestones(
@@ -1498,7 +1403,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("10h49m15.795500506s", cache_data["failure_warning"])
         self.assertIn("retry_after_utc", cache_data)
         self.assertIn("Reintento breve pendiente", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 8)
+        self.assertEqual(post_mock.call_count, 4)
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
@@ -1563,7 +1468,7 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("retry_after_utc", cache_data)
         self.assertEqual(cache_data["failure_policy"], "daily")
         self.assertIn("siguiente hito de análisis: 07/10/2026 15:00", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 8)
+        self.assertEqual(post_mock.call_count, 4)
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
@@ -1660,7 +1565,7 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertEqual(result.portfolio_assessment, "Evaluación")
-        self.assertEqual(post_mock.call_count, 5)
+        self.assertEqual(post_mock.call_count, 3)
 
     def test_legacy_failure_cache_is_not_allowed_to_block_new_key(self):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
