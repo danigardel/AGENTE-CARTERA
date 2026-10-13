@@ -15,6 +15,9 @@ from daily_report import (
     COMPANIES,
     Headline,
     DashboardCharts,
+    FinancialNewsItem,
+    GlobalMarketNews,
+    MACRO_FEEDS,
     PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
@@ -25,9 +28,11 @@ from daily_report import (
     _read_gemini_cache,
     _gemini_request_warning,
     analyze_portfolio,
+    build_analysis_prompt,
     build_request_body,
     classify_peg,
     classify_sentiment,
+    collect_market_radar,
     collect_chart_data,
     extra_quote_fields,
     external_ideas_html,
@@ -36,6 +41,8 @@ from daily_report import (
     post_gemini,
     fetch_portfolio,
     fetch_headlines,
+    fetch_financial_news,
+    _fetch_macro_feed,
     fetch_quote,
     render_dashboard,
     translate_headline,
@@ -43,6 +50,14 @@ from daily_report import (
 
 
 class SentimentTests(unittest.TestCase):
+    def setUp(self):
+        news_patcher = patch("daily_report.collect_financial_news", return_value=[])
+        self.collect_news_mock = news_patcher.start()
+        self.addCleanup(news_patcher.stop)
+        radar_patcher = patch("daily_report.collect_market_radar", return_value=[])
+        self.collect_radar_mock = radar_patcher.start()
+        self.addCleanup(radar_patcher.stop)
+
     def test_sentiment_thresholds_and_missing_data(self):
         self.assertEqual(classify_sentiment(0.2), ("Alcista", "bullish"))
         self.assertEqual(classify_sentiment(-0.2), ("Bajista", "bearish"))
@@ -404,20 +419,155 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Rendimiento medio de la lista de seguimiento", html)
         self.assertIn("07/10/2026 · 11:15 CEST", html)
 
-    def test_watchlist_contains_requested_unique_assets(self):
+    def test_watchlist_has_all_companies_except_unavailable_space_innovators(self):
         tickers = {company.ticker for company in COMPANIES}
         self.assertEqual(len(COMPANIES), 48)
-        for ticker in (
-            "INTC", "NFLX", "MSFT", "AMZN", "AAPL", "RSP", "META", "UBER",
-            "SXR8.DE", "GOOGL", "MP", "DIS", "PLTR", "MELI", "NVDA", "EQQU.L",
-            "SWDA.L", "XDWT.DE", "VWRP.L", "CNDX.L", "VVSM.DE", "SOFI", "CSH2.PA",
-            "MOD", "GS", "QTUM", "IS3N.DE", "CAT", "NEO.TO", "TEM",
-            "GEV", "ORCL", "AMD", "MRVL", "VST", "DELL", "SMCI", "AVGO", "VRT",
-            "ASML.AS", "TSM", "MRNA", "MU", "RKLB", "NBIS", "BE", "LITE",
-        ):
-            with self.subTest(ticker=ticker):
-                self.assertIn(ticker, tickers)
+        self.assertEqual(
+            [(company.name, company.ticker) for company in COMPANIES[:3]],
+            [("Intel", "INTC"), ("Netflix", "NFLX"), ("Microsoft", "MSFT")],
+        )
+        self.assertNotIn("YODA.L", tickers)
         self.assertIsNone(next(company.ticker for company in COMPANIES if company.name == "SpaceX"))
+
+    @patch("daily_report.feedparser.parse")
+    @patch("daily_report.requests.get")
+    def test_yahoo_finance_rss_collects_only_today_and_cleans_summaries(
+        self, get_mock, parse_mock
+    ):
+        get_mock.return_value = SimpleNamespace(
+            content=b"<rss/>",
+            raise_for_status=lambda: None,
+        )
+        parse_mock.return_value = SimpleNamespace(
+            bozo=False,
+            entries=[
+                SimpleNamespace(
+                    title="Company reports <b>growth</b>",
+                    link="https://finance.yahoo.com/news/example",
+                    published_parsed=(2026, 10, 11, 9, 0, 0, 0, 0, 0),
+                    summary="<p>Revenue &amp; profits increased.</p>",
+                ),
+                SimpleNamespace(
+                    title="Old story",
+                    link="https://finance.yahoo.com/news/old",
+                    published_parsed=(2026, 10, 10, 12, 0, 0, 0, 0, 0),
+                    summary="Yesterday",
+                ),
+            ],
+        )
+
+        news = fetch_financial_news(
+            Company("Example Corp", "EX"),
+            date(2026, 10, 11),
+        )
+
+        self.assertEqual(len(news), 1)
+        self.assertEqual(news[0].ticker, "EX")
+        self.assertEqual(news[0].title, "Company reports growth")
+        self.assertEqual(news[0].summary, "Revenue & profits increased.")
+        self.assertIn("s=EX", get_mock.call_args.args[0])
+
+    @patch("daily_report.requests.get", side_effect=requests.Timeout("RSS timeout"))
+    def test_yahoo_finance_rss_failure_returns_no_news(self, get_mock):
+        news = fetch_financial_news(
+            Company("Example Corp", "EX"),
+            date(2026, 10, 11),
+        )
+
+        self.assertEqual(news, [])
+        get_mock.assert_called_once()
+
+    @patch("daily_report.feedparser.parse")
+    @patch("daily_report.requests.get")
+    def test_macro_feed_keeps_english_title_source_and_today_date(
+        self, get_mock, parse_mock
+    ):
+        get_mock.return_value = SimpleNamespace(
+            content=b"<rss/>",
+            raise_for_status=lambda: None,
+        )
+        parse_mock.return_value = SimpleNamespace(
+            bozo=False,
+            entries=[
+                SimpleNamespace(
+                    title="Markets rally after earnings beat",
+                    link="https://news.example/earnings",
+                    source={"title": "Example News"},
+                    published_parsed=(2026, 10, 11, 9, 0, 0, 0, 0, 0),
+                ),
+                SimpleNamespace(
+                    title="Yesterday story",
+                    link="https://news.example/yesterday",
+                    published_parsed=(2026, 10, 10, 9, 0, 0, 0, 0, 0),
+                ),
+            ],
+        )
+
+        news = _fetch_macro_feed(
+            "Fallback source",
+            "https://feeds.example/markets.xml",
+            date(2026, 10, 11),
+        )
+
+        self.assertEqual(len(news), 1)
+        self.assertEqual(news[0].title, "Markets rally after earnings beat")
+        self.assertEqual(news[0].source, "Example News")
+        self.assertEqual(news[0].published.date(), date(2026, 10, 11))
+        self.assertEqual(news[0].url, "https://news.example/earnings")
+
+    @patch("daily_report._fetch_macro_feed")
+    def test_collect_market_radar_sorts_newest_and_caps_total(self, fetch_mock):
+        reference = datetime(2026, 10, 11, 12, 0, tzinfo=TIMEZONE)
+        fetch_mock.side_effect = [
+            [
+                GlobalMarketNews(
+                    title=f"Headline {index}",
+                    source=source,
+                    published=reference - timedelta(minutes=index),
+                    url=f"https://news.example/{index}",
+                )
+                for index in range(100)
+            ]
+            for source, _ in MACRO_FEEDS
+        ]
+
+        news = collect_market_radar(reference)
+
+        self.assertEqual(len(news), 180)
+        self.assertEqual(news[0].published, reference)
+        self.assertEqual(news[-1].published, reference - timedelta(minutes=59))
+        self.assertEqual(fetch_mock.call_count, len(MACRO_FEEDS))
+
+    @patch(
+        "daily_report._fetch_macro_feed",
+        side_effect=[requests.Timeout("feed timeout"), []],
+    )
+    def test_collect_market_radar_omits_failed_feed_and_continues(self, fetch_mock):
+        two_feeds_patch = patch(
+            "daily_report.MACRO_FEEDS",
+            MACRO_FEEDS[:2],
+        )
+        two_feeds_patch.start()
+        self.addCleanup(two_feeds_patch.stop)
+
+        news = collect_market_radar(
+            datetime(2026, 10, 11, 12, 0, tzinfo=TIMEZONE)
+        )
+
+        self.assertEqual(news, [])
+        self.assertEqual(fetch_mock.call_count, 2)
+
+    def test_analysis_prompt_uses_technical_fallback_when_news_are_missing(self):
+        prompt = build_analysis_prompt(
+            {},
+            datetime(2026, 10, 11, 12, 0, tzinfo=TIMEZONE),
+        )
+
+        self.assertIn("Aquí tienes las noticias de hoy:", prompt)
+        self.assertIn("No se recibieron noticias recientes del RSS.", prompt)
+        self.assertIn("haz un análisis técnico básico", prompt)
+        self.assertIn("global_market_radar", prompt)
+        self.assertIn("external_ideas", prompt)
 
     @patch("daily_report.yf.download")
     def test_collect_chart_data_aggregates_intraday_returns_for_watchlist_and_portfolio(self, download_mock):
@@ -592,6 +742,24 @@ class SentimentTests(unittest.TestCase):
                 ]
             },
         )
+        self.collect_news_mock.return_value = [
+            FinancialNewsItem(
+                ticker="EX",
+                company="Example Inc.",
+                title="Example announces quarterly results",
+                summary="Revenue rises year over year.",
+                url="https://finance.yahoo.com/news/example",
+                published=datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc),
+            )
+        ]
+        self.collect_radar_mock.return_value = [
+            GlobalMarketNews(
+                title="Global markets set new record",
+                source="CNBC Top News",
+                published=datetime(2026, 10, 11, 11, 0, tzinfo=timezone.utc),
+                url="https://www.cnbc.com/example",
+            )
+        ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             analysis = analyze_portfolio(
@@ -614,6 +782,14 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("secret-test-key", endpoint)
         self.assertEqual(post_mock.call_args.kwargs["headers"]["x-goog-api-key"], "secret-test-key")
         prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertIn("Aquí tienes las noticias de hoy:", prompt)
+        self.assertIn("Example announces quarterly results", prompt)
+        self.assertIn("Revenue rises year over year.", prompt)
+        self.assertIn("https://finance.yahoo.com/news/example", prompt)
+        self.assertIn('"global_market_radar": [', prompt)
+        self.assertIn('"title": "Global markets set new record"', prompt)
+        self.assertIn('"source": "CNBC Top News"', prompt)
+        self.assertIn('"url": "https://www.cnbc.com/example"', prompt)
         self.assertIn('"quantity": 2', prompt)
         self.assertIn('"price_eur": 42', prompt)
         self.assertIn('"global_news_sentiment": "Alcista"', prompt)
@@ -623,6 +799,11 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('"investment_base_eur": 80', prompt)
         self.assertIn('"weight_pct": 100.0', prompt)
         self.assertIn('"earnings_date"', prompt)
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
+            {"thinkingBudget": 2048},
+        )
+        self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
         html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
         self.assertIn("Análisis de cartera con Gemini Flash", html)
@@ -630,6 +811,62 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertNotIn("Invented Co.", html)
+
+    @patch("daily_report.requests.post")
+    def test_gemini_model_not_found_retries_with_fallback_model(self, post_mock):
+        unavailable = SimpleNamespace(
+            status_code=404,
+            json=lambda: {
+                "error": {"message": "models/gemini-3.8-flash is not found"}
+            },
+        )
+        failed_response = SimpleNamespace(
+            raise_for_status=lambda: (_ for _ in ()).throw(
+                requests.HTTPError(response=unavailable)
+            )
+        )
+        result = {
+            "portfolio_assessment": "Evaluación válida",
+            "diversification": "Diversificada",
+            "recommended_changes": "Sin cambios",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto actual",
+            "risks": [],
+        }
+        successful_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+        post_mock.side_effect = [failed_response, successful_response]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
+
+        self.assertEqual(analysis.portfolio_assessment, "Evaluación válida")
+        self.assertEqual(
+            [call.args[0] for call in post_mock.call_args_list],
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-3.8-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-3.7-flash:generateContent",
+            ],
+        )
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
+            {"thinkingBudget": 2048},
+        )
+        self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
     def test_yahoo_quote_enrichment_and_optional_external_ideas_are_safe(self):
         now = datetime(2026, 10, 8, 12, 0, tzinfo=TIMEZONE)
@@ -668,28 +905,20 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("<img src=x>", safe_html)
 
     @patch("daily_report.requests.post")
-    def test_gemini_grounding_falls_back_without_rotating_on_tool_rejection(
-        self, post_mock
-    ):
-        unavailable = SimpleNamespace(
-            status_code=403,
-            json=lambda: {"error": {"message": "Google Search tool unavailable"}},
-        )
-        first = SimpleNamespace(
-            raise_for_status=lambda: (_ for _ in ()).throw(
-                requests.HTTPError(response=unavailable)
-            )
-        )
-        second = SimpleNamespace(raise_for_status=lambda: None)
-        post_mock.side_effect = [first, second]
+    def test_gemini_request_does_not_use_google_search_tools(self, post_mock):
+        response = SimpleNamespace(raise_for_status=lambda: None)
+        post_mock.return_value = response
 
-        response, grounded = post_gemini("https://example.test", "key", "prompt")
+        actual_response = post_gemini("https://example.test", "key", "prompt")
 
-        self.assertIs(response, second)
-        self.assertFalse(grounded)
-        self.assertIn("google_search", post_mock.call_args_list[0].kwargs["json"]["tools"][0])
-        self.assertNotIn("tools", post_mock.call_args_list[1].kwargs["json"])
-        self.assertIn("thinkingConfig", build_request_body("prompt")["generationConfig"])
+        self.assertIs(actual_response, response)
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
+        self.assertEqual(post_mock.call_args.kwargs["timeout"], (10, 60))
+        self.assertEqual(
+            build_request_body("prompt")["generationConfig"]["thinkingConfig"],
+            {"thinkingBudget": 2048},
+        )
 
     def test_gemini_quota_warning_includes_provider_quota_dimensions(self):
         response = SimpleNamespace(

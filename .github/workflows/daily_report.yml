@@ -65,8 +65,6 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           INVESTOR_PROFILE: ${{ vars.INVESTOR_PROFILE }}
-          GEMINI_GROUNDING: ${{ vars.GEMINI_GROUNDING }}
-          GEMINI_THINKING_LEVEL: ${{ vars.GEMINI_THINKING_LEVEL }}
           GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
         run: |
           mkdir -p public
