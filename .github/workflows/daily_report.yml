@@ -37,7 +37,9 @@ jobs:
         id: gemini-cache-restore
         uses: actions/cache/restore@v4
         with:
-          path: gemini_cache.json
+          path: |
+            gemini_cache.json
+            translations_cache.json
           key: gemini-cache-lookup-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             gemini-cache-data-
@@ -47,18 +49,27 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          import hashlib
           import os
           from pathlib import Path
 
           timestamp = ""
+          translations_hash = ""
           try:
               timestamp = json.loads(
                   Path("gemini_cache.json").read_text(encoding="utf-8")
               ).get("timestamp", "")
           except (OSError, json.JSONDecodeError, AttributeError):
               pass
+          try:
+              translations_hash = hashlib.sha256(
+                  Path("translations_cache.json").read_bytes()
+              ).hexdigest()
+          except OSError:
+              pass
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"timestamp={timestamp}\n")
+              output.write(f"translations_hash={translations_hash}\n")
           PY
 
       - name: Generate daily dashboard
@@ -76,8 +87,10 @@ jobs:
         if: always()
         env:
           GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
+          TRANSLATIONS_CACHE_HASH_BEFORE: ${{ steps.gemini-cache-before.outputs.translations_hash }}
         run: |
           python - <<'PY'
+          import hashlib
           import json
           import os
           import re
@@ -92,8 +105,22 @@ jobs:
               pass
 
           before = os.environ.get("GEMINI_CACHE_TIMESTAMP_BEFORE", "")
-          should_save = bool(timestamp and timestamp != before)
-          key_suffix = re.sub(r"[^A-Za-z0-9_-]", "-", timestamp)
+          translations_hash = ""
+          try:
+              translations_hash = hashlib.sha256(
+                  Path("translations_cache.json").read_bytes()
+              ).hexdigest()
+          except OSError:
+              pass
+          translations_before = os.environ.get("TRANSLATIONS_CACHE_HASH_BEFORE", "")
+          should_save = (
+              bool(timestamp and timestamp != before)
+              or bool(translations_hash and translations_hash != translations_before)
+          )
+          key_suffix = (
+              f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-"
+              f"{re.sub(r'[^A-Za-z0-9_-]', '-', timestamp) or 'translations'}"
+          )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"should_save={'true' if should_save else 'false'}\n")
               if should_save:
@@ -104,7 +131,9 @@ jobs:
         if: success() && steps.gemini-cache-after.outputs.should_save == 'true'
         uses: actions/cache/save@v4
         with:
-          path: gemini_cache.json
+          path: |
+            gemini_cache.json
+            translations_cache.json
           key: ${{ steps.gemini-cache-after.outputs.key }}
 
       - name: Upload Pages artifact

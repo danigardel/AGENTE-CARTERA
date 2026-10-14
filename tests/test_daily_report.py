@@ -18,6 +18,7 @@ from daily_report import (
     FinancialNewsItem,
     GlobalMarketNews,
     MACRO_FEEDS,
+    MAX_TRANSLATION_CACHE_ENTRIES,
     PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
@@ -45,7 +46,9 @@ from daily_report import (
     fetch_financial_news,
     _fetch_macro_feed,
     fetch_quote,
+    load_translations_cache,
     render_dashboard,
+    save_translations_cache,
     translate_headline,
 )
 
@@ -154,18 +157,58 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("JSONDecodeError", quote.warning)
         self.assertIn("Yahoo Finance", quote.warning)
 
+    @patch("daily_report.time.sleep")
     @patch("daily_report.requests.get")
-    def test_translate_headline_requests_spanish_and_joins_translation_parts(self, get_mock):
+    def test_translate_headline_requests_spanish_and_caches_success(
+        self, get_mock, sleep_mock
+    ):
         get_mock.return_value = SimpleNamespace(
             raise_for_status=lambda: None,
             json=lambda: [[["Las acciones", "Stocks"], [" suben", " rise"]]],
         )
+        translations_cache = {}
 
-        translated, warning = translate_headline("Stocks rise")
+        translated, warning = translate_headline("Stocks rise", translations_cache)
 
         self.assertEqual(translated, "Las acciones suben")
         self.assertIsNone(warning)
         self.assertEqual(get_mock.call_args.kwargs["params"]["tl"], "es")
+        self.assertEqual(translations_cache, {"Stocks rise": "Las acciones suben"})
+        sleep_mock.assert_called_once_with(0.2)
+
+    @patch("daily_report.time.sleep")
+    @patch("daily_report.requests.get")
+    def test_translate_headline_cache_hit_skips_network_and_sleep(
+        self, get_mock, sleep_mock
+    ):
+        translations_cache = {"Stocks rise": "Las acciones suben"}
+
+        translated, warning = translate_headline("Stocks rise", translations_cache)
+
+        self.assertEqual(translated, "Las acciones suben")
+        self.assertIsNone(warning)
+        get_mock.assert_not_called()
+        sleep_mock.assert_not_called()
+
+    def test_translation_cache_load_and_save_keep_only_recent_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "translations_cache.json"
+            translations = {
+                f"Title {index}": f"Titular {index}"
+                for index in range(MAX_TRANSLATION_CACHE_ENTRIES + 3)
+            }
+
+            save_translations_cache(translations, cache_path)
+            loaded = load_translations_cache(cache_path)
+            saved = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(saved), MAX_TRANSLATION_CACHE_ENTRIES)
+        self.assertEqual(len(loaded), MAX_TRANSLATION_CACHE_ENTRIES)
+        self.assertNotIn("Title 0", loaded)
+        self.assertEqual(
+            loaded[f"Title {MAX_TRANSLATION_CACHE_ENTRIES + 2}"],
+            f"Titular {MAX_TRANSLATION_CACHE_ENTRIES + 2}",
+        )
 
     def test_summary_aggregates_news_and_analyst_consensus(self):
         reports = [
@@ -492,6 +535,7 @@ class SentimentTests(unittest.TestCase):
             entries=[
                 SimpleNamespace(
                     title="Markets rally after earnings beat",
+                    summary="<p>Global markets gain after results.</p>",
                     link="https://news.example/earnings",
                     source={"title": "Example News"},
                     published_parsed=(2026, 10, 11, 9, 0, 0, 0, 0, 0),
@@ -515,6 +559,17 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(news[0].source, "Example News")
         self.assertEqual(news[0].published.date(), date(2026, 10, 11))
         self.assertEqual(news[0].url, "https://news.example/earnings")
+        self.assertEqual(news[0].summary, "Global markets gain after results.")
+
+    def test_macro_feeds_include_bloomberg_and_investing_spain(self):
+        self.assertIn(
+            ("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss"),
+            MACRO_FEEDS,
+        )
+        self.assertIn(
+            ("Investing.com España", "https://es.investing.com/rss/news.rss"),
+            MACRO_FEEDS,
+        )
 
     @patch("daily_report._fetch_macro_feed")
     def test_collect_market_radar_sorts_newest_and_caps_total(self, fetch_mock):
@@ -536,7 +591,7 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(len(news), 180)
         self.assertEqual(news[0].published, reference)
-        self.assertEqual(news[-1].published, reference - timedelta(minutes=59))
+        self.assertEqual(news[-1].published, reference - timedelta(minutes=35))
         self.assertEqual(fetch_mock.call_count, len(MACRO_FEEDS))
 
     @patch(
@@ -793,6 +848,7 @@ class SentimentTests(unittest.TestCase):
                 source="CNBC Top News",
                 published=datetime(2026, 10, 11, 11, 0, tzinfo=timezone.utc),
                 url="https://www.cnbc.com/example",
+                summary="Markets climbed after company earnings.",
             )
         ]
 
@@ -823,6 +879,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("https://finance.yahoo.com/news/example", prompt)
         self.assertIn('"global_market_radar": [', prompt)
         self.assertIn('"title": "Global markets set new record"', prompt)
+        self.assertIn('"summary": "Markets climbed after company earnings."', prompt)
         self.assertIn('"source": "CNBC Top News"', prompt)
         self.assertIn('"url": "https://www.cnbc.com/example"', prompt)
         self.assertIn('"quantity": 2', prompt)
