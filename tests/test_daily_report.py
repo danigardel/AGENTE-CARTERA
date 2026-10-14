@@ -18,7 +18,6 @@ from daily_report import (
     FinancialNewsItem,
     GlobalMarketNews,
     MACRO_FEEDS,
-    MAX_TRANSLATION_CACHE_ENTRIES,
     PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
@@ -46,9 +45,8 @@ from daily_report import (
     fetch_financial_news,
     _fetch_macro_feed,
     fetch_quote,
-    load_translations_cache,
+    collect_reports,
     render_dashboard,
-    save_translations_cache,
     translate_headline,
 )
 
@@ -157,57 +155,85 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("JSONDecodeError", quote.warning)
         self.assertIn("Yahoo Finance", quote.warning)
 
-    @patch("daily_report.time.sleep")
     @patch("daily_report.requests.get")
-    def test_translate_headline_requests_spanish_and_caches_success(
-        self, get_mock, sleep_mock
-    ):
+    def test_translate_headline_requests_spanish_and_joins_translation_parts(self, get_mock):
         get_mock.return_value = SimpleNamespace(
             raise_for_status=lambda: None,
             json=lambda: [[["Las acciones", "Stocks"], [" suben", " rise"]]],
         )
-        translations_cache = {}
 
-        translated, warning = translate_headline("Stocks rise", translations_cache)
+        translated, warning = translate_headline("Stocks rise")
 
         self.assertEqual(translated, "Las acciones suben")
         self.assertIsNone(warning)
         self.assertEqual(get_mock.call_args.kwargs["params"]["tl"], "es")
-        self.assertEqual(translations_cache, {"Stocks rise": "Las acciones suben"})
-        sleep_mock.assert_called_once_with(0.2)
 
+    @patch("daily_report.translate_headline")
     @patch("daily_report.time.sleep")
-    @patch("daily_report.requests.get")
-    def test_translate_headline_cache_hit_skips_network_and_sleep(
-        self, get_mock, sleep_mock
+    @patch("daily_report.fetch_quote")
+    @patch("daily_report.fetch_headlines")
+    def test_collect_reports_translates_headlines_sequentially(
+        self,
+        headlines_mock,
+        quote_mock,
+        sleep_mock,
+        translate_mock,
     ):
-        translations_cache = {"Stocks rise": "Las acciones suben"}
+        companies = (Company("First", "ONE"), Company("Second", "TWO"))
+        sequence = []
 
-        translated, warning = translate_headline("Stocks rise", translations_cache)
+        def make_headlines(company, *_args):
+            title_list = (
+                ["First headline A", "First headline B"]
+                if company.name == "First"
+                else ["Second headline"]
+            )
+            return (
+                [
+                    Headline(
+                        title,
+                        f"https://news.test/{index}",
+                        "Source",
+                        datetime.now(timezone.utc),
+                        0,
+                    )
+                    for index, title in enumerate(title_list)
+                ],
+                None,
+            )
 
-        self.assertEqual(translated, "Las acciones suben")
-        self.assertIsNone(warning)
-        get_mock.assert_not_called()
-        sleep_mock.assert_not_called()
+        headlines_mock.side_effect = make_headlines
+        translate_mock.side_effect = lambda title: (
+            sequence.append(f"translate:{title}") or f"ES {title}",
+            None,
+        )
+        sleep_mock.side_effect = lambda delay: sequence.append(f"sleep:{delay}")
+        quote_mock.return_value = Quote()
 
-    def test_translation_cache_load_and_save_keep_only_recent_entries(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            cache_path = Path(temp_dir) / "translations_cache.json"
-            translations = {
-                f"Title {index}": f"Titular {index}"
-                for index in range(MAX_TRANSLATION_CACHE_ENTRIES + 3)
-            }
+        reports = collect_reports(companies, date(2026, 10, 14))
 
-            save_translations_cache(translations, cache_path)
-            loaded = load_translations_cache(cache_path)
-            saved = json.loads(cache_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(len(saved), MAX_TRANSLATION_CACHE_ENTRIES)
-        self.assertEqual(len(loaded), MAX_TRANSLATION_CACHE_ENTRIES)
-        self.assertNotIn("Title 0", loaded)
         self.assertEqual(
-            loaded[f"Title {MAX_TRANSLATION_CACHE_ENTRIES + 2}"],
-            f"Titular {MAX_TRANSLATION_CACHE_ENTRIES + 2}",
+            [call.args[0] for call in translate_mock.call_args_list],
+            ["First headline A", "First headline B", "Second headline"],
+        )
+        self.assertEqual(sleep_mock.call_count, 3)
+        self.assertEqual(
+            sequence,
+            [
+                "sleep:0.2",
+                "translate:First headline A",
+                "sleep:0.2",
+                "translate:First headline B",
+                "sleep:0.2",
+                "translate:Second headline",
+            ],
+        )
+        self.assertEqual(
+            [[headline.title_es for headline in report.headlines] for report in reports],
+            [
+                ["ES First headline A", "ES First headline B"],
+                ["ES Second headline"],
+            ],
         )
 
     def test_summary_aggregates_news_and_analyst_consensus(self):

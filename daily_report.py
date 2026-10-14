@@ -34,11 +34,6 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_FALLBACK_MODEL = "gemini-3.7-flash"
 GEMINI_CACHE_FILE = Path("gemini_cache.json")
-TRANSLATIONS_CACHE_FILE = Path("translations_cache.json")
-MAX_TRANSLATION_CACHE_ENTRIES = 1500
-TRANSLATION_CACHE_LOCK = threading.Lock()
-TRANSLATION_REQUEST_LOCK = threading.Lock()
-TRANSLATION_IN_FLIGHT: dict[tuple[int, str], threading.Event] = {}
 YAHOO_FINANCE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 MACRO_FEEDS = (
     ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
@@ -654,53 +649,8 @@ def _market_data_is_current(
     return market_date == generated_at.astimezone(market_zone).date()
 
 
-def load_translations_cache(
-    path: Path = TRANSLATIONS_CACHE_FILE,
-) -> dict[str, str]:
+def translate_headline(title: str) -> tuple[str | None, str | None]:
     try:
-        cached = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except (OSError, json.JSONDecodeError) as error:
-        logging.warning("No se pudo leer la caché de traducciones %s: %s", path, error)
-        return {}
-    if not isinstance(cached, dict):
-        logging.warning("La caché de traducciones %s no contiene un objeto JSON.", path)
-        return {}
-
-    translations = {
-        title: translated
-        for title, translated in cached.items()
-        if isinstance(title, str) and isinstance(translated, str) and translated
-    }
-    return dict(list(translations.items())[-MAX_TRANSLATION_CACHE_ENTRIES:])
-
-
-def save_translations_cache(
-    translations: dict[str, str],
-    path: Path = TRANSLATIONS_CACHE_FILE,
-) -> None:
-    recent_translations = dict(
-        list(translations.items())[-MAX_TRANSLATION_CACHE_ENTRIES:]
-    )
-    translations.clear()
-    translations.update(recent_translations)
-    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path.write_text(
-            json.dumps(translations, ensure_ascii=False, allow_nan=False),
-            encoding="utf-8",
-        )
-        os.replace(temporary_path, path)
-    except OSError as error:
-        logging.warning("No se pudo guardar la caché de traducciones %s: %s", path, error)
-
-
-def _fetch_headline_translation(title: str) -> tuple[str | None, str | None]:
-    try:
-        with TRANSLATION_REQUEST_LOCK:
-            time.sleep(0.2)
         response = requests.get(
             GOOGLE_TRANSLATE_URL,
             params={"client": "gtx", "sl": "auto", "tl": "es", "dt": "t", "q": title},
@@ -717,45 +667,6 @@ def _fetch_headline_translation(title: str) -> tuple[str | None, str | None]:
         message = f"Traducción al español: {type(error).__name__}: {error}"
         logging.warning("No se pudo traducir el titular %r: %s", title, message)
         return None, message
-
-
-def translate_headline(
-    title: str,
-    translations_cache: dict[str, str] | None = None,
-) -> tuple[str | None, str | None]:
-    if translations_cache is None:
-        return _fetch_headline_translation(title)
-
-    cache_key = (id(translations_cache), title)
-    while True:
-        with TRANSLATION_CACHE_LOCK:
-            cached_translation = translations_cache.get(title)
-            if cached_translation:
-                return cached_translation, None
-            pending_request = TRANSLATION_IN_FLIGHT.get(cache_key)
-            if pending_request is None:
-                pending_request = threading.Event()
-                TRANSLATION_IN_FLIGHT[cache_key] = pending_request
-                is_request_owner = True
-            else:
-                is_request_owner = False
-
-        if not is_request_owner:
-            pending_request.wait()
-            continue
-
-        try:
-            translated, warning = _fetch_headline_translation(title)
-            if translated:
-                with TRANSLATION_CACHE_LOCK:
-                    translations_cache[title] = translated
-                    while len(translations_cache) > MAX_TRANSLATION_CACHE_ENTRIES:
-                        del translations_cache[next(iter(translations_cache))]
-            return translated, warning
-        finally:
-            with TRANSLATION_CACHE_LOCK:
-                TRANSLATION_IN_FLIGHT.pop(cache_key, None)
-                pending_request.set()
 
 
 def _finite_float(value: Any, multiplier: float = 1.0) -> float | None:
@@ -2068,15 +1979,8 @@ def analyze_portfolio(
 def collect_reports(
     companies: tuple[Company, ...] = COMPANIES,
     report_date: date | None = None,
-    *,
-    translations_cache: dict[str, str] | None = None,
 ) -> list[StockReport]:
     report_date = report_date or datetime.now(TIMEZONE).date()
-    translations_cache = (
-        translations_cache
-        if translations_cache is not None
-        else load_translations_cache()
-    )
     analyzer = SentimentIntensityAnalyzer()
     reports = [StockReport(company) for company in companies]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -2103,20 +2007,10 @@ def collect_reports(
             if report.quote.warning:
                 report.warnings.append(report.quote.warning)
 
-    headline_tasks = {}
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for report in reports:
-            for headline in report.headlines:
-                headline_tasks[
-                    executor.submit(
-                        translate_headline,
-                        headline.title,
-                        translations_cache,
-                    )
-                ] = (report, headline)
-        for task in as_completed(headline_tasks):
-            report, headline = headline_tasks[task]
-            headline.title_es, warning = task.result()
+    for report in reports:
+        for headline in report.headlines:
+            time.sleep(0.2)
+            headline.title_es, warning = translate_headline(headline.title)
             if warning and warning not in report.warnings:
                 report.warnings.append(warning)
     return reports
@@ -3336,8 +3230,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args()
-    translations_cache = load_translations_cache()
-    reports = collect_reports(translations_cache=translations_cache)
+    reports = collect_reports()
     portfolio = fetch_portfolio()
     analysis = analyze_portfolio(reports, portfolio)
     chart_data = collect_chart_data(reports, portfolio)
@@ -3351,7 +3244,6 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as output_file:
         output_file.write(report_html)
-    save_translations_cache(translations_cache)
     summary = executive_summary(reports)
     logging.info(
         "Dashboard generado en %s: %s empresas, %s titulares, sentimiento %s.",

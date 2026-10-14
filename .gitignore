@@ -4,6 +4,4 @@ __pycache__/
 venv/
 gemini_cache.json
 .gemini_cache.json.tmp
-translations_cache.json
-translations_cache.json.tmp
 GEMINI_API_KEY.txt 
