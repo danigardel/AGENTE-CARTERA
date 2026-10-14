@@ -248,7 +248,7 @@ COMPANIES = (
     Company("Moderna", "MRNA"),
     Company("Micron Technology", "MU"),
     Company("Rocket Lab", "RKLB"),
-    Company("SpaceX", None),
+    Company("SpaceX", "SPCX"),
     Company("Nebius Group (A)", "NBIS"),
     Company("Bloom Energy", "BE"),
     Company("Lumentum Holdings", "LITE"),

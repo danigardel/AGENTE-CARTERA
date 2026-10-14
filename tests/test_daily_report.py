@@ -471,7 +471,10 @@ class SentimentTests(unittest.TestCase):
             [("Intel", "INTC"), ("Netflix", "NFLX"), ("Microsoft", "MSFT")],
         )
         self.assertNotIn("YODA.L", tickers)
-        self.assertIsNone(next(company.ticker for company in COMPANIES if company.name == "SpaceX"))
+        self.assertEqual(
+            next(company.ticker for company in COMPANIES if company.name == "SpaceX"),
+            "SPCX",
+        )
 
     @patch("daily_report.feedparser.parse")
     @patch("daily_report.requests.get")

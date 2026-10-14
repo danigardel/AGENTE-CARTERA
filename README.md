@@ -20,7 +20,7 @@ El archivo se crea en `dashboard.html`. Se puede elegir otra ruta:
 python daily_report.py --output public\index.html
 ```
 
-La lista de seguimiento está en `COMPANIES` y la cartera fija en `PORTFOLIO`, ambas en `daily_report.py`. Están activas las 48 empresas e instrumentos de la lista original; Space Innovators ETF (`YODA.L`) continúa comentado porque Yahoo Finance no reconoce ese ticker. SpaceX no cotiza en bolsa y no dispone de ticker público. La cartera usa símbolos negociados en euros cuando están disponibles (EUNL.DE para iShares Core MSCI World, ASML.AS y XDWT.DE); los activos estadounidenses se convierten desde USD con el cambio histórico USD/EUR de cada fecha. Los periodos comparan el último cierre disponible en o antes de hoy menos 1, 7, 30, 180 y 365 días naturales. El rendimiento MAX usa las posiciones e inversiones base configuradas, sin depender de las fechas de compra.
+La lista de seguimiento está en `COMPANIES` y la cartera fija en `PORTFOLIO`, ambas en `daily_report.py`. Están activas las 48 empresas e instrumentos de la lista original; Space Innovators ETF (`YODA.L`) continúa comentado porque Yahoo Finance no reconoce ese ticker. SpaceX está incluida con el ticker `SPCX` (NASDAQ). La cartera usa símbolos negociados en euros cuando están disponibles (EUNL.DE para iShares Core MSCI World, ASML.AS y XDWT.DE); los activos estadounidenses se convierten desde USD con el cambio histórico USD/EUR de cada fecha. Los periodos comparan el último cierre disponible en o antes de hoy menos 1, 7, 30, 180 y 365 días naturales. El rendimiento MAX usa las posiciones e inversiones base configuradas, sin depender de las fechas de compra.
 
 ## Automatización y GitHub Pages
 
