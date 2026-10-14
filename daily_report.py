@@ -2022,6 +2022,36 @@ def _intraday_close_series(history: Any, ticker: str) -> Any | None:
     return None
 
 
+HEATMAP_NAME_OVERRIDES = {
+    "amazon.com": "Amazon",
+    "broadcom": "Broadcom",
+    "core msci world usd (acc)": "MSCI World",
+    "dell technologies": "Dell",
+    "eqqq nasdaq 100 usd (acc)": "Nasdaq 100",
+    "ftse all-world usd (acc)": "FTSE All-World",
+    "meta platforms (a)": "Meta",
+    "marvell technology": "Marvell",
+    "msci emerging markets (acc)": "Emerging Markets",
+    "msci world information tech.": "World IT",
+    "nasdaq 100 usd (acc)": "Nasdaq 100",
+    "nebius group (a)": "Nebius",
+    "palantir technologies": "Palantir",
+    "semiconductor usd (acc)": "Semiconductors",
+    "smart overnight return etf": "Overnight ETF",
+    "space innovators etf": "Space Innovators",
+    "space innovators usd (acc)": "Space Innovators",
+    "super micro computer": "Super Micro",
+    "s&p 500 equal weight us": "S&P 500 EW",
+    "s&p 500 eur (acc)": "S&P 500",
+    "tsmc (adr)": "TSMC",
+    "quantum computing usd": "Quantum ETF",
+}
+
+
+def _heatmap_label(name: str) -> str:
+    return HEATMAP_NAME_OVERRIDES.get(name.strip().casefold(), name.strip())
+
+
 def collect_chart_data(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
@@ -2193,7 +2223,7 @@ def collect_chart_data(
                 )
             chart_item = {
                 "ticker": ticker or name,
-                "name": name,
+                "name": _heatmap_label(name),
                 "change_pct": current_change,
                 "market_date": market_date.isoformat() if market_date else None,
                 "market_timezone": market_timezone,
@@ -2519,7 +2549,7 @@ CHARTS_SCRIPT = """<script>
   function renderHeatmap(id, items, proportional = false) {
     const node = document.getElementById(id);
     if (!node) return;
-    const width = Math.max(280, node.clientWidth || 280);
+    const width = Math.max(1, node.clientWidth || 1);
     const height = Math.max(240, Math.min(420, Math.ceil(items.length / Math.max(4, Math.floor(width / 110))) * 56));
     const svg = d3.select(node).attr('viewBox', `0 0 ${width} ${height}`).attr('height', height);
     svg.selectAll('*').remove();
@@ -2534,7 +2564,17 @@ CHARTS_SCRIPT = """<script>
       proportional ? Math.max(0, Number(item.weight_pct) || 0) : 1
     ));
     d3.treemap().size([width, height]).paddingInner(3).round(true)(root);
-    const groups = svg.selectAll('g').data(root.leaves()).join('g')
+    const leaves = root.leaves();
+    leaves.forEach((item, index) => {
+      item.clipId = `${id}-clip-${index}`;
+    });
+    const defs = svg.append('defs');
+    defs.selectAll('clipPath').data(leaves).join('clipPath')
+      .attr('id', (item) => item.clipId)
+      .append('rect')
+      .attr('width', (item) => Math.max(0, item.x1 - item.x0))
+      .attr('height', (item) => Math.max(0, item.y1 - item.y0));
+    const groups = svg.selectAll('g').data(leaves).join('g')
       .attr('transform', (item) => `translate(${item.x0},${item.y0})`);
     groups.append('rect')
       .attr('width', (item) => Math.max(0, item.x1 - item.x0))
@@ -2549,22 +2589,50 @@ CHARTS_SCRIPT = """<script>
         change === null ? 'sin datos' : `${change > 0 ? '+' : ''}${change.toFixed(2)}%`
       }`;
     });
-    groups.filter((item) => item.data.current_day
-      && item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 38)
-      .append('text').attr('x', 8).attr('y', 18).attr('class', 'heatmap-name')
-      .text((item) => item.data.name);
-    groups.filter((item) => item.data.current_day
-      && item.x1 - item.x0 >= 54 && item.y1 - item.y0 >= 55)
-      .append('text').attr('x', 8).attr('y', 37).attr('class', 'heatmap-return')
+    const nameLabels = groups.filter((item) => item.data.current_day
+      && item.x1 - item.x0 >= 48 && item.y1 - item.y0 >= 28)
+      .append('text')
+      .attr('x', (item) => (item.x1 - item.x0) / 2)
+      .attr('y', (item) => (item.y1 - item.y0) / 2 - 2)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('class', 'heatmap-name')
+      .attr('clip-path', (item) => `url(#${item.clipId})`)
+      .text((item) => item.data.name)
+      .each(function(item) {
+        const boxWidth = item.x1 - item.x0;
+        const boxHeight = item.y1 - item.y0;
+        const label = d3.select(this);
+        const fontSize = Math.max(
+          7,
+          Math.min(12, boxHeight * 0.24, boxWidth / (item.data.name.length * 0.62))
+        );
+        label.style('font-size', `${fontSize}px`);
+        if (this.getComputedTextLength() > boxWidth - 12) {
+          label.style('display', 'none');
+        }
+      });
+    nameLabels.filter(function(item) {
+      return item.y1 - item.y0 >= 42 && this.style.display !== 'none';
+    })
+      .append('tspan')
+      .attr('x', (item) => (item.x1 - item.x0) / 2)
+      .attr('dy', '1.25em')
+      .attr('class', 'heatmap-return')
       .text((item) => item.data.change_pct === null
         ? '—'
-        : `${item.data.change_pct > 0 ? '+' : ''}${item.data.change_pct.toFixed(2)}%`);
+        : `${item.data.change_pct > 0 ? '+' : ''}${item.data.change_pct.toFixed(2)}%`)
+      .each(function(item) {
+        if (this.getComputedTextLength() > item.x1 - item.x0 - 12) {
+          d3.select(this).remove();
+        }
+      });
   }
 
   function renderAverageLine(id, series) {
     const node = document.getElementById(id);
     if (!node) return;
-    const width = Math.max(280, node.clientWidth || 280);
+    const width = Math.max(1, node.clientWidth || 1);
     const height = 230;
     const margin = {top: 14, right: 12, bottom: 23, left: 12};
     const svg = d3.select(node).attr('viewBox', `0 0 ${width} ${height}`);
@@ -2867,6 +2935,7 @@ def render_dashboard(
     chart_payload_data = asdict(chart_data)
     for group in ("watchlist", "portfolio"):
         for item in chart_payload_data[group]:
+            item["name"] = _heatmap_label(item["name"])
             market_date = (
                 date.fromisoformat(item["market_date"])
                 if item.get("market_date")
@@ -2902,10 +2971,10 @@ def render_dashboard(
       --green: #4ade80; --yellow: #facc15; --red: #fb7185; --orange: #fb923c;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; background: radial-gradient(ellipse at top, #15223a 0, var(--bg) 52rem);
+    body {{ width: 100%; min-width: 0; margin: 0; background: radial-gradient(ellipse at top, #15223a 0, var(--bg) 52rem);
       color: var(--text); font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
     a {{ color: var(--blue); text-decoration: none; }} a:hover {{ text-decoration: underline; }}
-    .shell {{ max-width: 1440px; margin: 0 auto; padding: 36px 26px 60px; }}
+    .shell {{ width: min(100%, 1440px); min-width: 0; margin: 0 auto; padding: 36px 26px 60px; }}
     header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin-bottom: 26px; }}
     .eyebrow, .ticker {{ color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }}
     h1 {{ font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; line-height: 1.1; margin: 7px 0; }}
@@ -2933,8 +3002,8 @@ def render_dashboard(
     .key-headlines {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; padding: 0; list-style: none; }}
     .key-headlines li {{ background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }}
     .key-headlines span {{ display: block; color: var(--muted); margin-top: 7px; font-size: 12px; }}
-    .portfolio-panel {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 15px; }}
-    .portfolio-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }}
+    .portfolio-panel {{ min-width: 0; border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 15px; }}
+    .portfolio-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }}
     .portfolio-controls label {{ color: var(--muted); font-size: 12px; }}
     .portfolio-controls .sort-select {{ min-width: 125px; }}
     .portfolio-total {{ color: var(--muted); font-size: 13px; margin: 0 0 12px; }}
@@ -2949,12 +3018,12 @@ def render_dashboard(
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
     .market-charts {{ margin: 0 0 28px; }}
     .market-visualization-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 340px); gap: 12px; }}
-    .market-chart-card {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 14px; min-width: 0; }}
+    .market-chart-card {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 14px; min-width: 0; overflow: hidden; }}
     .market-chart-card h3 {{ margin: 0 0 4px; font-size: 14px; }}
     .chart-subtitle, .chart-status {{ color: var(--muted); font-size: 11px; margin: 0 0 9px; }}
     .chart-status {{ font-variant-numeric: tabular-nums; }}
-    .heatmap-chart {{ display: block; width: 100%; min-height: 240px; overflow: visible; }}
-    .average-chart {{ display: block; width: 100%; height: auto; overflow: visible; }}
+    .heatmap-chart {{ display: block; width: 100%; max-width: 100%; min-height: 240px; overflow: hidden; }}
+    .average-chart {{ display: block; width: 100%; max-width: 100%; height: auto; overflow: hidden; }}
     .heatmap-name, .heatmap-return {{ fill: #000; stroke: #fff; stroke-width: 2px; paint-order: stroke;
       stroke-linejoin: round; pointer-events: none; }}
     .heatmap-name {{ font-size: 10px; font-weight: 750; }}
@@ -2962,7 +3031,7 @@ def render_dashboard(
     .chart-empty {{ fill: var(--muted); font-size: 12px; }}
     .chart-time {{ fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }}
     .portfolio-visualizations {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 300px); gap: 12px; margin: 0 0 14px; }}
-    .analysis-panel {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; }}
+    .analysis-panel {{ min-width: 0; border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; overflow-wrap: anywhere; }}
     .analysis-warning {{ border: 1px solid #fb923c66; border-radius: 10px; background: #fb923c12; color: #fdba74; padding: 12px; }}
     .analysis-grid, .analysis-recommendations {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; }}
     .analysis-grid article, .analysis-recommendations > div, .analysis-risks {{ border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 13px; }}
@@ -2975,13 +3044,16 @@ def render_dashboard(
     .analysis-recommendations strong {{ color: var(--text); }}
     .analysis-recommendations li p {{ margin-top: 3px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 15px; }}
+    .grid, .market-visualization-grid, .portfolio-visualizations, .summary, .analysis-grid,
+    .analysis-recommendations {{ min-width: 0; }}
     .stock-stale-divider {{ grid-column: 1 / -1; border-top: 1px dashed var(--muted); color: var(--muted);
       font-size: 12px; padding-top: 10px; }}
     .stock-stale-divider[hidden] {{ display: none; }}
     .quote-stale-note {{ border-left: 2px solid var(--yellow); color: var(--muted); font-size: 11px;
       margin: 10px 0 0; padding-left: 8px; }}
-    .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; }}
+    .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; overflow-wrap: anywhere; }}
     .card-top {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
+    .card-top > div {{ min-width: 0; }}
     .ticker {{ margin: 0 0 3px; }} .stock-card h2 {{ font-size: 17px; line-height: 1.3; margin: 0; }}
     .badge {{ flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; border-radius: 99px;
       background: #ffffff0c; padding: 5px 10px; font-size: 12px; font-weight: 750; }}
@@ -3015,6 +3087,16 @@ def render_dashboard(
       .portfolio-table tbody th[data-label="Activo"] {{ display: block; grid-column: 1 / -1; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }}
       .portfolio-table tbody td::before {{ content: attr(data-label); color: var(--muted); text-align: left; font-size: 10px; }}
       .portfolio-table tbody th span {{ font-size: 9px; }} }}
+    @media (max-width: 420px) {{
+      .shell {{ padding: 20px 12px 32px; }}
+      .summary-card, .analysis-panel {{ padding: 12px; }}
+      .market-chart-card {{ padding: 9px; }}
+      .portfolio-panel {{ padding: 10px; }}
+      .portfolio-controls {{ align-items: stretch; }}
+      .portfolio-controls .sort-select {{ flex: 1 1 125px; min-width: 0; }}
+      .card-top {{ gap: 7px; }}
+      .badge {{ padding: 5px 7px; font-size: 11px; }}
+    }}
   </style>
 </head>
 <body>

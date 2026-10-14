@@ -687,6 +687,40 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("'var(--bg)'", html)
         self.assertIn(".heatmap-name, .heatmap-return { fill: #000;", html)
 
+    @patch("daily_report.yf.download", return_value=pd.DataFrame())
+    def test_heatmap_payload_uses_short_asset_names(self, _download_mock):
+        reports = [
+            StockReport(Company("Core MSCI World USD (Acc)", "EUNL.DE")),
+            StockReport(Company("Palantir Technologies", "PLTR")),
+            StockReport(Company("Marvell Technology", "MRVL")),
+            StockReport(Company("Space Innovators USD (Acc)", "YODA.L")),
+        ]
+
+        charts = collect_chart_data(reports, [])
+        html = render_dashboard(reports, chart_data=charts)
+        payload = json.loads(
+            html.split('id="dashboard-chart-data">', 1)[1].split("</script>", 1)[0]
+        )
+
+        self.assertEqual(
+            [item["name"] for item in charts.watchlist],
+            ["MSCI World", "Palantir", "Marvell", "Space Innovators"],
+        )
+        self.assertEqual(
+            [item["name"] for item in payload["watchlist"]],
+            ["MSCI World", "Palantir", "Marvell", "Space Innovators"],
+        )
+
+    def test_heatmap_labels_are_clipped_and_mobile_layout_is_fluid(self):
+        html = render_dashboard([])
+
+        self.assertIn("@media (max-width: 420px)", html)
+        self.assertIn("width: min(100%, 1440px);", html)
+        self.assertIn(".heatmap-chart { display: block; width: 100%; max-width: 100%;", html)
+        self.assertIn(".getComputedTextLength()", html)
+        self.assertIn(".attr('clip-path', (item) => `url(#${item.clipId})`)", html)
+        self.assertIn(".attr('text-anchor', 'middle')", html)
+
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_calls_standard_flash_api_with_portfolio_and_watchlist(self, post_mock):
         reports = [
