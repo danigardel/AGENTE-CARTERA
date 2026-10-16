@@ -21,6 +21,7 @@ from daily_report import (
     PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
+    PORTFOLIO,
     PORTFOLIO_PERIODS,
     Quote,
     StockReport,
@@ -489,18 +490,38 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Rendimiento medio de la lista de seguimiento", html)
         self.assertIn("07/10/2026 · 11:15 CEST", html)
 
-    def test_watchlist_has_all_companies_except_unavailable_space_innovators(self):
-        tickers = {company.ticker for company in COMPANIES}
-        self.assertEqual(len(COMPANIES), 48)
+    def test_watchlist_matches_updated_company_list(self):
+        companies = [(company.name, company.ticker) for company in COMPANIES]
+        self.assertEqual(len(COMPANIES), 55)
         self.assertEqual(
-            [(company.name, company.ticker) for company in COMPANIES[:3]],
-            [("Intel", "INTC"), ("Netflix", "NFLX"), ("Microsoft", "MSFT")],
+            companies[:5],
+            [
+                ("SoFi Technologies", "SOFI"),
+                ("Neo Performance Materials", "NEO.TO"),
+                ("Tempus AI", "TEM"),
+                ("Walmart", "WMT"),
+                ("Dollar Tree", "DLTR"),
+            ],
         )
-        self.assertNotIn("YODA.L", tickers)
+        self.assertIn(("Space Innovators USD (A)", "YODA.L"), companies)
+        self.assertIn(("Amper", "AMP.MC"), companies)
+        self.assertIn(("IREN", "IREN"), companies)
+        self.assertIn(("Applied Optoelectronics", "AAOI"), companies)
         self.assertEqual(
             next(company.ticker for company in COMPANIES if company.name == "SpaceX"),
             "SPCX",
         )
+
+    def test_portfolio_positions_include_new_world_etf_and_google_purchases(self):
+        portfolio_by_ticker = {asset.ticker: asset for asset in PORTFOLIO}
+
+        world_etf = portfolio_by_ticker["EUNL.DE"]
+        google = portfolio_by_ticker["GOOGL"]
+
+        self.assertEqual(world_etf.shares, 2.367719)
+        self.assertEqual(world_etf.investment_eur, 298.52)
+        self.assertEqual(google.shares, 0.201365)
+        self.assertEqual(google.investment_eur, 62.00)
 
     @patch("daily_report.feedparser.parse")
     @patch("daily_report.requests.get")
