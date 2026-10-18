@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import html
 import json
@@ -48,6 +49,7 @@ MAX_GEMINI_NEWS_ITEMS = 48
 MAX_MARKET_RADAR_ITEMS = 180
 MAX_WORKERS = 8
 PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
+MARKET_BENCHMARKS = (("S&P 500 EUR", "SXR8.DE"), ("MSCI World EUR", "EUNL.DE"))
 
 # 1. CACHÉ PARA TIPOS DE CAMBIO
 FX_CACHE: dict[str, float] = {"EUR": 1.0}
@@ -147,6 +149,26 @@ class PortfolioAsset:
     currency: str
 
 
+@dataclass(frozen=True)
+class PortfolioTransaction:
+    trade_date: date
+    ticker: str
+    name: str
+    side: str
+    quantity: float
+    price_eur: float
+    currency: str
+    fees_eur: float = 0.0
+
+
+@dataclass(frozen=True)
+class MarketEvent:
+    event_date: date
+    ticker: str
+    company: str
+    event_type: str
+
+
 @dataclass
 class PortfolioPosition:
     asset: PortfolioAsset
@@ -180,6 +202,8 @@ class DashboardCharts:
     portfolio: list[dict[str, Any]] = field(default_factory=list)
     watchlist_series: list[dict[str, float | str]] = field(default_factory=list)
     portfolio_series: list[dict[str, float | str]] = field(default_factory=list)
+    benchmark_series: list[dict[str, Any]] = field(default_factory=list)
+    portfolio_history_series: list[dict[str, float | str]] = field(default_factory=list)
     timezone: str = TIMEZONE.key
 
 
@@ -219,7 +243,7 @@ COMPANIES = (
     Company("Microsoft", "MSFT"),
     Company("Goldman Sachs", "GS"),
     Company("Nebius Group (A)", "NBIS"),
-    Company("Space Innovators USD (A)", "YODA.L"),
+    Company("Space Innovators USD (A)", "JEDI"),
     Company("Smart Overnight Return ETF", "CSH2.PA"),
     Company("Core MSCI World USD (Acc)", "SWDA.L"),
     Company("Alphabet (A)", "GOOGL"),
@@ -692,10 +716,17 @@ def _positive_int(value: Any) -> int | None:
 
 
 def _dated_closes(history: Any) -> list[tuple[date, float]]:
-    if history is None or history.empty or "Close" not in history:
+    if history is None or getattr(history, "empty", True):
         return []
+    close_values = (
+        history.items()
+        if isinstance(history, pd.Series)
+        else history["Close"].items()
+        if "Close" in history
+        else ()
+    )
     closes = []
-    for timestamp, value in history["Close"].items():
+    for timestamp, value in close_values:
         close = _finite_float(value)
         if close is None or close <= 0:
             continue
@@ -707,6 +738,218 @@ def _close_on_or_before(
     closes: list[tuple[date, float]], target: date
 ) -> tuple[date, float] | None:
     return next(((day, value) for day, value in reversed(closes) if day <= target), None)
+
+
+def load_portfolio_transactions(path: Path) -> list[PortfolioTransaction]:
+    required_columns = {
+        "date",
+        "ticker",
+        "name",
+        "side",
+        "quantity",
+        "price_eur",
+        "currency",
+    }
+    transactions: list[PortfolioTransaction] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        missing_columns = required_columns - set(reader.fieldnames or ())
+        if missing_columns:
+            raise ValueError(
+                "El CSV de cartera no incluye las columnas requeridas: "
+                + ", ".join(sorted(missing_columns))
+            )
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                trade_date = date.fromisoformat((row["date"] or "").strip())
+                ticker = (row["ticker"] or "").strip()
+                name = (row["name"] or "").strip()
+                side = (row["side"] or "").strip().upper()
+                quantity = float(row["quantity"])
+                price_eur = float(row["price_eur"])
+                currency = (row["currency"] or "").strip().upper()
+                fees_eur = float(row.get("fees_eur") or 0)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Fila {line_number} del CSV de cartera no válida: {error}"
+                ) from error
+            if (
+                not ticker
+                or not name
+                or side not in {"BUY", "SELL"}
+                or quantity <= 0
+                or price_eur <= 0
+                or fees_eur < 0
+                or currency not in {"EUR", "USD"}
+                or not all(
+                    math.isfinite(value)
+                    for value in (quantity, price_eur, fees_eur)
+                )
+            ):
+                raise ValueError(
+                    f"Fila {line_number} del CSV de cartera contiene valores no válidos"
+                )
+            transactions.append(
+                PortfolioTransaction(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    name=name,
+                    side=side,
+                    quantity=quantity,
+                    price_eur=price_eur,
+                    currency=currency,
+                    fees_eur=fees_eur,
+                )
+            )
+    if not transactions:
+        raise ValueError("El CSV de cartera no contiene operaciones")
+    return sorted(transactions, key=lambda item: item.trade_date)
+
+
+def portfolio_assets_from_transactions(
+    transactions: list[PortfolioTransaction],
+) -> tuple[PortfolioAsset, ...]:
+    holdings: dict[str, dict[str, Any]] = {}
+    for transaction in transactions:
+        holding = holdings.setdefault(
+            transaction.ticker,
+            {
+                "name": transaction.name,
+                "currency": transaction.currency,
+                "shares": 0.0,
+                "cost_eur": 0.0,
+            },
+        )
+        if holding["name"] != transaction.name or holding["currency"] != transaction.currency:
+            raise ValueError(
+                f"El ticker {transaction.ticker} tiene nombre o divisa inconsistentes"
+            )
+        if transaction.side == "BUY":
+            holding["shares"] += transaction.quantity
+            holding["cost_eur"] += (
+                transaction.quantity * transaction.price_eur + transaction.fees_eur
+            )
+            continue
+        if transaction.quantity > holding["shares"] + 1e-9:
+            raise ValueError(
+                f"Venta de {transaction.ticker} supera las participaciones compradas"
+            )
+        average_cost = holding["cost_eur"] / holding["shares"]
+        holding["shares"] -= transaction.quantity
+        holding["cost_eur"] -= average_cost * transaction.quantity
+        if holding["shares"] <= 1e-9:
+            holding["shares"] = 0.0
+            holding["cost_eur"] = 0.0
+    return tuple(
+        PortfolioAsset(
+            name=holding["name"],
+            ticker=ticker,
+            shares=holding["shares"],
+            investment_eur=holding["cost_eur"],
+            currency=holding["currency"],
+        )
+        for ticker, holding in holdings.items()
+        if holding["shares"] > 0
+    )
+
+
+def portfolio_history_from_transactions(
+    transactions: list[PortfolioTransaction],
+) -> list[dict[str, float | str]]:
+    tickers = list(dict.fromkeys(item.ticker for item in transactions))
+    if any(item.currency == "USD" for item in transactions):
+        tickers.append("USDEUR=X")
+    start = min(item.trade_date for item in transactions) - timedelta(days=10)
+    try:
+        history = yf.download(
+            tickers=tickers,
+            start=start.isoformat(),
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+            timeout=20,
+        )
+    except (
+        yf.exceptions.YFException,
+        requests.RequestException,
+        TimeoutError,
+        OSError,
+        ValueError,
+        KeyError,
+    ) as error:
+        logging.warning(
+            "No se pudo reconstruir el histórico de la cartera importada: %s: %s",
+            type(error).__name__,
+            error,
+        )
+        return []
+
+    closes_by_ticker = {
+        ticker: _dated_closes(_intraday_close_series(history, ticker))
+        for ticker in tickers
+    }
+    sample_dates = sorted(
+        {
+            day
+            for ticker, closes in closes_by_ticker.items()
+            if ticker != "USDEUR=X"
+            for day, _ in closes
+            if day >= min(item.trade_date for item in transactions)
+        }
+    )
+    if not sample_dates:
+        logging.warning("Yahoo Finance no devolvió precios para el histórico importado")
+        return []
+
+    shares: dict[str, float] = {}
+    transaction_index = 0
+    series: list[dict[str, float | str]] = []
+    for sample_date in sample_dates:
+        while (
+            transaction_index < len(transactions)
+            and transactions[transaction_index].trade_date <= sample_date
+        ):
+            transaction = transactions[transaction_index]
+            shares[transaction.ticker] = shares.get(transaction.ticker, 0.0) + (
+                transaction.quantity
+                if transaction.side == "BUY"
+                else -transaction.quantity
+            )
+            transaction_index += 1
+
+        total_value_eur = 0.0
+        has_price = False
+        for ticker, quantity in shares.items():
+            if quantity <= 0:
+                continue
+            dated_price = _close_on_or_before(closes_by_ticker.get(ticker, []), sample_date)
+            if dated_price is None:
+                continue
+            _, price = dated_price
+            transaction_currency = next(
+                item.currency for item in transactions if item.ticker == ticker
+            )
+            if transaction_currency == "USD":
+                dated_fx = _close_on_or_before(
+                    closes_by_ticker.get("USDEUR=X", []), sample_date
+                )
+                if dated_fx is None:
+                    continue
+                _, fx_rate = dated_fx
+                price *= fx_rate
+            total_value_eur += quantity * price
+            has_price = True
+        if has_price:
+            series.append(
+                {
+                    "timestamp": datetime.combine(
+                        sample_date, datetime.min.time(), tzinfo=timezone.utc
+                    ).isoformat(),
+                    "value": total_value_eur,
+                }
+            )
+    return series
 
 
 def fetch_portfolio(
@@ -1051,12 +1294,24 @@ def extra_quote_fields(info: dict[str, Any], now: datetime) -> dict[str, Any]:
             extra["earnings_date"] = earnings_date.isoformat()
             extra["days_to_earnings"] = (earnings_date - now.date()).days
 
+    ex_dividend_timestamp = number("exDividendDate")
+    if ex_dividend_timestamp:
+        try:
+            extra["ex_dividend_date"] = datetime.fromtimestamp(
+                ex_dividend_timestamp,
+                tz=now.tzinfo or timezone.utc,
+            ).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            logging.warning("Yahoo Finance devolvió una fecha ex-dividendo no válida")
+
     for yahoo_key, output_key, scale in (
+        ("marketCap", "market_cap", 1),
         ("forwardPE", "forward_pe", 1),
         ("revenueGrowth", "revenue_growth_pct", 100),
         ("earningsGrowth", "earnings_growth_pct", 100),
         ("profitMargins", "profit_margin_pct", 100),
         ("shortPercentOfFloat", "short_float_pct", 100),
+        ("dividendYield", "dividend_yield_pct", 100),
         ("beta", "beta", 1),
     ):
         value = number(yahoo_key)
@@ -2069,6 +2324,7 @@ def _heatmap_label(name: str) -> str:
 def collect_chart_data(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
+    transactions: list[PortfolioTransaction] | None = None,
 ) -> DashboardCharts:
     report_by_ticker = {
         report.company.ticker: report
@@ -2076,11 +2332,17 @@ def collect_chart_data(
         if report.company.ticker
     }
     portfolio_by_ticker = {position.asset.ticker: position for position in portfolio}
+    usd_portfolio = any(position.asset.currency == "USD" for position in portfolio)
+    benchmark_tickers = (
+        [ticker for _, ticker in MARKET_BENCHMARKS] if portfolio else []
+    )
     tickers = list(
         dict.fromkeys(
             [
                 *report_by_ticker,
                 *portfolio_by_ticker,
+                *benchmark_tickers,
+                *(["USDEUR=X"] if usd_portfolio else []),
             ]
         )
     )
@@ -2119,6 +2381,37 @@ def collect_chart_data(
             error,
         )
 
+    benchmark_closes: dict[str, list[tuple[date, float]]] = {}
+    daily_tickers = [*benchmark_tickers, *(["USDEUR=X"] if usd_portfolio else [])]
+    if daily_tickers:
+        try:
+            daily_history = yf.download(
+                tickers=daily_tickers,
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=True,
+                timeout=20,
+            )
+            benchmark_closes = {
+                ticker: _dated_closes(_intraday_close_series(daily_history, ticker))
+                for ticker in daily_tickers
+            }
+        except (
+            yf.exceptions.YFException,
+            requests.RequestException,
+            TimeoutError,
+            OSError,
+            ValueError,
+            KeyError,
+        ) as error:
+            logging.warning(
+                "No se pudieron obtener cierres de los índices de referencia: %s: %s",
+                type(error).__name__,
+                error,
+            )
+
     report_descriptors: list[
         tuple[str | None, str, float | None, float | None, date | None, str | None]
     ] = []
@@ -2155,6 +2448,8 @@ def collect_chart_data(
             date | None,
             str | None,
             float | None,
+            str,
+            bool,
         ]
     ] = []
     for position in portfolio:
@@ -2173,6 +2468,7 @@ def collect_chart_data(
         daily_return = position.returns_pct.get("1D")
         current_price = position.prices_eur.get("Hoy")
         previous_close = position.prices_eur.get("1D")
+        previous_close_is_native = False
         market_date = position.price_date
         market_timezone = position.market_timezone
         if report is not None and report.company.ticker == ticker:
@@ -2182,6 +2478,7 @@ def collect_chart_data(
             if daily_return is None:
                 daily_return = report.quote.daily_change_pct
             previous_close = report.quote.previous_close
+            previous_close_is_native = previous_close is not None
             if (
                 previous_close is None
                 and report.quote.current_price_native is not None
@@ -2191,6 +2488,7 @@ def collect_chart_data(
                 previous_close = report.quote.current_price_native / (
                     1 + report.quote.daily_change_pct / 100
                 )
+                previous_close_is_native = True
         if (
             previous_close is None
             and current_price is not None
@@ -2207,17 +2505,19 @@ def collect_chart_data(
                 market_date,
                 market_timezone,
                 position.current_value_eur,
+                position.asset.currency,
+                previous_close_is_native,
             )
         )
 
     portfolio_value = sum(
-        max(value or 0, 0) for *_, value in portfolio_descriptors
+        max(descriptor[6] or 0, 0) for descriptor in portfolio_descriptors
     )
     watchlist_samples: dict[str, list[float]] = {}
-    portfolio_samples: dict[str, list[float]] = {}
-    for group, descriptors, samples in (
-        ("watchlist", report_descriptors, watchlist_samples),
-        ("portfolio", portfolio_descriptors, portfolio_samples),
+    portfolio_weighted_samples: dict[str, tuple[float, float]] = {}
+    for group, descriptors in (
+        ("watchlist", report_descriptors),
+        ("portfolio", portfolio_descriptors),
     ):
         for descriptor in descriptors:
             (
@@ -2250,6 +2550,8 @@ def collect_chart_data(
                 chart_item["weight_pct"] = 0.0
             getattr(chart_data, group).append(chart_item)
 
+            if group != "watchlist":
+                continue
             close_series = closes_by_ticker.get(ticker) if ticker is not None else None
             if close_series is None or previous_close is None or previous_close <= 0:
                 continue
@@ -2262,8 +2564,82 @@ def collect_chart_data(
                     date_time = date_time.replace(tzinfo=timezone.utc)
                 date_time = date_time.astimezone(timezone.utc)
                 timestamp_key = date_time.isoformat()
-                samples.setdefault(timestamp_key, []).append(
+                watchlist_samples.setdefault(timestamp_key, []).append(
                     (close_value / previous_close - 1) * 100
+                )
+
+    if portfolio_descriptors:
+        fallback_weight = 1 / len(portfolio_descriptors)
+        has_complete_weights = portfolio_value > 0 and all(
+            descriptor[6] is not None and descriptor[6] > 0
+            for descriptor in portfolio_descriptors
+        )
+        for descriptor in portfolio_descriptors:
+            (
+                ticker,
+                _,
+                _,
+                previous_close,
+                _,
+                _,
+                allocation_value,
+                currency,
+                previous_close_is_native,
+            ) = descriptor
+            close_series = closes_by_ticker.get(ticker)
+            if (
+                close_series is None
+                or previous_close is None
+                or previous_close <= 0
+            ):
+                continue
+            weight = (
+                allocation_value / portfolio_value
+                if has_complete_weights and allocation_value is not None
+                else fallback_weight
+            )
+            fx_series = closes_by_ticker.get("USDEUR=X") if currency == "USD" else None
+            fx_closes = benchmark_closes.get("USDEUR=X", []) if currency == "USD" else []
+            previous_fx = fx_closes[-2][1] if len(fx_closes) >= 2 else None
+            if currency == "USD" and (fx_series is None or previous_fx is None):
+                continue
+            base_native_close = (
+                previous_close
+                if previous_close_is_native or currency != "USD"
+                else previous_close / previous_fx
+            )
+            base_eur_close = (
+                base_native_close * previous_fx
+                if currency == "USD" and previous_fx is not None
+                else base_native_close
+            )
+            if base_eur_close is None or base_eur_close <= 0:
+                continue
+            for timestamp, close in close_series.items():
+                close_value = _finite_float(close)
+                if close_value is None or close_value <= 0:
+                    continue
+                date_time = (
+                    timestamp.to_pydatetime()
+                    if hasattr(timestamp, "to_pydatetime")
+                    else timestamp
+                )
+                if date_time.tzinfo is None:
+                    date_time = date_time.replace(tzinfo=timezone.utc)
+                timestamp_key = date_time.astimezone(timezone.utc).isoformat()
+                if currency == "USD":
+                    fx_value = _finite_float(fx_series.get(timestamp))
+                    if fx_value is None or fx_value <= 0:
+                        continue
+                    close_value *= fx_value
+                weighted_total, available_weight = portfolio_weighted_samples.get(
+                    timestamp_key, (0.0, 0.0)
+                )
+                weighted_total += (close_value / base_eur_close - 1) * 100 * weight
+                available_weight += weight
+                portfolio_weighted_samples[timestamp_key] = (
+                    weighted_total,
+                    available_weight,
                 )
 
     chart_data.watchlist_series = [
@@ -2271,9 +2647,47 @@ def collect_chart_data(
         for timestamp, values in sorted(watchlist_samples.items())
     ]
     chart_data.portfolio_series = [
-        {"timestamp": timestamp, "value": fmean(values)}
-        for timestamp, values in sorted(portfolio_samples.items())
+        {"timestamp": timestamp, "value": weighted_total / available_weight}
+        for timestamp, (weighted_total, available_weight) in sorted(
+            portfolio_weighted_samples.items()
+        )
+        if available_weight > 0
     ]
+    chart_data.benchmark_series = []
+    for name, ticker in MARKET_BENCHMARKS:
+        daily_closes = benchmark_closes.get(ticker, [])
+        intraday_closes = closes_by_ticker.get(ticker)
+        if len(daily_closes) < 2 or intraday_closes is None:
+            continue
+        previous_close = daily_closes[-2][1]
+        if previous_close <= 0:
+            continue
+        series = []
+        for timestamp, close in intraday_closes.items():
+            close_value = _finite_float(close)
+            if close_value is None or close_value <= 0:
+                continue
+            date_time = (
+                timestamp.to_pydatetime()
+                if hasattr(timestamp, "to_pydatetime")
+                else timestamp
+            )
+            if date_time.tzinfo is None:
+                date_time = date_time.replace(tzinfo=timezone.utc)
+            series.append(
+                {
+                    "timestamp": date_time.astimezone(timezone.utc).isoformat(),
+                    "value": (close_value / previous_close - 1) * 100,
+                }
+            )
+        if series:
+            chart_data.benchmark_series.append(
+                {"ticker": ticker, "name": name, "series": series}
+            )
+    if transactions:
+        chart_data.portfolio_history_series = portfolio_history_from_transactions(
+            transactions
+        )
     return chart_data
 
 
@@ -2313,6 +2727,45 @@ def executive_summary(reports: list[StockReport]) -> dict[str, Any]:
         "consensus_summary": consensus_summary,
         "key_headlines": key_headlines,
     }
+
+
+def collect_market_events(
+    reports: list[StockReport],
+    as_of: date | None = None,
+    horizon_days: int = 45,
+) -> list[MarketEvent]:
+    reference_date = as_of or datetime.now(TIMEZONE).date()
+    events: list[MarketEvent] = []
+    for report in reports:
+        if not report.company.ticker:
+            continue
+        for key, event_type in (
+            ("earnings_date", "Resultados"),
+            ("ex_dividend_date", "Fecha ex-dividendo"),
+        ):
+            value = report.quote.extra.get(key)
+            if not value:
+                continue
+            try:
+                event_date = date.fromisoformat(str(value))
+            except ValueError:
+                logging.warning(
+                    "Se omite fecha %s no válida para %s",
+                    key,
+                    report.company.ticker,
+                )
+                continue
+            days_until = (event_date - reference_date).days
+            if 0 <= days_until <= horizon_days:
+                events.append(
+                    MarketEvent(
+                        event_date=event_date,
+                        ticker=report.company.ticker,
+                        company=report.company.name,
+                        event_type=event_type,
+                    )
+                )
+    return sorted(events, key=lambda event: (event.event_date, event.company))
 
 
 def _esc(value: Any) -> str:
@@ -2438,6 +2891,24 @@ def _analysis_section(analysis: PortfolioAnalysis | None) -> str:
     )
 
 
+def _market_events_section(events: list[MarketEvent]) -> str:
+    if not events:
+        return ""
+    rows = "".join(
+        '<li><time datetime="'
+        f'{event.event_date.isoformat()}">{event.event_date.strftime("%d/%m/%Y")}</time>'
+        f'<strong>{_esc(event.company)}</strong>'
+        f'<span>{_esc(event.event_type)} · {_esc(event.ticker)}</span></li>'
+        for event in events
+    )
+    return (
+        '<section aria-labelledby="market-events-title">'
+        '<div class="section-heading"><h2 id="market-events-title">Próximos eventos</h2>'
+        '<span>Hasta 45 días · Yahoo Finance</span></div>'
+        f'<ul class="market-events">{rows}</ul></section>'
+    )
+
+
 SORT_SCRIPT = """<script>
 (() => {
   const grid = document.getElementById('stock-grid');
@@ -2447,6 +2918,17 @@ SORT_SCRIPT = """<script>
   const cards = Array.from(grid.querySelectorAll('.stock-card'));
   const origin = new Map(cards.map((card, i) => [card, i]));
   const divider = document.getElementById('stale-market-divider');
+  const filters = {
+    sector: document.getElementById('sector-filter'),
+    peg: document.getElementById('peg-filter'),
+    pe: document.getElementById('pe-filter'),
+    daily: document.getElementById('daily-filter'),
+    consensus: document.getElementById('consensus-filter'),
+    marketCap: document.getElementById('market-cap-filter'),
+    dividend: document.getElementById('dividend-filter'),
+    beta: document.getElementById('beta-filter'),
+  };
+  const count = document.getElementById('screener-count');
 
   // Pesos: menor = mejor. Lo que no esté en el mapa ("Sin datos") va al final.
   const CONSENSUS = { 'Compra fuerte': 1, 'Compra': 2, 'Mantener': 3, 'Rendimiento inferior': 4, 'Venta': 5, 'Venta fuerte': 6 };
@@ -2454,10 +2936,52 @@ SORT_SCRIPT = """<script>
 
   const num = (v) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 
+  function matchesFilters(card) {
+    const peg = num(card.dataset.peg);
+    const pe = num(card.dataset.pe);
+    const daily = card.dataset.currentDay === 'true' ? num(card.dataset.daily) : null;
+    const consensus = card.dataset.consensus;
+    const marketCap = num(card.dataset.marketCap);
+    const dividend = num(card.dataset.dividendYield);
+    const beta = num(card.dataset.beta);
+    if (filters.sector?.value && card.dataset.sector !== filters.sector.value) return false;
+    if (filters.peg?.value === 'under1' && (peg === null || peg < 0 || peg > 1)) return false;
+    if (filters.peg?.value === 'under15' && (peg === null || peg < 0 || peg > 1.5)) return false;
+    if (filters.peg?.value === 'over15' && (peg === null || peg <= 1.5)) return false;
+    if (filters.peg?.value === 'missing' && peg !== null && peg >= 0) return false;
+    if (filters.pe?.value === 'under20' && (pe === null || pe <= 0 || pe >= 20)) return false;
+    if (filters.pe?.value === '20to35' && (pe === null || pe <= 0 || pe < 20 || pe > 35)) return false;
+    if (filters.pe?.value === 'over35' && (pe === null || pe <= 35)) return false;
+    if (filters.pe?.value === 'missing' && pe !== null && pe > 0) return false;
+    if (filters.daily?.value === 'positive' && (daily === null || daily <= 0)) return false;
+    if (filters.daily?.value === 'negative' && (daily === null || daily >= 0)) return false;
+    if (filters.daily?.value === 'missing' && daily !== null) return false;
+    if (filters.consensus?.value === 'buy' && !['Compra', 'Compra fuerte'].includes(consensus)) return false;
+    if (filters.consensus?.value === 'hold' && consensus !== 'Mantener') return false;
+    if (filters.consensus?.value === 'sell' && !['Venta', 'Venta fuerte', 'Rendimiento inferior'].includes(consensus)) return false;
+    if (filters.consensus?.value === 'missing' && consensus) return false;
+    if (filters.marketCap?.value === 'under2b' && (marketCap === null || marketCap >= 2000000000)) return false;
+    if (filters.marketCap?.value === '2to10b' && (marketCap === null || marketCap < 2000000000 || marketCap > 10000000000)) return false;
+    if (filters.marketCap?.value === 'over10b' && (marketCap === null || marketCap <= 10000000000)) return false;
+    if (filters.marketCap?.value === 'missing' && marketCap !== null) return false;
+    if (filters.dividend?.value === 'yield' && (dividend === null || dividend <= 0)) return false;
+    if (filters.dividend?.value === 'no-yield' && dividend !== null && dividend > 0) return false;
+    if (filters.dividend?.value === 'missing' && dividend !== null) return false;
+    if (filters.beta?.value === 'under1' && (beta === null || beta >= 1)) return false;
+    if (filters.beta?.value === '1to15' && (beta === null || beta < 1 || beta > 1.5)) return false;
+    if (filters.beta?.value === 'over15' && (beta === null || beta <= 1.5)) return false;
+    if (filters.beta?.value === 'missing' && beta !== null) return false;
+    return true;
+  }
+
   // Cada criterio devuelve un número (menor = antes) o null (sin datos = al final).
   const keys = {
     daily: (c) => { const v = num(c.dataset.daily); return v === null ? null : -v; },
     peg: (c) => { const v = num(c.dataset.peg); return v === null || v < 0 ? null : v; },
+    pe: (c) => { const v = num(c.dataset.pe); return v === null || v <= 0 ? null : v; },
+    marketCap: (c) => { const v = num(c.dataset.marketCap); return v === null ? null : -v; },
+    dividend: (c) => { const v = num(c.dataset.dividendYield); return v === null ? null : -v; },
+    beta: (c) => { const v = num(c.dataset.beta); return v === null ? null : v; },
     consensus: (c) => {
       const rank = CONSENSUS[c.dataset.consensus];
       if (rank === undefined) return null;
@@ -2470,7 +2994,9 @@ SORT_SCRIPT = """<script>
 
   function sortCards(mode) {
     const key = keys[mode] || keys.daily;
-    const sorted = cards.slice().sort((a, b) => {
+    cards.forEach((card) => { card.hidden = !matchesFilters(card); });
+    const visible = cards.filter((card) => !card.hidden);
+    const sorted = visible.slice().sort((a, b) => {
       const aCurrent = a.dataset.currentDay === 'true';
       const bCurrent = b.dataset.currentDay === 'true';
       if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
@@ -2490,9 +3016,13 @@ SORT_SCRIPT = """<script>
     }
     stale.forEach((card) => frag.appendChild(card));
     grid.appendChild(frag);
+    if (count) count.textContent = `${visible.length} de ${cards.length} activos`;
   }
 
   select.addEventListener('change', () => sortCards(select.value));
+  Object.values(filters).filter(Boolean).forEach((filter) => {
+    filter.addEventListener('change', () => sortCards(select.value));
+  });
   sortCards(select.value);
 })();
 </script>"""
@@ -2643,40 +3173,58 @@ CHARTS_SCRIPT = """<script>
       });
   }
 
-  function renderAverageLine(id, series) {
+  function renderAverageLine(id, series, comparisons = [], historical = false) {
     const node = document.getElementById(id);
     if (!node) return;
     const width = Math.max(1, node.clientWidth || 1);
     const height = 230;
-    const margin = {top: 14, right: 12, bottom: 23, left: 12};
+    const margin = {top: 30, right: 12, bottom: 23, left: 12};
     const svg = d3.select(node).attr('viewBox', `0 0 ${width} ${height}`);
     svg.selectAll('*').remove();
-    const validSeries = series.filter((point) => Number.isFinite(point.value));
+    const colors = ['#20d69a', '#54a6ff', '#c084fc'];
+    const primarySeries = series.filter((point) => Number.isFinite(point.value));
+    const sets = [
+      {name: historical ? 'Valor cartera' : 'Cartera', series: primarySeries, color: colors[0]},
+      ...comparisons.map((item, index) => ({
+        name: item.name,
+        series: item.series,
+        color: colors[(index + 1) % colors.length],
+      })),
+    ].map((item) => ({
+      ...item,
+      series: item.series.filter((point) => Number.isFinite(point.value)),
+    })).filter((item) => item.series.length);
+    const validSeries = primarySeries;
     const status = document.getElementById(`${id}-status`);
     if (!validSeries.length) {
-      if (status) status.textContent = 'No hay histórico intradía disponible.';
+      if (status) status.textContent = historical
+        ? 'Sin historial de operaciones o precios disponibles.'
+        : 'No hay histórico intradía disponible.';
       svg.append('text').attr('x', margin.left).attr('y', 28).attr('class', 'chart-empty')
-        .text('Sin datos intradía.');
+        .text(historical ? 'Sin historial de operaciones.' : 'Sin datos intradía.');
       return;
     }
 
     const lastPoint = validSeries[validSeries.length - 1];
     const mean = lastPoint.value;
-    const color = mean > 0 ? '#20d69a' : mean < 0 ? '#ff647c' : '#8b98ac';
+    const color = historical ? colors[0] : mean > 0 ? '#20d69a' : mean < 0 ? '#ff647c' : '#8b98ac';
     if (status) {
-      status.textContent = `Media actual ${mean > 0 ? '+' : ''}${mean.toFixed(2)}% · ${
-        validSeries.length
-      } intervalos`;
+      status.textContent = historical
+        ? `Valor estimado actual ${mean.toFixed(2)} € · ${validSeries.length} cierres`
+        : `Media ponderada actual ${mean > 0 ? '+' : ''}${mean.toFixed(2)}% · ${
+          validSeries.length
+        } intervalos`;
       status.style.color = color;
     }
+    const allPoints = sets.flatMap((item) => item.series);
     const x = d3.scaleUtc()
-      .domain(d3.extent(validSeries, (point) => new Date(point.timestamp)))
+      .domain(d3.extent(allPoints, (point) => new Date(point.timestamp)))
       .range([margin.left, width - margin.right]);
-    const min = d3.min(validSeries, (point) => point.value);
-    const max = d3.max(validSeries, (point) => point.value);
+    const min = historical ? d3.min(allPoints, (point) => point.value) : Math.min(0, d3.min(allPoints, (point) => point.value));
+    const max = historical ? d3.max(allPoints, (point) => point.value) : Math.max(0, d3.max(allPoints, (point) => point.value));
     const padding = Math.max((max - min) * 0.15, 0.1);
     const y = d3.scaleLinear()
-      .domain([Math.min(0, min - padding), Math.max(0, max + padding)])
+      .domain([historical ? min - padding : Math.min(0, min - padding), historical ? max + padding : Math.max(0, max + padding)])
       .range([height - margin.bottom, margin.top]);
 
     const gradientId = `${id}-gradient`;
@@ -2695,17 +3243,25 @@ CHARTS_SCRIPT = """<script>
       .x((point) => x(new Date(point.timestamp)))
       .y((point) => y(point.value))
       .curve(d3.curveMonotoneX);
-    svg.append('path').datum(validSeries).attr('d', area).attr('fill', `url(#${gradientId})`);
-    svg.append('path').datum(validSeries).attr('d', line).attr('fill', 'none')
-      .attr('stroke', color).attr('stroke-width', 2.5).attr('stroke-linecap', 'round');
+    if (!historical) {
+      svg.append('path').datum(validSeries).attr('d', area).attr('fill', `url(#${gradientId})`);
+    }
+    sets.forEach((item, index) => {
+      svg.append('path').datum(item.series).attr('d', line).attr('fill', 'none')
+        .attr('stroke', item.color).attr('stroke-width', index === 0 ? 2.5 : 1.8)
+        .attr('stroke-linecap', 'round').attr('stroke-dasharray', index ? '4 3' : null);
+      const legendX = margin.left + index * Math.max(92, width / sets.length);
+      svg.append('line').attr('x1', legendX).attr('x2', legendX + 13).attr('y1', 12).attr('y2', 12)
+        .attr('stroke', item.color).attr('stroke-width', 2);
+      svg.append('text').attr('x', legendX + 17).attr('y', 15).attr('class', 'chart-time')
+        .text(item.name);
+    });
     const firstTime = new Date(validSeries[0].timestamp);
     const lastTime = new Date(lastPoint.timestamp);
-    const formatTime = (date) => new Intl.DateTimeFormat('es-ES', {
-      timeZone: payload.timezone,
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).format(date);
+    const formatTime = (date) => new Intl.DateTimeFormat('es-ES', historical
+      ? {timeZone: payload.timezone, day: '2-digit', month: '2-digit'}
+      : {timeZone: payload.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}
+    ).format(date);
     svg.append('text').attr('x', margin.left).attr('y', height - 4)
       .attr('class', 'chart-time').text(formatTime(firstTime));
     svg.append('text').attr('x', width - margin.right).attr('y', height - 4)
@@ -2716,7 +3272,17 @@ CHARTS_SCRIPT = """<script>
     renderHeatmap('watchlist-heatmap', payload.watchlist);
     renderHeatmap('portfolio-heatmap', payload.portfolio, true);
     renderAverageLine('watchlist-average-chart', payload.watchlist_series);
-    renderAverageLine('portfolio-average-chart', payload.portfolio_series);
+    renderAverageLine(
+      'portfolio-average-chart',
+      payload.portfolio_series,
+      payload.benchmark_series || []
+    );
+    renderAverageLine(
+      'portfolio-history-chart',
+      payload.portfolio_history_series || [],
+      [],
+      true
+    );
   }
 
   renderAll();
@@ -2736,10 +3302,12 @@ def render_dashboard(
     portfolio: list[PortfolioPosition] | None = None,
     analysis: PortfolioAnalysis | None = None,
     chart_data: DashboardCharts | None = None,
+    market_events: list[MarketEvent] | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     portfolio = portfolio or []
     chart_data = chart_data or DashboardCharts()
+    market_events = market_events or []
     
     def quote_is_current(report: StockReport) -> bool:
         return _market_data_is_current(
@@ -2764,6 +3332,18 @@ def render_dashboard(
     signal = summary["sentiment_signal"]
     score = summary["sentiment_score"]
     score_text = f"{score:+.2f}" if score is not None else "sin señal"
+    sectors = sorted(
+        {
+            report.quote.sector.strip()
+            for report in reports
+            if report.quote.sector and report.quote.sector.strip()
+        },
+        key=str.casefold,
+    )
+    sector_options_html = "".join(
+        f'<option value="{_esc(sector)}">{_esc(sector)}</option>'
+        for sector in sectors
+    )
 
     cards: list[str] = []
     for report in reports:
@@ -2840,7 +3420,12 @@ def render_dashboard(
             f'data-peg="{_num_attr(quote.peg_ratio)}" '
             f'data-consensus="{_esc(quote.analyst_consensus or "")}" '
             f'data-analysts="{quote.analyst_count or 0}" '
-            f'data-news="{_esc(sentiment_label)}">'
+            f'data-news="{_esc(sentiment_label)}" '
+            f'data-pe="{_num_attr(quote.pe_ratio)}" '
+            f'data-sector="{_esc(quote.sector or "")}" '
+            f'data-market-cap="{_num_attr(quote.extra.get("market_cap"))}" '
+            f'data-dividend-yield="{_num_attr(quote.extra.get("dividend_yield_pct"))}" '
+            f'data-beta="{_num_attr(quote.extra.get("beta"))}">'
             '<div class="card-top"><div>'
             f'<p class="ticker">{_esc(ticker_text)}</p>'
             f'<h2>{_esc(company.name)}</h2></div>'
@@ -2968,6 +3553,17 @@ def render_dashboard(
         ensure_ascii=False,
         allow_nan=False,
     ).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    portfolio_history_chart_html = (
+        '<article class="market-chart-card chart-resize-target portfolio-history-card">'
+        '<h3>Histórico estimado de la cartera importada</h3>'
+        '<p id="portfolio-history-chart-status" class="chart-status" aria-live="polite">Calculando histórico…</p>'
+        '<svg id="portfolio-history-chart" class="average-chart" role="img" '
+        'aria-label="Valor histórico estimado de la cartera según las operaciones importadas"></svg>'
+        '<p class="portfolio-note">Reconstrucción con las operaciones del CSV y cierres diarios de Yahoo Finance; '
+        'no incluye efectivo ni impuestos.</p></article>'
+        if chart_data.portfolio_history_series
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang="es">
@@ -3030,6 +3626,16 @@ def render_dashboard(
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
+    .market-events {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 9px;
+      list-style: none; padding: 0; margin: 0; }}
+    .market-events li {{ display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; align-items: baseline;
+      border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; min-width: 0; }}
+    .market-events time {{ color: var(--blue); font-size: 12px; font-variant-numeric: tabular-nums; }}
+    .market-events strong {{ min-width: 0; overflow-wrap: anywhere; }}
+    .market-events span {{ grid-column: 2; color: var(--muted); font-size: 11px; }}
+    .screener-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 12px; }}
+    .screener-controls .sort-select {{ min-width: 130px; flex: 1 1 145px; }}
+    .screener-count {{ flex: 0 0 auto; color: var(--muted); font-size: 12px; }}
     .market-charts {{ margin: 0 0 28px; }}
     .market-visualization-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 340px); gap: 12px; }}
     .market-chart-card {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 14px; min-width: 0; overflow: hidden; }}
@@ -3045,6 +3651,7 @@ def render_dashboard(
     .chart-empty {{ fill: var(--muted); font-size: 12px; }}
     .chart-time {{ fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }}
     .portfolio-visualizations {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 300px); gap: 12px; margin: 0 0 14px; }}
+    .portfolio-history-card {{ margin-top: 12px; }}
     .analysis-panel {{ min-width: 0; border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; overflow-wrap: anywhere; }}
     .analysis-warning {{ border: 1px solid #fb923c66; border-radius: 10px; background: #fb923c12; color: #fdba74; padding: 12px; }}
     .analysis-grid, .analysis-recommendations {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; }}
@@ -3157,6 +3764,7 @@ def render_dashboard(
       <div class="section-heading"><h2 id="key-title">Titulares clave</h2><span>Los de mayor polaridad detectados hoy</span></div>
       <ul class="key-headlines">{key_headlines_html}</ul>
     </section>
+    {_market_events_section(market_events)}
     <section aria-labelledby="portfolio-title">
       <div class="section-heading"><h2 id="portfolio-title">Mi cartera</h2>
         <div class="portfolio-controls">
@@ -3181,11 +3789,12 @@ def render_dashboard(
             <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la cartera"></svg>
           </article>
           <article class="market-chart-card chart-resize-target">
-            <h3>Media intradía · Mi cartera</h3>
+            <h3>Cartera vs. referencias</h3>
             <p id="portfolio-average-chart-status" class="chart-status" aria-live="polite">Calculando media…</p>
-            <svg id="portfolio-average-chart" class="average-chart" role="img" aria-label="Evolución intradía del rendimiento medio de la cartera"></svg>
+            <svg id="portfolio-average-chart" class="average-chart" role="img" aria-label="Evolución intradía ponderada de la cartera frente al S&P 500 y MSCI World"></svg>
           </article>
         </div>
+        {portfolio_history_chart_html}
         <div class="portfolio-table-wrap">
           <table class="portfolio-table">
             <thead><tr>
@@ -3208,9 +3817,52 @@ def render_dashboard(
         <select id="sort-select" class="sort-select" aria-label="Ordenar la lista de seguimiento" aria-controls="stock-grid">
           <option value="daily" selected>Rendimiento diario</option>
           <option value="peg">Valoración PEG (de bueno a malo)</option>
+          <option value="pe">PER (de menor a mayor)</option>
+          <option value="marketCap">Capitalización (mayor a menor)</option>
+          <option value="dividend">Rentabilidad por dividendo</option>
+          <option value="beta">Beta (de menor a mayor)</option>
           <option value="consensus">Consenso de analistas</option>
           <option value="sentiment">Sentimiento de noticias</option>
         </select></div>
+      <div class="screener-controls" aria-label="Filtros del screener">
+        <select id="sector-filter" class="sort-select" aria-label="Filtrar por sector">
+          <option value="">Todos los sectores</option>{sector_options_html}
+        </select>
+        <select id="peg-filter" class="sort-select" aria-label="Filtrar por PEG">
+          <option value="">Cualquier PEG</option><option value="under1">PEG hasta 1</option>
+          <option value="under15">PEG hasta 1,5</option><option value="over15">PEG superior a 1,5</option>
+          <option value="missing">PEG sin datos</option>
+        </select>
+        <select id="pe-filter" class="sort-select" aria-label="Filtrar por PER">
+          <option value="">Cualquier PER</option><option value="under20">PER inferior a 20</option>
+          <option value="20to35">PER entre 20 y 35</option><option value="over35">PER superior a 35</option>
+          <option value="missing">PER sin datos</option>
+        </select>
+        <select id="daily-filter" class="sort-select" aria-label="Filtrar por rendimiento diario">
+          <option value="">Cualquier rendimiento</option><option value="positive">Subidas</option>
+          <option value="negative">Bajadas</option><option value="missing">Sin datos</option>
+        </select>
+        <select id="consensus-filter" class="sort-select" aria-label="Filtrar por consenso">
+          <option value="">Cualquier consenso</option><option value="buy">Compra</option>
+          <option value="hold">Mantener</option><option value="sell">Venta / inferior</option>
+          <option value="missing">Sin consenso</option>
+        </select>
+        <select id="market-cap-filter" class="sort-select" aria-label="Filtrar por capitalización">
+          <option value="">Cualquier capitalización</option><option value="under2b">Menos de 2.000 M</option>
+          <option value="2to10b">2.000–10.000 M</option><option value="over10b">Más de 10.000 M</option>
+          <option value="missing">Sin datos</option>
+        </select>
+        <select id="dividend-filter" class="sort-select" aria-label="Filtrar por rentabilidad por dividendo">
+          <option value="">Cualquier dividendo</option><option value="yield">Con rentabilidad</option>
+          <option value="no-yield">Sin rentabilidad reportada</option><option value="missing">Sin datos</option>
+        </select>
+        <select id="beta-filter" class="sort-select" aria-label="Filtrar por beta">
+          <option value="">Cualquier beta</option><option value="under1">Beta inferior a 1</option>
+          <option value="1to15">Beta entre 1 y 1,5</option><option value="over15">Beta superior a 1,5</option>
+          <option value="missing">Sin datos</option>
+        </select>
+        <span id="screener-count" class="screener-count" aria-live="polite"></span>
+      </div>
       <div class="grid" id="stock-grid">{stale_divider_html}{"".join(cards)}</div>
     </section>
     <footer>Fuentes: Google News RSS, Google Translate, Yahoo Finance (vía yfinance) y Gemini API. Datos informativos, no asesoramiento financiero.</footer>
@@ -3231,21 +3883,40 @@ def build_parser() -> argparse.ArgumentParser:
         default="dashboard.html",
         help="Ruta del dashboard HTML resultante (por defecto: dashboard.html).",
     )
+    parser.add_argument(
+        "--portfolio-csv",
+        default=os.getenv("PORTFOLIO_TRANSACTIONS_CSV"),
+        help=(
+            "CSV opcional de operaciones autorizadas (date,ticker,name,side,quantity,"
+            "price_eur,currency; fees_eur opcional). También puede definirse "
+            "PORTFOLIO_TRANSACTIONS_CSV."
+        ),
+    )
     return parser
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args()
+    transactions: list[PortfolioTransaction] = []
+    assets = PORTFOLIO
+    if args.portfolio_csv:
+        try:
+            transactions = load_portfolio_transactions(Path(args.portfolio_csv))
+            assets = portfolio_assets_from_transactions(transactions)
+        except (OSError, ValueError) as error:
+            logging.error("No se pudo cargar el CSV de cartera: %s", error)
+            return 2
     reports = collect_reports()
-    portfolio = fetch_portfolio()
+    portfolio = fetch_portfolio(assets)
     analysis = analyze_portfolio(reports, portfolio)
-    chart_data = collect_chart_data(reports, portfolio)
+    chart_data = collect_chart_data(reports, portfolio, transactions)
     report_html = render_dashboard(
         reports,
         portfolio=portfolio,
         analysis=analysis,
         chart_data=chart_data,
+        market_events=collect_market_events(reports),
     )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

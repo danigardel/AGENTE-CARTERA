@@ -18,9 +18,11 @@ from daily_report import (
     FinancialNewsItem,
     GlobalMarketNews,
     MACRO_FEEDS,
+    MarketEvent,
     PortfolioAnalysis,
     PortfolioAsset,
     PortfolioPosition,
+    PortfolioTransaction,
     PORTFOLIO,
     PORTFOLIO_PERIODS,
     Quote,
@@ -34,6 +36,7 @@ from daily_report import (
     build_request_body,
     classify_peg,
     classify_sentiment,
+    collect_market_events,
     collect_market_radar,
     collect_chart_data,
     extra_quote_fields,
@@ -46,6 +49,9 @@ from daily_report import (
     fetch_financial_news,
     _fetch_macro_feed,
     fetch_quote,
+    load_portfolio_transactions,
+    portfolio_assets_from_transactions,
+    portfolio_history_from_transactions,
     collect_reports,
     render_dashboard,
     translate_headline,
@@ -333,7 +339,19 @@ class SentimentTests(unittest.TestCase):
         html = render_dashboard([
             StockReport(
                 Company("A Co", "A"),
-                quote=Quote(daily_change_pct=1.5, peg_ratio=0.9, analyst_consensus="Compra", analyst_count=12),
+                quote=Quote(
+                    daily_change_pct=1.5,
+                    peg_ratio=0.9,
+                    pe_ratio=18,
+                    sector="Technology",
+                    extra={
+                        "market_cap": 2_000_000_000,
+                        "dividend_yield_pct": 1.5,
+                        "beta": 0.8,
+                    },
+                    analyst_consensus="Compra",
+                    analyst_count=12,
+                ),
                 news_sentiment=0.4,
             )
         ])
@@ -343,6 +361,23 @@ class SentimentTests(unittest.TestCase):
             'data-daily="1.5000" data-peg="0.9000" data-consensus="Compra" data-analysts="12" data-news="Alcista"',
             html,
         )
+        self.assertIn('data-pe="18.0000" data-sector="Technology"', html)
+        self.assertIn(
+            'data-market-cap="2000000000.0000" data-dividend-yield="1.5000" data-beta="0.8000"',
+            html,
+        )
+        self.assertIn('id="sector-filter"', html)
+        self.assertIn('id="peg-filter"', html)
+        self.assertIn('id="pe-filter"', html)
+        self.assertIn('id="daily-filter"', html)
+        self.assertIn('id="consensus-filter"', html)
+        self.assertIn('id="market-cap-filter"', html)
+        self.assertIn('id="dividend-filter"', html)
+        self.assertIn('id="beta-filter"', html)
+        self.assertIn("matchesFilters(card)", html)
+        self.assertIn('value="pe">PER (de menor a mayor)', html)
+        self.assertIn('value="marketCap">Capitalización (mayor a menor)', html)
+        self.assertIn('value="dividend">Rentabilidad por dividendo', html)
 
     def test_dashboard_separates_stale_market_quotes_after_fresh_quotes(self):
         generated_at = datetime(2026, 10, 9, 10, 0, tzinfo=TIMEZONE)
@@ -432,6 +467,86 @@ class SentimentTests(unittest.TestCase):
         self.assertAlmostEqual(position.max_return_pct, 98.0)
         self.assertEqual(tuple(position.returns_pct), tuple(period for period, _ in PORTFOLIO_PERIODS))
 
+    def test_portfolio_csv_import_builds_remaining_position_at_average_cost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            csv_path = Path(directory) / "trades.csv"
+            csv_path.write_text(
+                "date,ticker,name,side,quantity,price_eur,currency,fees_eur\n"
+                "2026-01-01,EX,Example,BUY,10,10,EUR,1\n"
+                "2026-02-01,EX,Example,SELL,2,15,EUR,1\n",
+                encoding="utf-8",
+            )
+
+            transactions = load_portfolio_transactions(csv_path)
+            assets = portfolio_assets_from_transactions(transactions)
+
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].shares, 8)
+        self.assertAlmostEqual(assets[0].investment_eur, 80.8)
+
+    def test_portfolio_csv_rejects_sales_above_owned_quantity(self):
+        transactions = [
+            PortfolioTransaction(
+                date(2026, 1, 1), "EX", "Example", "BUY", 1, 10, "EUR"
+            ),
+            PortfolioTransaction(
+                date(2026, 1, 2), "EX", "Example", "SELL", 2, 12, "EUR"
+            ),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "supera las participaciones"):
+            portfolio_assets_from_transactions(transactions)
+
+    @patch("daily_report.yf.download")
+    def test_portfolio_history_replays_imported_buys_and_sells(self, download_mock):
+        index = pd.date_range("2026-01-01", periods=3, freq="D")
+        columns = pd.MultiIndex.from_tuples([("EX", "Close")])
+        download_mock.return_value = pd.DataFrame(
+            [[10.0], [11.0], [12.0]], index=index, columns=columns
+        )
+        transactions = [
+            PortfolioTransaction(
+                date(2026, 1, 1), "EX", "Example", "BUY", 2, 9, "EUR"
+            ),
+            PortfolioTransaction(
+                date(2026, 1, 3), "EX", "Example", "SELL", 1, 12, "EUR"
+            ),
+        ]
+
+        series = portfolio_history_from_transactions(transactions)
+
+        self.assertEqual([point["value"] for point in series], [20, 22, 12])
+
+    def test_market_events_include_only_upcoming_quote_dates(self):
+        reports = [
+            StockReport(
+                Company("Upcoming", "UP"),
+                quote=Quote(
+                    extra={
+                        "earnings_date": "2026-10-20",
+                        "ex_dividend_date": "2026-10-25",
+                    }
+                ),
+            ),
+            StockReport(
+                Company("Past", "PAST"),
+                quote=Quote(extra={"earnings_date": "2026-10-01"}),
+            ),
+        ]
+
+        events = collect_market_events(reports, as_of=date(2026, 10, 18))
+        dashboard = render_dashboard([], market_events=events)
+
+        self.assertEqual(
+            [(event.event_date, event.event_type) for event in events],
+            [
+                (date(2026, 10, 20), "Resultados"),
+                (date(2026, 10, 25), "Fecha ex-dividendo"),
+            ],
+        )
+        self.assertIn("Próximos eventos", dashboard)
+        self.assertIn("Yahoo Finance", dashboard)
+
     def test_dashboard_renders_portfolio_price_history_and_max_returns(self):
         asset = PortfolioAsset("Example ETF", "ETF.DE", 1.5, 100, "EUR")
         position = PortfolioPosition(
@@ -503,7 +618,7 @@ class SentimentTests(unittest.TestCase):
                 ("Dollar Tree", "DLTR"),
             ],
         )
-        self.assertIn(("Space Innovators USD (A)", "YODA.L"), companies)
+        self.assertIn(("Space Innovators USD (A)", "JEDI"), companies)
         self.assertIn(("Amper", "AMP.MC"), companies)
         self.assertIn(("IREN", "IREN"), companies)
         self.assertIn(("Applied Optoelectronics", "AAOI"), companies)
@@ -730,7 +845,108 @@ class SentimentTests(unittest.TestCase):
         ):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(charts.portfolio[0]["ticker"], "AAA")
-        download_mock.assert_called_once()
+        self.assertEqual(download_mock.call_count, 2)
+
+    @patch("daily_report.yf.download")
+    def test_portfolio_intraday_series_is_value_weighted_and_compared_to_benchmarks(
+        self, download_mock
+    ):
+        intraday_index = pd.date_range(
+            "2026-10-07 08:00", periods=2, freq="5min", tz="UTC"
+        )
+        tickers = ["AAA", "BBB", "SXR8.DE", "EUNL.DE"]
+        intraday_columns = pd.MultiIndex.from_product(
+            [tickers, ["Close"]], names=["Ticker", "Price"]
+        )
+        intraday = pd.DataFrame(
+            [
+                [110, 90, 102, 99],
+                [111, 91, 103, 98],
+            ],
+            index=intraday_index,
+            columns=intraday_columns,
+        )
+        daily_index = pd.date_range("2026-10-06", periods=2, freq="D")
+        daily_columns = pd.MultiIndex.from_product(
+            [["SXR8.DE", "EUNL.DE"], ["Close"]],
+            names=["Ticker", "Price"],
+        )
+        daily = pd.DataFrame(
+            [[100, 100], [101, 100]],
+            index=daily_index,
+            columns=daily_columns,
+        )
+        download_mock.side_effect = [intraday, daily]
+        reports = [
+            StockReport(Company("Alpha", "AAA"), quote=Quote(previous_close=100)),
+            StockReport(Company("Beta", "BBB"), quote=Quote(previous_close=100)),
+        ]
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("Alpha", "AAA", 1, 90, "EUR"),
+                prices_eur={"1D": 100},
+                current_value_eur=90,
+            ),
+            PortfolioPosition(
+                PortfolioAsset("Beta", "BBB", 1, 10, "EUR"),
+                prices_eur={"1D": 100},
+                current_value_eur=10,
+            ),
+        ]
+
+        charts = collect_chart_data(reports, portfolio)
+
+        self.assertAlmostEqual(charts.portfolio_series[0]["value"], 8.0)
+        self.assertEqual(
+            [item["name"] for item in charts.benchmark_series],
+            ["S&P 500 EUR", "MSCI World EUR"],
+        )
+
+    @patch("daily_report.yf.download")
+    def test_portfolio_usd_intraday_series_includes_eur_fx_move(self, download_mock):
+        index = pd.date_range(
+            "2026-10-07 08:00", periods=1, freq="5min", tz="UTC"
+        )
+        intraday_columns = pd.MultiIndex.from_tuples(
+            [
+                ("AAA", "Close"),
+                ("USDEUR=X", "Close"),
+                ("SXR8.DE", "Close"),
+                ("EUNL.DE", "Close"),
+            ],
+            names=["Ticker", "Price"],
+        )
+        intraday = pd.DataFrame([[110, 0.91, 102, 99]], index=index, columns=intraday_columns)
+        daily_index = pd.date_range("2026-10-06", periods=2, freq="D")
+        daily_columns = pd.MultiIndex.from_tuples(
+            [
+                ("USDEUR=X", "Close"),
+                ("SXR8.DE", "Close"),
+                ("EUNL.DE", "Close"),
+            ],
+            names=["Ticker", "Price"],
+        )
+        daily = pd.DataFrame(
+            [[0.90, 100, 100], [0.90, 101, 100]],
+            index=daily_index,
+            columns=daily_columns,
+        )
+        download_mock.side_effect = [intraday, daily]
+        report = StockReport(
+            Company("US company", "AAA"),
+            quote=Quote(previous_close=100, currency="USD"),
+        )
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("US company", "AAA", 1, 90, "USD"),
+                prices_eur={"1D": 90},
+                current_value_eur=100,
+            )
+        ]
+
+        charts = collect_chart_data([report], portfolio)
+
+        self.assertAlmostEqual(charts.portfolio_series[0]["value"], (110 * 0.91 / 90 - 1) * 100)
 
     @patch("daily_report.yf.download", return_value=pd.DataFrame())
     def test_portfolio_heatmap_items_use_portfolio_weights_and_quote_freshness(
@@ -798,7 +1014,7 @@ class SentimentTests(unittest.TestCase):
             StockReport(Company("Core MSCI World USD (Acc)", "EUNL.DE")),
             StockReport(Company("Palantir Technologies", "PLTR")),
             StockReport(Company("Marvell Technology", "MRVL")),
-            StockReport(Company("Space Innovators USD (Acc)", "YODA.L")),
+            StockReport(Company("Space Innovators USD (Acc)", "JEDI")),
         ]
 
         charts = collect_chart_data(reports, [])
@@ -1019,9 +1235,17 @@ class SentimentTests(unittest.TestCase):
                 "fiftyTwoWeekLow": 60,
                 "fiftyDayAverage": 80,
                 "twoHundredDayAverage": 75,
+                "marketCap": 2_000_000_000,
                 "forwardPE": 20,
                 "revenueGrowth": 0.12,
                 "beta": 1.25,
+                "dividendYield": 0.015,
+                "earningsTimestamp": datetime(
+                    2026, 10, 20, tzinfo=timezone.utc
+                ).timestamp(),
+                "exDividendDate": datetime(
+                    2026, 10, 21, tzinfo=timezone.utc
+                ).timestamp(),
                 "industry": "Semiconductors",
             },
             now,
@@ -1031,6 +1255,10 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(metrics["pct_vs_sma50"], 12.5)
         self.assertEqual(metrics["pct_vs_sma200"], 20.0)
         self.assertEqual(metrics["revenue_growth_pct"], 12.0)
+        self.assertEqual(metrics["market_cap"], 2_000_000_000)
+        self.assertEqual(metrics["dividend_yield_pct"], 1.5)
+        self.assertEqual(metrics["earnings_date"], "2026-10-20")
+        self.assertEqual(metrics["ex_dividend_date"], "2026-10-21")
         self.assertEqual(metrics["industry"], "Semiconductors")
 
         valid = {
