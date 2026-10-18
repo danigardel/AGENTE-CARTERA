@@ -29,6 +29,7 @@ from daily_report import (
     StockReport,
     TIMEZONE,
     _model_pool_allows_fallback,
+    _market_session_series,
     _read_gemini_cache,
     _gemini_request_warning,
     analyze_portfolio,
@@ -374,10 +375,119 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('id="market-cap-filter"', html)
         self.assertIn('id="dividend-filter"', html)
         self.assertIn('id="beta-filter"', html)
+        self.assertIn('id="stock-search"', html)
+        self.assertIn('id="drawdown-filter"', html)
         self.assertIn("matchesFilters(card)", html)
         self.assertIn('value="pe">PER (de menor a mayor)', html)
         self.assertIn('value="marketCap">Capitalización (mayor a menor)', html)
         self.assertIn('value="dividend">Rentabilidad por dividendo', html)
+        self.assertIn('value="under20">Caída de al menos 20%', html)
+
+    def test_dashboard_exposes_snapshot_delta_api_and_preserves_stale_state(self):
+        html = render_dashboard(
+            [
+                StockReport(
+                    Company("Example", "EX"),
+                    quote=Quote(
+                        current_price_eur=10,
+                        previous_close=9,
+                        daily_change_pct=11.11,
+                        market_date=date(2026, 10, 18),
+                        market_timezone="Europe/Madrid",
+                        extra={"pct_from_52w_high": -14.2},
+                    ),
+                )
+            ],
+            generated_at=datetime(2026, 10, 18, 12, 0, tzinfo=TIMEZONE),
+        )
+
+        self.assertIn("window.DashboardMarketData", html)
+        self.assertIn("applySnapshot", html)
+        self.assertIn("applyDelta", html)
+        self.assertIn("data-market-stale-note", html)
+        self.assertIn('data-live-change', html)
+        self.assertIn("data-from-high=\"-14.2000\"", html)
+        self.assertIn("Desde máximo 52 sem.", html)
+
+    def test_current_day_cards_include_a_hidden_until_render_sparkline(self):
+        charts = DashboardCharts(
+            sparklines={
+                "EX": [
+                    {"timestamp": "2026-10-18T10:00:00+02:00", "value": 9.5},
+                    {"timestamp": "2026-10-18T10:05:00+02:00", "value": 10.0},
+                ]
+            }
+        )
+        report = StockReport(
+            Company("Example", "EX"),
+            quote=Quote(
+                daily_change_pct=5,
+                market_date=date(2026, 10, 18),
+                market_timezone="Europe/Madrid",
+            ),
+        )
+
+        html = render_dashboard(
+            [report],
+            generated_at=datetime(2026, 10, 18, 12, 0, tzinfo=TIMEZONE),
+            chart_data=charts,
+        )
+
+        self.assertIn('data-sparkline="EX"', html)
+        self.assertIn("renderSparklines()", html)
+        self.assertIn("payload.sparklines?.[ticker]", html)
+        self.assertIn("node.setAttribute('hidden', '')", html)
+        self.assertIn("node.removeAttribute('hidden')", html)
+
+    @patch("daily_report.yf.download")
+    def test_portfolio_period_chart_payload_contains_daily_returns_and_benchmarks(
+        self, download_mock
+    ):
+        today = datetime.now(TIMEZONE).date()
+        index = pd.date_range(today - timedelta(days=400), periods=401, freq="D")
+        columns = pd.MultiIndex.from_tuples(
+            [
+                ("AAA", "Close"),
+                ("SXR8.DE", "Close"),
+                ("EUNL.DE", "Close"),
+            ],
+            names=["Ticker", "Price"],
+        )
+        close_values = [100 + index_number * 0.1 for index_number in range(len(index))]
+        download_mock.side_effect = [
+            pd.DataFrame(
+                [[101, 102, 99], [102, 103, 100]],
+                index=pd.date_range(
+                    today - timedelta(days=1), periods=2, freq="5min", tz="UTC"
+                ),
+                columns=columns,
+            ),
+            pd.DataFrame(
+                [list(values) for values in zip(close_values, close_values, close_values, strict=True)],
+                index=index,
+                columns=columns,
+            ),
+        ]
+        report = StockReport(
+            Company("Alpha", "AAA"),
+            quote=Quote(previous_close=close_values[-2]),
+        )
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("Alpha", "AAA", 1, 100, "EUR"),
+                prices_eur={"Hoy": close_values[-1], "1D": close_values[-2]},
+                current_value_eur=close_values[-1],
+            )
+        ]
+
+        charts = collect_chart_data([report], portfolio)
+
+        self.assertEqual(
+            set(charts.portfolio_period_series),
+            {"1D", "1W", "1M", "6M", "1Y"},
+        )
+        self.assertTrue(charts.portfolio_period_series["1Y"])
+        self.assertTrue(charts.benchmark_period_series["1Y"])
 
     def test_dashboard_separates_stale_market_quotes_after_fresh_quotes(self):
         generated_at = datetime(2026, 10, 9, 10, 0, tzinfo=TIMEZONE)
@@ -437,7 +547,10 @@ class SentimentTests(unittest.TestCase):
 
         positions = [html.index(f">{ticker}</p>") for ticker in ("BEAR", "NEUT", "BULL", "NONE")]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("<span>Precio actual</span><strong>20.00 €</strong>", html)
+        self.assertIn(
+            '<span>Precio actual</span><strong data-live-price>20.00 €</strong>',
+            html,
+        )
 
     @patch("daily_report.yf.Ticker")
     def test_fetch_portfolio_converts_historical_prices_and_calculates_returns(self, ticker_mock):
@@ -569,11 +682,21 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('<option value="MAX">MAX</option>', html)
         self.assertIn("portfolio-period", html)
         self.assertIn("portfolio-metric", html)
-        self.assertIn('<th scope="col" data-portfolio-max-only="true" hidden>Inversión base</th>', html)
-        self.assertIn('<th scope="col" data-portfolio-max-only="true" hidden>Valor actual</th>', html)
-        self.assertIn('data-label="Precio actual">120.00 €', html)
-        self.assertIn('data-label="Valor actual" data-portfolio-max-only="true" hidden>180.00 €', html)
+        self.assertIn('<th scope="col">Inversión base</th>', html)
+        self.assertIn('<th scope="col">Valor actual</th>', html)
+        self.assertIn(
+            'data-label="Precio actual"><span data-live-price>120.00 €</span>',
+            html,
+        )
+        self.assertIn(
+            'data-label="Valor actual" data-live-value>180.00 €',
+            html,
+        )
         self.assertIn("80.00 €", html)
+        self.assertIn('data-portfolio-kind="close">110.00 €', html)
+        self.assertIn('data-portfolio-kind="close">70.00 €', html)
+        self.assertIn("Precio de cierre (€)", html)
+        self.assertIn("DashboardPortfolioChartSelect", html)
 
     def test_dashboard_embeds_chart_data_safely_and_shows_last_ai_query_time(self):
         charts = DashboardCharts(
@@ -790,6 +913,24 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("global_market_radar", prompt)
         self.assertIn("external_ideas", prompt)
 
+    def test_market_session_series_uses_exchange_date_not_a_rolling_24_hour_window(self):
+        index = pd.to_datetime(
+            [
+                "2026-10-07 20:55:00+00:00",
+                "2026-10-08 01:00:00+00:00",
+                "2026-10-08 14:30:00+00:00",
+            ]
+        )
+        series = pd.Series([101, 102, 103], index=index)
+
+        session = _market_session_series(
+            series,
+            date(2026, 10, 7),
+            "America/New_York",
+        )
+
+        self.assertEqual(session.tolist(), [101, 102])
+
     @patch("daily_report.yf.download")
     def test_collect_chart_data_aggregates_intraday_returns_for_watchlist_and_portfolio(self, download_mock):
         index = pd.date_range(
@@ -845,6 +986,10 @@ class SentimentTests(unittest.TestCase):
         ):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(charts.portfolio[0]["ticker"], "AAA")
+        self.assertEqual(
+            [point["value"] for point in charts.sparklines["AAA"]],
+            [101, 102],
+        )
         self.assertEqual(download_mock.call_count, 2)
 
     @patch("daily_report.yf.download")

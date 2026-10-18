@@ -203,6 +203,13 @@ class DashboardCharts:
     watchlist_series: list[dict[str, float | str]] = field(default_factory=list)
     portfolio_series: list[dict[str, float | str]] = field(default_factory=list)
     benchmark_series: list[dict[str, Any]] = field(default_factory=list)
+    portfolio_period_series: dict[str, list[dict[str, float | str]]] = field(
+        default_factory=dict
+    )
+    benchmark_period_series: dict[str, list[dict[str, Any]]] = field(
+        default_factory=dict
+    )
+    sparklines: dict[str, list[dict[str, float | str]]] = field(default_factory=dict)
     portfolio_history_series: list[dict[str, float | str]] = field(default_factory=list)
     timezone: str = TIMEZONE.key
 
@@ -2290,6 +2297,53 @@ def _intraday_close_series(history: Any, ticker: str) -> Any | None:
     return None
 
 
+def _market_session_series(
+    series: Any,
+    market_date: date | None,
+    market_timezone: str | None,
+) -> Any | None:
+    if series is None or getattr(series, "empty", True):
+        return None
+    market_zone = TIMEZONE
+    if market_timezone:
+        try:
+            market_zone = ZoneInfo(market_timezone)
+        except ZoneInfoNotFoundError:
+            logging.warning("Zona horaria de sesión no reconocida: %s", market_timezone)
+    elif getattr(series.index, "tz", None) is not None:
+        index_timezone = getattr(series.index.tz, "zone", None)
+        if index_timezone:
+            try:
+                market_zone = ZoneInfo(index_timezone)
+            except ZoneInfoNotFoundError:
+                logging.warning("Zona horaria del índice no reconocida: %s", index_timezone)
+    if market_date is None:
+        last_timestamp = series.index[-1]
+        if getattr(last_timestamp, "tzinfo", None) is None:
+            market_date = last_timestamp.date()
+        else:
+            market_date = last_timestamp.to_pydatetime().astimezone(market_zone).date()
+
+    session_items = []
+    for timestamp, value in series.items():
+        market_time = (
+            timestamp.to_pydatetime()
+            if hasattr(timestamp, "to_pydatetime")
+            else timestamp
+        )
+        if market_time.tzinfo is None or market_time.utcoffset() is None:
+            market_time = market_time.replace(tzinfo=market_zone)
+        if market_time.astimezone(market_zone).date() == market_date:
+            session_items.append((timestamp, value))
+    if not session_items:
+        return None
+    return pd.Series(
+        [value for _, value in session_items],
+        index=[timestamp for timestamp, _ in session_items],
+        name=getattr(series, "name", None),
+    )
+
+
 HEATMAP_NAME_OVERRIDES = {
     "amazon.com": "Amazon",
     "broadcom": "Broadcom",
@@ -2381,22 +2435,28 @@ def collect_chart_data(
             error,
         )
 
-    benchmark_closes: dict[str, list[tuple[date, float]]] = {}
-    daily_tickers = [*benchmark_tickers, *(["USDEUR=X"] if usd_portfolio else [])]
-    if daily_tickers:
+    historical_closes: dict[str, list[tuple[date, float]]] = {}
+    historical_tickers = [
+        *portfolio_by_ticker,
+        *benchmark_tickers,
+        *(["USDEUR=X"] if usd_portfolio else []),
+    ]
+    if historical_tickers:
         try:
-            daily_history = yf.download(
-                tickers=daily_tickers,
-                period="5d",
+            historical_history = yf.download(
+                tickers=list(dict.fromkeys(historical_tickers)),
+                period="2y",
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
                 threads=True,
                 timeout=20,
             )
-            benchmark_closes = {
-                ticker: _dated_closes(_intraday_close_series(daily_history, ticker))
-                for ticker in daily_tickers
+            historical_closes = {
+                ticker: _dated_closes(
+                    _intraday_close_series(historical_history, ticker)
+                )
+                for ticker in dict.fromkeys(historical_tickers)
             }
         except (
             yf.exceptions.YFException,
@@ -2407,7 +2467,7 @@ def collect_chart_data(
             KeyError,
         ) as error:
             logging.warning(
-                "No se pudieron obtener cierres de los índices de referencia: %s: %s",
+                "No se pudieron obtener cierres históricos para las vistas por periodo: %s: %s",
                 type(error).__name__,
                 error,
             )
@@ -2553,7 +2613,26 @@ def collect_chart_data(
             if group != "watchlist":
                 continue
             close_series = closes_by_ticker.get(ticker) if ticker is not None else None
-            if close_series is None or previous_close is None or previous_close <= 0:
+            close_series = _market_session_series(
+                close_series,
+                market_date,
+                market_timezone,
+            )
+            if close_series is None:
+                continue
+            chart_data.sparklines[ticker] = [
+                {
+                    "timestamp": (
+                        timestamp.isoformat()
+                        if hasattr(timestamp, "isoformat")
+                        else str(timestamp)
+                    ),
+                    "value": float(close),
+                }
+                for timestamp, close in close_series.items()
+                if _finite_float(close) is not None and _finite_float(close) > 0
+            ]
+            if previous_close is None or previous_close <= 0:
                 continue
             for timestamp, close in close_series.items():
                 close_value = _finite_float(close)
@@ -2587,6 +2666,11 @@ def collect_chart_data(
                 previous_close_is_native,
             ) = descriptor
             close_series = closes_by_ticker.get(ticker)
+            close_series = _market_session_series(
+                close_series,
+                descriptor[4],
+                descriptor[5],
+            )
             if (
                 close_series is None
                 or previous_close is None
@@ -2599,7 +2683,7 @@ def collect_chart_data(
                 else fallback_weight
             )
             fx_series = closes_by_ticker.get("USDEUR=X") if currency == "USD" else None
-            fx_closes = benchmark_closes.get("USDEUR=X", []) if currency == "USD" else []
+            fx_closes = historical_closes.get("USDEUR=X", []) if currency == "USD" else []
             previous_fx = fx_closes[-2][1] if len(fx_closes) >= 2 else None
             if currency == "USD" and (fx_series is None or previous_fx is None):
                 continue
@@ -2655,8 +2739,12 @@ def collect_chart_data(
     ]
     chart_data.benchmark_series = []
     for name, ticker in MARKET_BENCHMARKS:
-        daily_closes = benchmark_closes.get(ticker, [])
-        intraday_closes = closes_by_ticker.get(ticker)
+        daily_closes = historical_closes.get(ticker, [])
+        intraday_closes = _market_session_series(
+            closes_by_ticker.get(ticker),
+            None,
+            None,
+        )
         if len(daily_closes) < 2 or intraday_closes is None:
             continue
         previous_close = daily_closes[-2][1]
@@ -2684,6 +2772,117 @@ def collect_chart_data(
             chart_data.benchmark_series.append(
                 {"ticker": ticker, "name": name, "series": series}
             )
+
+    chart_data.portfolio_period_series["1D"] = chart_data.portfolio_series
+    chart_data.benchmark_period_series["1D"] = chart_data.benchmark_series
+    period_days = dict(PORTFOLIO_PERIODS)
+    period_days.pop("1D", None)
+    today = datetime.now(TIMEZONE).date()
+    for period, days in period_days.items():
+        target_date = today - timedelta(days=days)
+        base_prices: dict[str, float] = {}
+        for position in portfolio:
+            base = _close_on_or_before(
+                historical_closes.get(position.asset.ticker, []), target_date
+            )
+            if base is None:
+                continue
+            base_price = base[1]
+            if position.asset.currency == "USD":
+                base_fx = _close_on_or_before(
+                    historical_closes.get("USDEUR=X", []), base[0]
+                )
+                if base_fx is None:
+                    continue
+                base_price *= base_fx[1]
+            base_prices[position.asset.ticker] = base_price
+
+        historical_dates = sorted(
+            {
+                day
+                for position in portfolio
+                for day, _ in historical_closes.get(position.asset.ticker, [])
+                if day >= target_date
+            }
+        )
+        total_base_value = sum(
+            position.asset.shares * base_prices.get(position.asset.ticker, 0)
+            for position in portfolio
+        )
+        baseline_date = max(
+            (
+                _close_on_or_before(
+                    historical_closes.get(position.asset.ticker, []), target_date
+                )[0]
+                for position in portfolio
+                if _close_on_or_before(
+                    historical_closes.get(position.asset.ticker, []), target_date
+                )
+                is not None
+            ),
+            default=target_date,
+        )
+        portfolio_points: list[dict[str, float | str]] = []
+        if total_base_value > 0 and len(base_prices) == len(portfolio):
+            for sample_date in historical_dates:
+                value = 0.0
+                complete = True
+                for position in portfolio:
+                    base_price = base_prices.get(position.asset.ticker)
+                    close = _close_on_or_before(
+                        historical_closes.get(position.asset.ticker, []),
+                        sample_date,
+                    )
+                    if base_price is None or close is None:
+                        complete = False
+                        break
+                    sample_price = close[1]
+                    if position.asset.currency == "USD":
+                        fx = _close_on_or_before(
+                            historical_closes.get("USDEUR=X", []), close[0]
+                        )
+                        if fx is None:
+                            complete = False
+                            break
+                        sample_price *= fx[1]
+                    value += position.asset.shares * sample_price
+                if complete and sample_date >= baseline_date:
+                    portfolio_points.append(
+                        {
+                            "timestamp": datetime.combine(
+                                sample_date,
+                                datetime.min.time(),
+                                tzinfo=timezone.utc,
+                            ).isoformat(),
+                            "value": (value / total_base_value - 1) * 100,
+                        }
+                    )
+        chart_data.portfolio_period_series[period] = portfolio_points
+
+        benchmark_points: list[dict[str, Any]] = []
+        for name, ticker in MARKET_BENCHMARKS:
+            closes = historical_closes.get(ticker, [])
+            base = _close_on_or_before(closes, target_date)
+            if base is None or base[1] <= 0:
+                continue
+            points = [
+                {
+                    "timestamp": datetime.combine(
+                        sample_date,
+                        datetime.min.time(),
+                        tzinfo=timezone.utc,
+                    ).isoformat(),
+                    "value": (price / base[1] - 1) * 100,
+                }
+                for sample_date, price in closes
+                if sample_date >= base[0]
+            ]
+            if points:
+                benchmark_points.append(
+                    {"ticker": ticker, "name": name, "series": points}
+                )
+        chart_data.benchmark_period_series[period] = benchmark_points
+
     if transactions:
         chart_data.portfolio_history_series = portfolio_history_from_transactions(
             transactions
@@ -2927,7 +3126,9 @@ SORT_SCRIPT = """<script>
     marketCap: document.getElementById('market-cap-filter'),
     dividend: document.getElementById('dividend-filter'),
     beta: document.getElementById('beta-filter'),
+    drawdown: document.getElementById('drawdown-filter'),
   };
+  const search = document.getElementById('stock-search');
   const count = document.getElementById('screener-count');
 
   // Pesos: menor = mejor. Lo que no esté en el mapa ("Sin datos") va al final.
@@ -2944,6 +3145,10 @@ SORT_SCRIPT = """<script>
     const marketCap = num(card.dataset.marketCap);
     const dividend = num(card.dataset.dividendYield);
     const beta = num(card.dataset.beta);
+    const drawdown = num(card.dataset.fromHigh);
+    const query = (search?.value || '').trim().toLocaleLowerCase('es');
+    if (query && !`${card.dataset.name || ''} ${card.dataset.ticker || ''}`
+      .toLocaleLowerCase('es').includes(query)) return false;
     if (filters.sector?.value && card.dataset.sector !== filters.sector.value) return false;
     if (filters.peg?.value === 'under1' && (peg === null || peg < 0 || peg > 1)) return false;
     if (filters.peg?.value === 'under15' && (peg === null || peg < 0 || peg > 1.5)) return false;
@@ -2971,6 +3176,10 @@ SORT_SCRIPT = """<script>
     if (filters.beta?.value === '1to15' && (beta === null || beta < 1 || beta > 1.5)) return false;
     if (filters.beta?.value === 'over15' && (beta === null || beta <= 1.5)) return false;
     if (filters.beta?.value === 'missing' && beta !== null) return false;
+    if (filters.drawdown?.value === 'under10' && (drawdown === null || drawdown > -10)) return false;
+    if (filters.drawdown?.value === 'under20' && (drawdown === null || drawdown > -20)) return false;
+    if (filters.drawdown?.value === 'any' && (drawdown === null || drawdown >= 0)) return false;
+    if (filters.drawdown?.value === 'missing' && drawdown !== null) return false;
     return true;
   }
 
@@ -3023,6 +3232,8 @@ SORT_SCRIPT = """<script>
   Object.values(filters).filter(Boolean).forEach((filter) => {
     filter.addEventListener('change', () => sortCards(select.value));
   });
+  search?.addEventListener('input', () => sortCards(select.value));
+  window.DashboardScreenerRefresh = () => sortCards(select.value);
   sortCards(select.value);
 })();
 </script>"""
@@ -3033,10 +3244,12 @@ PORTFOLIO_SCRIPT = """<script>
   const metricSelect = document.getElementById('portfolio-metric');
   const heading = document.getElementById('portfolio-selected-heading');
   const cells = Array.from(document.querySelectorAll('[data-portfolio-period]'));
-  const maxOnlyCells = Array.from(document.querySelectorAll('[data-portfolio-max-only]'));
   if (!periodSelect || !metricSelect || !heading) return;
 
-  const historicalOptions = [['return', 'Rendimiento (%)']];
+  const historicalOptions = [
+    ['return', 'Rendimiento (%)'],
+    ['close', 'Precio de cierre (€)'],
+  ];
   const maxOptions = [
     ['profit', 'Ganancia absoluta (€)'],
     ['return', 'Rendimiento (%)'],
@@ -3058,14 +3271,12 @@ PORTFOLIO_SCRIPT = """<script>
     const kind = metricSelect.value;
     heading.textContent = period === 'MAX'
       ? (kind === 'profit' ? 'Ganancia MAX' : 'Rendimiento MAX')
-      : `Rendimiento ${period}`;
-    maxOnlyCells.forEach((cell) => {
-      cell.hidden = period !== 'MAX';
-    });
+      : `${kind === 'close' ? 'Cierre' : 'Rendimiento'} ${period}`;
     cells.forEach((cell) => {
       cell.hidden = cell.dataset.portfolioPeriod !== period
         || cell.dataset.portfolioKind !== kind;
     });
+    window.DashboardPortfolioChartSelect?.(period === 'MAX' ? '1Y' : period);
   }
 
   periodSelect.addEventListener('change', updatePortfolioView);
@@ -3173,7 +3384,61 @@ CHARTS_SCRIPT = """<script>
       });
   }
 
-  function renderAverageLine(id, series, comparisons = [], historical = false) {
+  function renderSparklines() {
+    document.querySelectorAll('.stock-sparkline').forEach((node) => {
+      const card = node.closest('.stock-card');
+      const ticker = node.dataset.sparkline;
+      const series = payload.sparklines?.[ticker] || [];
+      const currentDay = card?.dataset.currentDay === 'true';
+      if (!currentDay || series.length < 2) {
+        node.setAttribute('hidden', '');
+        return;
+      }
+      node.removeAttribute('hidden');
+      const width = node.clientWidth;
+      if (!(width > 0)) {
+        node.setAttribute('hidden', '');
+        return;
+      }
+      const height = 34;
+      const values = series.map((point) => point.value).filter(Number.isFinite);
+      if (values.length < 2) {
+        node.setAttribute('hidden', '');
+        return;
+      }
+      const svg = d3.select(node).attr('viewBox', `0 0 ${width} ${height}`);
+      svg.selectAll('*').remove();
+      const x = d3.scaleLinear().domain([0, values.length - 1]).range([1, width - 1]);
+      const min = d3.min(values);
+      const max = d3.max(values);
+      const y = d3.scaleLinear()
+        .domain(min === max ? [min - 1, max + 1] : [min, max])
+        .range([height - 2, 2]);
+      const line = d3.line()
+        .x((_, index) => x(index))
+        .y((value) => y(value))
+        .curve(d3.curveMonotoneX);
+      const color = Number(card.dataset.daily) >= 0 ? '#4ade80' : '#fb7185';
+      svg.append('path')
+        .datum(values)
+        .attr('d', line)
+        .attr('fill', 'none')
+        .attr('stroke', color)
+        .attr('stroke-width', 1.7)
+        .attr('stroke-linecap', 'round')
+        .attr('stroke-linejoin', 'round')
+        .attr('opacity', 0)
+        .transition().duration(160).attr('opacity', 1);
+    });
+  }
+
+  function renderAverageLine(
+    id,
+    series,
+    comparisons = [],
+    historical = false,
+    calendarAxis = false
+  ) {
     const node = document.getElementById(id);
     if (!node) return;
     const width = Math.max(1, node.clientWidth || 1);
@@ -3249,7 +3514,8 @@ CHARTS_SCRIPT = """<script>
     sets.forEach((item, index) => {
       svg.append('path').datum(item.series).attr('d', line).attr('fill', 'none')
         .attr('stroke', item.color).attr('stroke-width', index === 0 ? 2.5 : 1.8)
-        .attr('stroke-linecap', 'round').attr('stroke-dasharray', index ? '4 3' : null);
+        .attr('stroke-linecap', 'round').attr('stroke-dasharray', index ? '4 3' : null)
+        .attr('opacity', 0).transition().duration(180).attr('opacity', 1);
       const legendX = margin.left + index * Math.max(92, width / sets.length);
       svg.append('line').attr('x1', legendX).attr('x2', legendX + 13).attr('y1', 12).attr('y2', 12)
         .attr('stroke', item.color).attr('stroke-width', 2);
@@ -3260,7 +3526,9 @@ CHARTS_SCRIPT = """<script>
     const lastTime = new Date(lastPoint.timestamp);
     const formatTime = (date) => new Intl.DateTimeFormat('es-ES', historical
       ? {timeZone: payload.timezone, day: '2-digit', month: '2-digit'}
-      : {timeZone: payload.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}
+      : calendarAxis
+        ? {timeZone: payload.timezone, day: '2-digit', month: '2-digit'}
+        : {timeZone: payload.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}
     ).format(date);
     svg.append('text').attr('x', margin.left).attr('y', height - 4)
       .attr('class', 'chart-time').text(formatTime(firstTime));
@@ -3269,13 +3537,18 @@ CHARTS_SCRIPT = """<script>
   }
 
   function renderAll() {
+    renderSparklines();
     renderHeatmap('watchlist-heatmap', payload.watchlist);
     renderHeatmap('portfolio-heatmap', payload.portfolio, true);
     renderAverageLine('watchlist-average-chart', payload.watchlist_series);
+    const activePeriod = document.getElementById('portfolio-period')?.value || '1D';
     renderAverageLine(
       'portfolio-average-chart',
-      payload.portfolio_series,
-      payload.benchmark_series || []
+      payload.portfolio_period_series?.[activePeriod] || payload.portfolio_series,
+      payload.benchmark_period_series?.[activePeriod]
+        || (activePeriod === '1D' || activePeriod === 'MAX' ? payload.benchmark_series : []),
+      false,
+      activePeriod !== '1D'
     );
     renderAverageLine(
       'portfolio-history-chart',
@@ -3284,6 +3557,229 @@ CHARTS_SCRIPT = """<script>
       true
     );
   }
+
+  window.DashboardPortfolioChartSelect = (period) => {
+    renderAverageLine(
+      'portfolio-average-chart',
+      payload.portfolio_period_series?.[period] || [],
+      payload.benchmark_period_series?.[period] || [],
+      false,
+      period !== '1D'
+    );
+  };
+
+  function updateLivePrices(updates, replace = false) {
+    if (!Array.isArray(updates)) updates = updates && typeof updates === 'object' ? [updates] : [];
+    const records = new Map(
+      updates.filter((item) => item && typeof item.ticker === 'string')
+        .map((item) => [item.ticker, item])
+    );
+    if (replace) {
+      payload.live = {};
+    }
+    payload.live ||= {};
+    const todayInZone = (zone) => {
+      const parts = new Intl.DateTimeFormat('en', {
+        timeZone: zone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(new Date()).reduce((result, part) => {
+        if (part.type !== 'literal') result[part.type] = part.value;
+        return result;
+      }, {});
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    const addPoint = (series, point) => {
+      if (!Array.isArray(series)) return;
+      const existing = series.findIndex((item) => item.timestamp === point.timestamp);
+      if (existing >= 0) series[existing] = point;
+      else series.push(point);
+      series.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+      if (series.length > 500) series.splice(0, series.length - 500);
+    };
+    for (const [ticker, update] of records) {
+      const price = Number(update.priceEur);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const previous = payload.live[ticker] || {};
+      const previousClose = Number(update.previousCloseEur ?? previous.previousCloseEur);
+      const daily = Number.isFinite(previousClose) && previousClose > 0
+        ? (price / previousClose - 1) * 100
+        : null;
+      const marketTimezone = update.marketTimezone || payload.timezone;
+      const currentDay = update.marketDate === todayInZone(marketTimezone);
+      const timestamp = typeof update.timestamp === 'string'
+        && Number.isFinite(Date.parse(update.timestamp))
+        ? new Date(update.timestamp).toISOString()
+        : new Date().toISOString();
+      payload.live[ticker] = {
+        ...previous,
+        ...update,
+        priceEur: price,
+        previousCloseEur: Number.isFinite(previousClose) ? previousClose : null,
+        dailyChangePct: daily,
+        currentDay,
+      };
+      if (currentDay) {
+        payload.sparklines ||= {};
+        payload.sparklines[ticker] ||= [];
+        addPoint(payload.sparklines[ticker], {timestamp, value: price});
+      }
+
+      document.querySelectorAll('.stock-card').forEach((card) => {
+        if (card.dataset.ticker !== ticker) return;
+        card.dataset.currentDay = String(currentDay);
+        if (daily !== null) card.dataset.daily = String(daily);
+        const priceNode = card.querySelector('[data-live-price]');
+        if (priceNode) priceNode.textContent = `${price.toFixed(2)} €`;
+        const changeNode = card.querySelector('[data-live-change]');
+        if (changeNode && daily !== null) {
+          const sign = daily > 0 ? '+' : '';
+          const absolute = price - previousClose;
+          const absoluteSign = absolute > 0 ? '+' : '';
+          changeNode.textContent = `${absoluteSign}${absolute.toFixed(2)} € (${sign}${daily.toFixed(2)}%)`;
+          changeNode.className = daily > 0 ? 'text-bullish' : daily < 0 ? 'text-bearish' : 'text-neutral';
+        }
+        const staleNote = card.querySelector('[data-market-stale-note]');
+        if (staleNote) {
+          staleNote.hidden = currentDay;
+          if (!currentDay) {
+            staleNote.textContent = `Cotización pendiente de actualización · último dato: ${
+              update.marketDate || 'sin fecha'
+            }`;
+          }
+        }
+        const high = Number(update.high52WeekEur ?? card.dataset.high52WeekEur);
+        if (Number.isFinite(high) && high > 0) {
+          card.dataset.high52WeekEur = String(high);
+          card.dataset.fromHigh = String((price / high - 1) * 100);
+          const highNode = card.querySelector('[data-live-high]');
+          if (highNode) {
+            const drawdown = Number(card.dataset.fromHigh);
+            highNode.textContent = `${drawdown > 0 ? '+' : ''}${drawdown.toFixed(1)}%`;
+            highNode.className = drawdown <= -10 ? 'text-bearish' : 'text-neutral';
+          }
+        }
+      });
+      document.querySelectorAll('.portfolio-table tr[data-ticker]').forEach((row) => {
+        if (row.dataset.ticker !== ticker) return;
+        const priceNode = row.querySelector('[data-live-price]');
+        if (priceNode) priceNode.textContent = `${price.toFixed(2)} €`;
+        const quantity = Number(row.dataset.quantity);
+        const investment = Number(row.dataset.investment);
+        const value = Number.isFinite(quantity) ? price * quantity : null;
+        const valueNode = row.querySelector('[data-live-value]');
+        if (valueNode && value !== null) valueNode.textContent = `${value.toFixed(2)} €`;
+        if (value !== null && Number.isFinite(investment) && investment > 0) {
+          row.querySelectorAll('[data-portfolio-period="MAX"]').forEach((cell) => {
+            const change = cell.dataset.portfolioKind === 'profit'
+              ? value - investment
+              : (value / investment - 1) * 100;
+            cell.textContent = `${cell.dataset.portfolioKind === 'profit' ? change.toFixed(2) + ' €' : (change > 0 ? '+' : '') + change.toFixed(2) + '%'}`;
+          });
+        }
+      });
+      const portfolioRows = Array.from(
+        document.querySelectorAll('.portfolio-table tr[data-ticker]')
+      );
+      const values = portfolioRows.map((row) => {
+        const rawValue = row.querySelector('[data-live-value]')?.textContent || '';
+        const value = rawValue.includes('—')
+          ? Number.NaN
+          : Number(rawValue.replace(/[^\\d,.-]/g, '').replace(/,/g, ''));
+        const invested = Number(row.dataset.investment);
+        return {value, invested};
+      });
+      if (values.length && values.every((item) => Number.isFinite(item.value) && Number.isFinite(item.invested))) {
+        const totalValue = values.reduce((sum, item) => sum + item.value, 0);
+        const totalInvested = values.reduce((sum, item) => sum + item.invested, 0);
+        const totalValueNode = document.querySelector('[data-portfolio-total-value]');
+        const totalProfitNode = document.querySelector('[data-portfolio-total-profit]');
+        const totalReturnNode = document.querySelector('[data-portfolio-total-return]');
+        if (totalValueNode) totalValueNode.textContent = `${totalValue.toFixed(2)} €`;
+        if (totalProfitNode) totalProfitNode.textContent = `${(totalValue - totalInvested).toFixed(2)} €`;
+        if (totalReturnNode && totalInvested > 0) {
+          const totalReturn = (totalValue / totalInvested - 1) * 100;
+          totalReturnNode.textContent = `${totalReturn > 0 ? '+' : ''}${totalReturn.toFixed(2)}%`;
+        }
+      }
+      payload.watchlist?.forEach((item) => {
+        if (item.ticker !== ticker) return;
+        item.current_day = currentDay;
+        item.change_pct = currentDay ? daily : null;
+      });
+      payload.portfolio?.forEach((item) => {
+        if (item.ticker !== ticker) return;
+        item.current_day = currentDay;
+        item.change_pct = currentDay ? daily : null;
+      });
+
+      if (currentDay && daily !== null) {
+        const sparkline = document.querySelector(`.stock-sparkline[data-sparkline="${CSS.escape(ticker)}"]`);
+        if (sparkline) {
+          const values = payload.sparklines[ticker].map((point) => point.value).filter(Number.isFinite);
+          const width = Math.max(1, sparkline.clientWidth || 1);
+          if (values.length > 1) {
+            const x = d3.scaleLinear().domain([0, values.length - 1]).range([1, width - 1]);
+            const min = d3.min(values), max = d3.max(values);
+            const y = d3.scaleLinear().domain(min === max ? [min - 1, max + 1] : [min, max]).range([32, 2]);
+            sparkline.removeAttribute('hidden');
+            d3.select(sparkline).attr('viewBox', `0 0 ${width} 34`).selectAll('*').remove();
+            d3.select(sparkline).append('path').datum(values)
+              .attr('d', d3.line().x((_, index) => x(index)).y((value) => y(value)).curve(d3.curveMonotoneX))
+              .attr('fill', 'none').attr('stroke', daily >= 0 ? '#4ade80' : '#fb7185')
+              .attr('stroke-width', 1.7).attr('stroke-linecap', 'round');
+          }
+        }
+        const portfolioReturns = (payload.portfolio || [])
+          .filter((item) => item.current_day && Number.isFinite(item.weight_pct) && item.weight_pct > 0);
+        if (portfolioReturns.length) {
+          const weightTotal = portfolioReturns.reduce((sum, item) => sum + item.weight_pct, 0);
+          const portfolioReturn = portfolioReturns.reduce(
+            (sum, item) => sum + item.change_pct * item.weight_pct,
+            0
+          ) / weightTotal;
+          const point = {timestamp, value: portfolioReturn};
+          payload.portfolio_period_series ||= {};
+          addPoint(payload.portfolio_period_series['1D'], point);
+          payload.portfolio_series = payload.portfolio_period_series['1D'];
+        }
+        const benchmark = (payload.benchmark_series || []).find((item) => item.ticker === ticker);
+        if (benchmark) {
+          const point = {timestamp, value: daily};
+          addPoint(benchmark.series, point);
+          payload.benchmark_period_series ||= {};
+          payload.benchmark_period_series['1D'] = payload.benchmark_series;
+        }
+      }
+    }
+    const livePortfolioValues = Array.from(
+      document.querySelectorAll('.portfolio-table tr[data-ticker]')
+    ).map((row) => ({
+      ticker: row.dataset.ticker,
+      value: Number(
+        (row.querySelector('[data-live-value]')?.textContent || '')
+          .replace(/[^\\d,.-]/g, '').replace(/,/g, '')
+      ),
+    })).filter((item) => Number.isFinite(item.value) && item.value > 0);
+    const livePortfolioTotal = livePortfolioValues.reduce(
+      (sum, item) => sum + item.value, 0
+    );
+    if (livePortfolioTotal > 0) {
+      payload.portfolio?.forEach((item) => {
+        const position = livePortfolioValues.find((value) => value.ticker === item.ticker);
+        if (position) item.weight_pct = position.value / livePortfolioTotal * 100;
+      });
+    }
+    window.DashboardScreenerRefresh?.();
+    renderAll();
+    return records.size > 0;
+  }
+
+  window.DashboardMarketData = Object.freeze({
+    applySnapshot: (updates) => updateLivePrices(updates, true),
+    applyDelta: (updates) => updateLivePrices(updates, false),
+  });
 
   renderAll();
   if ('ResizeObserver' in window) {
@@ -3374,6 +3870,26 @@ def render_dashboard(
         peg_text = _format_number(quote.peg_ratio)
         peg_class = classify_peg(quote.peg_ratio)
         pe_text = _format_number(quote.pe_ratio)
+        from_high = _finite_float(quote.extra.get("pct_from_52w_high"))
+        from_high_text = (
+            f'{from_high:+.1f}%'
+            if from_high is not None
+            else "—"
+        )
+        from_high_class = (
+            "text-bearish" if from_high is not None and from_high <= -10
+            else "text-neutral" if from_high is not None
+            else ""
+        )
+        high_52_week_eur = (
+            quote.current_price_eur / (1 + from_high / 100)
+            if (
+                quote.current_price_eur is not None
+                and from_high is not None
+                and from_high > -100
+            )
+            else None
+        )
         analyst_text = quote.analyst_consensus or "Sin datos"
         if quote.analyst_count:
             analyst_text += f" · {quote.analyst_count} analistas"
@@ -3400,17 +3916,15 @@ def render_dashboard(
         )
         quote_is_current_today = quote_is_current(report)
         quote_stale_note = (
-            ""
-            if quote_is_current_today
-            else (
-                '<p class="quote-stale-note">Cotización pendiente de actualización'
-                + (
-                    f' · último dato: {_esc(quote.market_date.strftime("%d/%m/%Y"))}'
-                    if quote.market_date
-                    else " · no hay datos de hoy"
-                )
-                + "</p>"
+            '<p data-market-stale-note class="quote-stale-note"'
+            + ("" if not quote_is_current_today else " hidden")
+            + ">Cotización pendiente de actualización"
+            + (
+                f' · último dato: {_esc(quote.market_date.strftime("%d/%m/%Y"))}'
+                if quote.market_date
+                else " · no hay datos de hoy"
             )
+            + "</p>"
         )
         
         cards.append(
@@ -3425,21 +3939,28 @@ def render_dashboard(
             f'data-sector="{_esc(quote.sector or "")}" '
             f'data-market-cap="{_num_attr(quote.extra.get("market_cap"))}" '
             f'data-dividend-yield="{_num_attr(quote.extra.get("dividend_yield_pct"))}" '
-            f'data-beta="{_num_attr(quote.extra.get("beta"))}">'
-            '<div class="card-top"><div>'
+            f'data-beta="{_num_attr(quote.extra.get("beta"))}" '
+            f'data-from-high="{_num_attr(from_high)}" '
+            f'data-high52-week-eur="{_num_attr(high_52_week_eur)}" '
+            f'data-name="{_esc(company.name)}" data-ticker="{_esc(ticker_text)}">'
+            '<div class="card-top"><div class="card-identity">'
             f'<p class="ticker">{_esc(ticker_text)}</p>'
-            f'<h2>{_esc(company.name)}</h2></div>'
+            f'<h2>{_esc(company.name)}</h2>'
+            f'<svg class="stock-sparkline" data-sparkline="{_esc(company.ticker or "")}" '
+            f'role="img" aria-label="Evolución intradía de {_esc(company.name)}" hidden></svg></div>'
             f'<span class="badge {sentiment_signal}"><i></i>{_esc(sentiment_label)}</span></div>'
             f'<p class="sentiment-note">{_esc(news_note)}</p>'
             '<div class="metrics">'
-            f'<div><span>Precio actual</span><strong>{_esc(price_text)}</strong></div>'
-            f'<div><span>Rendimiento diario</span><strong class="{rendimiento_class}">{_esc(rendimiento_text)}</strong></div>'
+            f'<div><span>Precio actual</span><strong data-live-price>{_esc(price_text)}</strong></div>'
+            f'<div><span>Rendimiento diario</span><strong data-live-change class="{rendimiento_class}">{_esc(rendimiento_text)}</strong></div>'
             f'<div><span>Consenso analistas</span><strong>{_esc(analyst_text)}</strong></div>'
             f'<div><span>Precio objetivo</span><strong>{_esc(target_text)}</strong></div>'
             f'<div><span title="Price/Earnings-to-Growth; ratio informativo">PEG</span>'
             f'<strong class="{peg_class}">{_esc(peg_text)}</strong></div>'
             f'<div><span title="PER basado en beneficios de los últimos doce meses">PER (TTM)</span>'
             f'<strong>{_esc(pe_text)}</strong></div>'
+            f'<div><span title="Variación respecto al máximo de las últimas 52 semanas">Desde máximo 52 sem.</span>'
+            f'<strong data-live-high class="{from_high_class}">{_esc(from_high_text)}</strong></div>'
             "</div>"
             f"{quote_stale_note}"
             f"{private_note}<h3>Titulares clave</h3><ul class=\"headlines\">{headline_list}</ul>"
@@ -3461,14 +3982,16 @@ def render_dashboard(
         for item in summary["key_headlines"]
     ) or "<li>Aún no hay titulares con fecha de hoy.</li>"
     portfolio_rows = "".join(
-        "<tr>"
+        f'<tr data-ticker="{_esc(position.asset.ticker)}" '
+        f'data-quantity="{_num_attr(position.asset.shares)}" '
+        f'data-investment="{_num_attr(position.asset.investment_eur)}">'
         f'<th scope="row" data-label="Activo">{_esc(position.asset.name)}'
         f'<span>{_esc(position.asset.ticker)}</span></th>'
         f'<td data-label="Posición">{_format_number(position.asset.shares, 6)}</td>'
-        f'<td data-label="Inversión base" data-portfolio-max-only="true" hidden>'
+        f'<td data-label="Inversión base">'
         f"{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
-        f'<td data-label="Precio actual">{_portfolio_cell(position.prices_eur.get("Hoy"), " €")}</td>'
-        f'<td data-label="Valor actual" data-portfolio-max-only="true" hidden>'
+        f'<td data-label="Precio actual"><span data-live-price>{_portfolio_cell(position.prices_eur.get("Hoy"), " €")}</span></td>'
+        f'<td data-label="Valor actual" data-live-value>'
         f"{_portfolio_cell(position.current_value_eur, ' €')}</td>"
         + "".join(
             _portfolio_value(position.returns_pct.get(period), "return").replace(
@@ -3476,6 +3999,11 @@ def render_dashboard(
                 f'<td hidden data-label="Rendimiento {period}" data-portfolio-period="{period}" '
                 'data-portfolio-kind="return"',
             )
+            for period, _ in PORTFOLIO_PERIODS
+        )
+        + "".join(
+            f'<td hidden data-label="Cierre {period}" data-portfolio-period="{period}" '
+            f'data-portfolio-kind="close">{_portfolio_cell(position.prices_eur.get(period), " €")}</td>'
             for period, _ in PORTFOLIO_PERIODS
         )
         + _portfolio_value(position.max_profit_eur, "profit").replace(
@@ -3510,10 +4038,10 @@ def render_dashboard(
         total_profit = total_value - total_invested
         total_return = (total_value / total_invested - 1) * 100
         portfolio_total = (
-            f'<p class="portfolio-total">Valor actual: <strong>{_portfolio_cell(total_value, " €")}</strong>'
+            f'<p class="portfolio-total">Valor actual: <strong data-portfolio-total-value>{_portfolio_cell(total_value, " €")}</strong>'
             f' · Inversión base: {_portfolio_cell(total_invested, " €")}'
-            f' · Ganancia MAX: <strong>{_portfolio_cell(total_profit, " €")} '
-            f'({_portfolio_cell(total_return, "%")})</strong></p>'
+            f' · Ganancia MAX: <strong data-portfolio-total-profit>{_portfolio_cell(total_profit, " €")}</strong> '
+            f'(<span data-portfolio-total-return>{_portfolio_cell(total_return, "%")}</span>)</p>'
         )
     elif portfolio:
         portfolio_total = (
@@ -3525,11 +4053,10 @@ def render_dashboard(
     warnings_count = sum(len(report.warnings) for report in reports)
     stale_report_count = sum(not quote_is_current(report) for report in reports)
     stale_divider_html = (
-        '<div id="stale-market-divider" class="stock-stale-divider" hidden>'
-        "Cotizaciones pendientes de actualización: mercados aún no abiertos o sin datos de hoy"
-        "</div>"
-        if stale_report_count
-        else ""
+        '<div id="stale-market-divider" class="stock-stale-divider"'
+        + ("" if stale_report_count else " hidden")
+        + ">Cotizaciones pendientes de actualización: mercados aún no abiertos o sin datos de hoy"
+        + "</div>"
     )
     chart_payload_data = asdict(chart_data)
     for group in ("watchlist", "portfolio"):
@@ -3635,6 +4162,10 @@ def render_dashboard(
     .market-events span {{ grid-column: 2; color: var(--muted); font-size: 11px; }}
     .screener-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 12px; }}
     .screener-controls .sort-select {{ min-width: 130px; flex: 1 1 145px; }}
+    .screener-controls .stock-search {{ min-width: min(100%, 220px); flex: 2 1 220px; }}
+    .stock-search {{ appearance: none; font: inherit; font-size: 13px; color: var(--text);
+      border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel-2); }}
+    .stock-search:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
     .screener-count {{ flex: 0 0 auto; color: var(--muted); font-size: 12px; }}
     .market-charts {{ margin: 0 0 28px; }}
     .market-visualization-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 340px); gap: 12px; }}
@@ -3675,6 +4206,10 @@ def render_dashboard(
     .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; overflow-wrap: anywhere; }}
     .card-top {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
     .card-top > div {{ min-width: 0; }}
+    .card-identity {{ display: grid; grid-template-columns: minmax(0, 1fr) 96px; align-items: center; gap: 0 9px; }}
+    .card-identity .ticker, .card-identity h2 {{ grid-column: 1; }}
+    .stock-sparkline {{ display: block; grid-column: 2; grid-row: 1 / span 2; width: 96px; height: 34px; max-width: 100%; }}
+    .stock-sparkline[hidden] {{ display: none; }}
     .ticker {{ margin: 0 0 3px; }} .stock-card h2 {{ font-size: 17px; line-height: 1.3; margin: 0; }}
     .badge {{ flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; border-radius: 99px;
       background: #ffffff0c; padding: 5px 10px; font-size: 12px; font-weight: 750; }}
@@ -3716,6 +4251,8 @@ def render_dashboard(
       .portfolio-controls {{ align-items: stretch; }}
       .portfolio-controls .sort-select {{ flex: 1 1 125px; min-width: 0; }}
       .card-top {{ gap: 7px; }}
+      .card-identity {{ grid-template-columns: minmax(0, 1fr) 76px; gap: 0 6px; }}
+      .stock-sparkline {{ width: 76px; height: 30px; }}
       .badge {{ padding: 5px 7px; font-size: 11px; }}
     }}
   </style>
@@ -3734,7 +4271,7 @@ def render_dashboard(
       <div class="market-visualization-grid">
         <article class="market-chart-card chart-resize-target">
           <h3>Mapa de calor · Lista de seguimiento</h3>
-          <p class="chart-subtitle">Rendimiento de hoy · verde: subida · rojo: bajada · datos antiguos o ausentes: fondo oculto</p>
+          <p class="chart-subtitle">Sesión del día actual (no ventana móvil de 24 h) · verde: subida · rojo: bajada · datos antiguos o ausentes: fondo oculto</p>
           <svg id="watchlist-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la lista de seguimiento"></svg>
         </article>
         <article class="market-chart-card chart-resize-target">
@@ -3799,9 +4336,9 @@ def render_dashboard(
           <table class="portfolio-table">
             <thead><tr>
               <th scope="col">Activo</th><th scope="col">Posición</th>
-              <th scope="col" data-portfolio-max-only="true" hidden>Inversión base</th>
+              <th scope="col">Inversión base</th>
               <th scope="col">Precio actual</th>
-              <th scope="col" data-portfolio-max-only="true" hidden>Valor actual</th>
+              <th scope="col">Valor actual</th>
               <th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>
             </tr></thead>
             <tbody>{portfolio_rows or '<tr><td colspan="6">No hay posiciones definidas.</td></tr>'}</tbody>
@@ -3825,6 +4362,7 @@ def render_dashboard(
           <option value="sentiment">Sentimiento de noticias</option>
         </select></div>
       <div class="screener-controls" aria-label="Filtros del screener">
+        <input id="stock-search" class="stock-search" type="search" placeholder="Buscar empresa o ticker…" aria-label="Buscar por nombre o ticker" autocomplete="off">
         <select id="sector-filter" class="sort-select" aria-label="Filtrar por sector">
           <option value="">Todos los sectores</option>{sector_options_html}
         </select>
@@ -3851,6 +4389,13 @@ def render_dashboard(
           <option value="">Cualquier capitalización</option><option value="under2b">Menos de 2.000 M</option>
           <option value="2to10b">2.000–10.000 M</option><option value="over10b">Más de 10.000 M</option>
           <option value="missing">Sin datos</option>
+        </select>
+        <select id="drawdown-filter" class="sort-select" aria-label="Filtrar por caída desde máximo de 52 semanas">
+          <option value="">Cualquier distancia al máximo 52 sem.</option>
+          <option value="under10">Caída de al menos 10%</option>
+          <option value="under20">Caída de al menos 20%</option>
+          <option value="any">Por debajo del máximo</option>
+          <option value="missing">Sin dato de máximo 52 sem.</option>
         </select>
         <select id="dividend-filter" class="sort-select" aria-label="Filtrar por rentabilidad por dividendo">
           <option value="">Cualquier dividendo</option><option value="yield">Con rentabilidad</option>
