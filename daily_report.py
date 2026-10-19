@@ -3330,7 +3330,27 @@ CHARTS_SCRIPT = """<script>
       .attr('width', (item) => Math.max(0, item.x1 - item.x0))
       .attr('height', (item) => Math.max(0, item.y1 - item.y0));
     const groups = svg.selectAll('g').data(leaves).join('g')
-      .attr('transform', (item) => `translate(${item.x0},${item.y0})`);
+      .attr('transform', (item) => `translate(${item.x0},${item.y0})`)
+      .attr('tabindex', 0)
+      .attr('role', 'link')
+      .attr('aria-label', (item) => `Ir a la tarjeta de ${item.data.name}`)
+      .style('cursor', 'pointer')
+      .on('click', (event, item) => {
+        const card = document.getElementById(`card-${item.data.ticker}`);
+        if (card) {
+          card.scrollIntoView({behavior: 'smooth', block: 'start'});
+          card.focus({preventScroll: true});
+        }
+      })
+      .on('keydown', (event, item) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        const card = document.getElementById(`card-${item.data.ticker}`);
+        if (card) {
+          card.scrollIntoView({behavior: 'smooth', block: 'start'});
+          card.focus({preventScroll: true});
+        }
+      });
     groups.append('rect')
       .attr('width', (item) => Math.max(0, item.x1 - item.x0))
       .attr('height', (item) => Math.max(0, item.y1 - item.y0))
@@ -3344,11 +3364,10 @@ CHARTS_SCRIPT = """<script>
         change === null ? 'sin datos' : `${change > 0 ? '+' : ''}${change.toFixed(2)}%`
       }`;
     });
-    const nameLabels = groups.filter((item) => item.data.current_day
-      && item.x1 - item.x0 >= 48 && item.y1 - item.y0 >= 28)
+    const nameLabels = groups.filter((item) => item.data.current_day)
       .append('text')
       .attr('x', (item) => (item.x1 - item.x0) / 2)
-      .attr('y', (item) => (item.y1 - item.y0) / 2 - 2)
+      .attr('y', (item) => (item.y1 - item.y0) / 2 - 4)
       .attr('text-anchor', 'middle')
       .attr('dominant-baseline', 'central')
       .attr('class', 'heatmap-name')
@@ -3359,28 +3378,21 @@ CHARTS_SCRIPT = """<script>
         const boxHeight = item.y1 - item.y0;
         const label = d3.select(this);
         const fontSize = Math.max(
-          7,
-          Math.min(12, boxHeight * 0.24, boxWidth / (item.data.name.length * 0.62))
+          3,
+          Math.min(12, boxHeight * 0.2, boxWidth / (item.data.name.length * 0.62))
         );
         label.style('font-size', `${fontSize}px`);
-        if (this.getComputedTextLength() > boxWidth - 12) {
-          label.style('display', 'none');
-        }
       });
-    nameLabels.filter(function(item) {
-      return item.y1 - item.y0 >= 42 && this.style.display !== 'none';
-    })
-      .append('tspan')
+    nameLabels.append('tspan')
       .attr('x', (item) => (item.x1 - item.x0) / 2)
-      .attr('dy', '1.25em')
+      .attr('dy', '1.15em')
       .attr('class', 'heatmap-return')
       .text((item) => item.data.change_pct === null
         ? '—'
         : `${item.data.change_pct > 0 ? '+' : ''}${item.data.change_pct.toFixed(2)}%`)
-      .each(function(item) {
-        if (this.getComputedTextLength() > item.x1 - item.x0 - 12) {
-          d3.select(this).remove();
-        }
+      .style('font-size', function() {
+        const item = d3.select(this.parentNode).datum();
+        return `${Math.max(3, Math.min(10, (item.y1 - item.y0) * 0.17))}px`;
       });
   }
 
@@ -3926,9 +3938,11 @@ def render_dashboard(
             )
             + "</p>"
         )
+        card_id = f"card-{company.ticker or company.name}"
         
         cards.append(
-            f'<article class="stock-card" data-current-day="{str(quote_is_current_today).lower()}" '
+            f'<article id="{_esc(card_id)}" class="stock-card" tabindex="-1" '
+            f'data-current-day="{str(quote_is_current_today).lower()}" '
             f'data-sentiment="{sentiment_signal}" '
             f'data-daily="{_num_attr(quote.daily_change_pct)}" '
             f'data-peg="{_num_attr(quote.peg_ratio)}" '

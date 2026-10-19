@@ -1152,6 +1152,9 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Number(item.weight_pct)", html)
         self.assertIn("'var(--bg)'", html)
         self.assertIn(".heatmap-name, .heatmap-return { fill: #000;", html)
+        self.assertIn("const nameLabels = groups.filter((item) => item.data.current_day)", html)
+        self.assertIn("card.scrollIntoView({behavior: 'smooth', block: 'start'})", html)
+        self.assertIn(".attr('role', 'link')", html)
 
     @patch("daily_report.yf.download", return_value=pd.DataFrame())
     def test_heatmap_payload_uses_short_asset_names(self, _download_mock):
@@ -1176,6 +1179,8 @@ class SentimentTests(unittest.TestCase):
             [item["name"] for item in payload["watchlist"]],
             ["MSCI World", "Palantir", "Marvell", "Space Innovators"],
         )
+        self.assertIn('id="card-EUNL.DE"', html)
+        self.assertIn('id="card-PLTR"', html)
 
     def test_heatmap_labels_are_clipped_and_mobile_layout_is_fluid(self):
         html = render_dashboard([])
@@ -1183,7 +1188,10 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("@media (max-width: 420px)", html)
         self.assertIn("width: min(100%, 1440px);", html)
         self.assertIn(".heatmap-chart { display: block; width: 100%; max-width: 100%;", html)
-        self.assertIn(".getComputedTextLength()", html)
+        self.assertNotIn("getComputedTextLength", html)
+        self.assertNotIn("label.style('display', 'none')", html)
+        self.assertIn("Math.max(3,", html)
+        self.assertIn("nameLabels.append('tspan')", html)
         self.assertIn(".attr('clip-path', (item) => `url(#${item.clipId})`)", html)
         self.assertIn(".attr('text-anchor', 'middle')", html)
 
