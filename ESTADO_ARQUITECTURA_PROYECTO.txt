@@ -1,0 +1,181 @@
+ESTADO Y ARQUITECTURA DEL PROYECTO
+
+Fecha del informe: 19 de octubre de 2026
+Repositorio: danigardel/AGENTE-CARTERA
+Directorio de trabajo: C:\Users\danig\Desktop\agente
+Rama: main
+Último commit observado: 91001a9 - ajuste de etiquetas y navegación en los mapas de calor.
+
+
+1. PROPÓSITO GENERAL
+
+Este proyecto genera un radar bursátil diario como página web estática. Combina cotizaciones públicas, titulares, indicadores de sentimiento y análisis de una cartera configurada por el usuario. El resultado se puede consultar localmente o publicar en GitHub Pages mediante GitHub Actions.
+
+La página reúne:
+
+- Una lista de seguimiento de empresas y fondos con precios, variaciones, titulares traducidos y métricas financieras.
+- Una sección de cartera con posiciones, inversión base, precios y valor actual, rendimientos históricos y métricas MAX.
+- Mapas de calor, minigráficos intradía y curvas de rendimiento comparativas.
+- Un screener que filtra y ordena los datos ya cargados en la página.
+- Un análisis opcional de cartera generado por Gemini.
+- Una agenda de eventos corporativos y un radar de noticias macroeconómicas.
+
+El dashboard se construye como HTML estático: no tiene backend propio ni una base de datos de mercado. Usa fuentes públicas; no inicia sesión en Trade Republic ni reutiliza sus tokens, sesiones o identificadores de cuenta, y no depende de endpoints privados del broker.
+
+
+2. STACK TECNOLÓGICO Y CONFIGURACIÓN
+
+Entorno observado
+
+- Sistema operativo de desarrollo: Windows.
+- Python local: 3.14.4.
+- El workflow de GitHub Actions configura Python 3.12.
+- Zona horaria predeterminada de los informes: Europe/Madrid, configurable con REPORT_TIMEZONE.
+
+Dependencias
+
+Declaradas en requirements.txt:
+
+Paquete             Versión local observada    Uso
+feedparser          6.0.14                     Lectura de feeds RSS.
+requests            2.34.2                     Solicitudes HTTP, traducción y API Gemini.
+vaderSentiment      3.3.2                      Heurística de sentimiento de titulares.
+yfinance            1.7.0                      Cotizaciones, datos históricos y fundamentales públicos de Yahoo Finance.
+pandas              3.0.6                      Manipulación de series y datos financieros; dependencia utilizada por yfinance.
+
+En el navegador se carga D3.js 7.9.0 desde CDN para dibujar los SVG. Por tanto, los gráficos requieren conexión para descargar esa biblioteca, aunque el documento HTML ya generado sea estático.
+
+Configuración y credenciales
+
+- Gemini es opcional. La variable GEMINI_API_KEY puede contener un pool de claves separados por comas; GEMINI_MODEL permite elegir el modelo y INVESTOR_PROFILE personalizar el perfil enviado al análisis.
+- El flujo de Gemini usa gemini-3.8-flash y conserva gemini-3.7-flash como fallback.
+- REPORT_TIMEZONE permite cambiar la zona horaria y PORTFOLIO_TRANSACTIONS_CSV indicar un CSV de operaciones.
+- .gitignore excluye cachés, bytecode y el archivo local de credenciales. No copiar valores de claves ni archivos de credenciales al contexto del siguiente agente; en CI deben permanecer como GitHub Secrets.
+- Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.
+
+
+3. ARCHIVOS PRINCIPALES Y RESPONSABILIDADES
+
+daily_report.py
+
+Archivo central, aproximadamente 4.220 líneas. Contiene configuración, modelos de datos, obtención de datos, cálculos, análisis IA, HTML, CSS y JavaScript.
+
+Flujo de ejecución de alto nivel:
+
+1. main() lee los argumentos CLI, carga la cartera fija o un CSV, recopila reportes, genera el análisis y construye el HTML.
+2. collect_reports() ejecuta en paralelo la descarga de titulares y cotizaciones; luego traduce los titulares secuencialmente con una pausa de 0,2 s entre peticiones reales.
+3. fetch_portfolio() obtiene precios actuales e históricos, calcula cierres y rendimientos por periodo y los valores de la cartera.
+4. analyze_portfolio() reúne contexto, consulta Gemini si está configurado, valida su respuesta y usa caché y rotación del pool de claves.
+5. collect_chart_data() reúne las series intradía e históricas para heatmaps, sparklines y gráficos de cartera y referencias.
+6. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
+
+Responsabilidades representativas dentro del archivo:
+
+- COMPANIES, PORTFOLIO, PORTFOLIO_PERIODS, MARKET_BENCHMARKS y MACRO_FEEDS: configuración de activos, cartera, periodos, referencias y fuentes.
+- fetch_headlines(), fetch_financial_news(), collect_market_radar() y translate_headline(): noticias, RSS y traducción.
+- fetch_quote(), fetch_portfolio() y extra_quote_fields(): cotizaciones, cartera y métricas financieras.
+- load_portfolio_transactions(), portfolio_assets_from_transactions() y portfolio_history_from_transactions(): importación y reconstrucción estimada de operaciones CSV.
+- build_analysis_prompt(), post_gemini(), analyze_portfolio() y funciones auxiliares: generación IA, fallback, rotación y caché.
+- collect_chart_data() y _market_session_series(): preparación de series intradía e históricas.
+- SORT_SCRIPT, PORTFOLIO_SCRIPT y CHARTS_SCRIPT: filtros del screener, controles de la cartera, heatmaps y gráficos D3 del cliente.
+- render_dashboard(): serialización segura de datos e integración del HTML, CSS y JavaScript.
+
+tests\test_daily_report.py
+
+Aproximadamente 2.137 líneas con pruebas unittest para noticias, cartera, Gemini, gráficas, generación HTML, screener y comportamiento de cotizaciones stale. En la última validación de cambios se ejecutaron 64 pruebas correctamente.
+
+README.md
+
+Documenta ejecución, cartera CSV, automatización, fuentes y límites funcionales. Contiene algunas descripciones que no reflejan del todo los cambios visuales más recientes; ver “Pendientes y siguiente hito”.
+
+requirements.txt
+
+Lista las dependencias Python directas. No se observa un lockfile en la raíz inspeccionada.
+
+.github\workflows\daily_report.yml
+
+Instala dependencias, restaura y guarda exclusivamente gemini_cache.json, ejecuta el generador y publica public\index.html mediante GitHub Pages. Tiene ejecución programada cada cinco minutos y permite ejecución manual.
+
+HTML generado
+
+En la raíz existen dashboard.html e index.html. Son resultados generados, no la fuente principal de la lógica. El workflow genera su artefacto de Pages en public\index.html; conviene regenerar las páginas tras cambios al código antes de considerarlas una muestra actual del dashboard.
+
+
+4. REGLAS DE NEGOCIO Y DECISIONES DE DISEÑO
+
+Datos y cartera
+
+- La lista de seguimiento tiene alrededor de 55 activos; su fuente de verdad es COMPANIES en daily_report.py.
+- La cartera fija está en PORTFOLIO. También se admite un CSV local que sustituye la cartera fija; no la complementa.
+- El CSV no conecta con un broker. La reconstrucción por operaciones estima posiciones abiertas usando coste medio, y no calcula impuestos ni ganancias realizadas.
+- La moneda de visualización de cartera es EUR. Los activos USD se convierten con datos históricos USD/EUR cuando están disponibles.
+- Los periodos comparativos son 1D, 1W, 1M, 6M y 1Y. MAX compara el valor actual con la inversión base configurada.
+- Las curvas históricas de cartera revalorizan las posiciones actuales con precios pasados; no reconstruyen los flujos históricos de entradas y salidas, salvo la estimación CSV independiente.
+- Las referencias comparativas son S&P 500 EUR (SXR8.DE) y MSCI World EUR (EUNL.DE).
+- Space Innovators de VanEck usa JEDI (ISIN IE000YU9K6K2); SpaceX figura como SPCX.
+
+Noticias y análisis IA
+
+- Se recopilan titulares de fuentes RSS públicas y se filtran por fecha local del informe.
+- Google Translate se llama de forma secuencial con una pausa de 0,2 s para evitar ráfagas paralelas contra el servicio gratuito.
+- El radar macro puede incluir Yahoo Finance, CNBC, WSJ, Bloomberg e Investing.com España; sus titulares se envían tal como se publican.
+- VADER analiza el texto original. El sentimiento es una señal heurística, no una predicción ni asesoramiento.
+- Gemini recibe información de empresas, cartera y noticias disponibles. No se usa Google Search Grounding.
+- La rotación de claves, caché positiva/negativa y fallback de modelo deben conservarse: son funcionalidades centrales y existen pruebas de regresión.
+- La rotación de varias claves del mismo proyecto no aumenta la cuota del proyecto.
+
+Interfaz y frescura de mercado
+
+- Las cotizaciones se consideran actuales solo si su fecha corresponde al día de mercado local y tiene los datos requeridos.
+- La lista separa visualmente activos frescos y stale; las cotizaciones antiguas quedan al final tras un separador discontinuo.
+- En heatmaps, activos frescos usan etiquetas cortas y ahora muestran nombre y porcentaje dentro de cada celda, reduciendo la fuente hasta 3 px y recortando con clip-path. Los stale conservan fondo var(--bg) y no muestran etiquetas.
+- Las celdas de heatmap son navegables por ratón y teclado: llevan a la tarjeta card-{ticker} con scroll suave y foco.
+- Los sparklines representan la sesión del mercado del día, no una ventana móvil de 24 horas; no se muestran para datos stale.
+- La interfaz window.DashboardMarketData.applySnapshot() / applyDelta() permite aplicar actualizaciones parciales desde un futuro proveedor autorizado. Es solo una interfaz de integración y no implementa streaming ni añade una fuente de datos en vivo.
+- El diseño está orientado a móvil, con comprobaciones recientes a 390 px y sin scroll horizontal en la prueba del heatmap.
+
+Límites de confianza
+
+- Yahoo Finance, RSS y Google Translate son fuentes externas y pueden retrasarse, fallar o devolver datos incompletos.
+- Gemini puede fallar por cuota o red; el reporte debe poder generarse aun sin análisis IA.
+- La salida del modelo se valida contra los tickers autorizados.
+- Los datos financieros y el análisis no son asesoramiento financiero personalizado.
+- No basar nuevas funciones en rutas privadas/no documentadas de Trade Republic ni en sesiones o tokens del navegador.
+
+
+5. ESTADO ACTUAL
+
+- El último trabajo de interfaz implementó etiquetas de heatmap forzadas para activos actuales, identificadores estables en las tarjetas y navegación desde las celdas del mapa.
+- El worktree aparecía limpio en la inspección; la rama actual es main.
+- El último conjunto de validación reportó 64 pruebas OK, compilación de Python con SyntaxWarning tratado como error, y git diff --check sin errores.
+- La comprobación manual en navegador a 390 px confirmó:
+  - Sin desbordamiento horizontal.
+  - Las celdas de instrumentos actuales muestran texto.
+  - Las celdas stale conservan fondo camuflado y no muestran etiquetas.
+  - El clic desplaza a la tarjeta correspondiente y le da foco.
+
+“Sin errores” se refiere a esas comprobaciones; no implica que todas las fuentes externas estén siempre disponibles ni que las cotizaciones sean tiempo real.
+
+Desajuste documental detectado
+
+El README todavía contiene descripciones anteriores que discrepan del comportamiento actual: menciona que las etiquetas se omiten cuando no caben y que inversión base/valor actual solo aparecen en MAX. La implementación reciente mantiene visibles los cinco campos base de cartera y recorta las etiquetas del heatmap en vez de ocultarlas. También debe comprobarse la descripción del uso de sparklines en la tabla móvil. Conviene corregir el README para evitar que el agente siguiente implemente contra documentación obsoleta.
+
+
+6. PRÓXIMO OBJETIVO O HITO RECOMENDADO
+
+No hay un siguiente cambio funcional explícitamente acordado en el contexto. El hito recomendado para la migración es:
+
+1. Sincronizar el README con el comportamiento actual, especialmente etiquetas de heatmap, tarjetas stale, campos siempre visibles de cartera y navegación con foco.
+2. Añadir o consolidar pruebas de integración de navegador para clic/teclado en heatmap, visibilidad stale y ancho móvil, si se desea que esos comportamientos queden cubiertos automáticamente.
+3. Después, elegir una nueva mejora funcional con el usuario; no hay que asumir una conexión de datos en vivo ni una integración con Trade Republic.
+
+
+INICIO RÁPIDO PARA EL SIGUIENTE AGENTE
+
+Desde C:\Users\danig\Desktop\agente:
+
+    python -m pip install -r requirements.txt
+    python -m unittest tests.test_daily_report
+    python daily_report.py --output dashboard.html
+
+Para generar con Gemini, suministrar GEMINI_API_KEY mediante el gestor de secretos apropiado; nunca incluir su valor en prompts, documentación o commits.

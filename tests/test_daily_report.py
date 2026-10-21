@@ -18,6 +18,7 @@ from daily_report import (
     FinancialNewsItem,
     GlobalMarketNews,
     MACRO_FEEDS,
+    MAX_MARKET_RADAR_ITEMS,
     MarketEvent,
     PortfolioAnalysis,
     PortfolioAsset,
@@ -811,7 +812,7 @@ class SentimentTests(unittest.TestCase):
 
     @patch("daily_report.feedparser.parse")
     @patch("daily_report.requests.get")
-    def test_macro_feed_keeps_english_title_source_and_today_date(
+    def test_macro_feed_keeps_entries_from_bozo_feed(
         self, get_mock, parse_mock
     ):
         get_mock.return_value = SimpleNamespace(
@@ -819,7 +820,8 @@ class SentimentTests(unittest.TestCase):
             raise_for_status=lambda: None,
         )
         parse_mock.return_value = SimpleNamespace(
-            bozo=False,
+            bozo=True,
+            bozo_exception="minor XML parse error",
             entries=[
                 SimpleNamespace(
                     title="Markets rally after earnings beat",
@@ -836,12 +838,14 @@ class SentimentTests(unittest.TestCase):
             ],
         )
 
-        news = _fetch_macro_feed(
-            "Fallback source",
-            "https://feeds.example/markets.xml",
-            date(2026, 10, 11),
-        )
+        with self.assertLogs(level="WARNING") as log:
+            news = _fetch_macro_feed(
+                "Fallback source",
+                "https://feeds.example/markets.xml",
+                date(2026, 10, 11),
+            )
 
+        self.assertIn("minor XML parse error", log.output[0])
         self.assertEqual(len(news), 1)
         self.assertEqual(news[0].title, "Markets rally after earnings beat")
         self.assertEqual(news[0].source, "Example News")
@@ -850,6 +854,10 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(news[0].summary, "Global markets gain after results.")
 
     def test_macro_feeds_include_bloomberg_and_investing_spain(self):
+        self.assertIn(
+            ("Yahoo Finance", "https://finance.yahoo.com/rss/topstories"),
+            MACRO_FEEDS,
+        )
         self.assertIn(
             ("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss"),
             MACRO_FEEDS,
@@ -877,9 +885,10 @@ class SentimentTests(unittest.TestCase):
 
         news = collect_market_radar(reference)
 
-        self.assertEqual(len(news), 180)
+        self.assertEqual(len(news), MAX_MARKET_RADAR_ITEMS)
+        self.assertEqual(len(news), 250)
         self.assertEqual(news[0].published, reference)
-        self.assertEqual(news[-1].published, reference - timedelta(minutes=35))
+        self.assertEqual(news[-1].published, reference - timedelta(minutes=49))
         self.assertEqual(fetch_mock.call_count, len(MACRO_FEEDS))
 
     @patch(
@@ -911,6 +920,10 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("No se recibieron noticias recientes del RSS.", prompt)
         self.assertIn("haz un análisis técnico básico", prompt)
         self.assertIn("global_market_radar", prompt)
+        self.assertIn(
+            "global_market_radar (que contiene titulares en inglés y español)",
+            prompt,
+        )
         self.assertIn("external_ideas", prompt)
 
     def test_market_session_series_uses_exchange_date_not_a_rolling_24_hour_window(self):
@@ -1929,50 +1942,66 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
-    def test_gemini_explicit_daily_quota_caches_until_next_milestone(self, post_mock):
+    def test_mixed_gemini_daily_quota_and_overload_caches_until_next_milestone(
+        self, post_mock
+    ):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
-        response = SimpleNamespace(
-            status_code=429,
-            headers={},
-            json=lambda: {
-                "error": {
-                    "message": "Daily quota exceeded",
-                    "details": [
-                        {
-                            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
-                            "violations": [
-                                {
-                                    "quotaMetric": (
-                                        "generativelanguage.googleapis.com/"
-                                        "generate_content_free_tier_requests"
-                                    ),
-                                    "quotaId": (
-                                        "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
-                                    ),
-                                }
-                            ],
-                        }
-                    ],
-                }
-            },
-        )
-        post_mock.return_value.raise_for_status.side_effect = requests.HTTPError(
-            response=response
-        )
+        daily_quota_payload = {
+            "error": {
+                "message": "Daily quota exceeded",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {
+                                "quotaMetric": (
+                                    "generativelanguage.googleapis.com/"
+                                    "generate_content_free_tier_requests"
+                                ),
+                                "quotaId": (
+                                    "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+
+        def failed_response(status_code, payload):
+            response = SimpleNamespace(
+                status_code=status_code,
+                headers={},
+                json=lambda: payload,
+            )
+
+            def raise_for_status():
+                raise requests.HTTPError(response=response)
+
+            response.raise_for_status = raise_for_status
+            return response
+
+        mixed_failures = [
+            failed_response(503, {"error": {"message": "Server overloaded"}}),
+            failed_response(429, daily_quota_payload),
+            failed_response(503, {"error": {"message": "Server overloaded"}}),
+            failed_response(429, daily_quota_payload),
+        ]
+        post_mock.side_effect = mixed_failures + mixed_failures
 
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_path = Path(temp_dir) / "gemini_cache.json"
             failed = analyze_portfolio(
                 [],
                 [],
-                api_key="secret-test-key",
+                api_key="first-test-key,second-test-key",
                 cache_path=cache_path,
                 now_utc=now,
             )
             suppressed = analyze_portfolio(
                 [],
                 [],
-                api_key="secret-test-key",
+                api_key="first-test-key,second-test-key",
                 cache_path=cache_path,
                 now_utc=now + timedelta(minutes=10),
             )
@@ -1980,7 +2009,7 @@ class SentimentTests(unittest.TestCase):
             retried = analyze_portfolio(
                 [],
                 [],
-                api_key="secret-test-key",
+                api_key="first-test-key,second-test-key",
                 cache_path=cache_path,
                 now_utc=datetime(2026, 10, 7, 13, 1, tzinfo=timezone.utc),
             )
@@ -1990,7 +2019,7 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("retry_after_utc", cache_data)
         self.assertEqual(cache_data["failure_policy"], "daily")
         self.assertIn("siguiente hito de análisis: 07/10/2026 15:00", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 4)
+        self.assertEqual(post_mock.call_count, 8)
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
