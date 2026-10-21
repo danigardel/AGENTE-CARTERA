@@ -122,3 +122,5 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        env:
+          GITHUB_SHA: ${{ github.run_id }}-${{ github.run_attempt }}
