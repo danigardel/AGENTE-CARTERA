@@ -33,19 +33,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: react-portfolio/package-lock.json
-
-      - name: Install React dependencies
-        run: npm ci --prefix react-portfolio
-
-      - name: Test React dashboard
-        run: npm test --prefix react-portfolio
-
       - name: Restore Gemini analysis cache
         id: gemini-cache-restore
         uses: actions/cache/restore@v4
@@ -74,22 +61,26 @@ jobs:
               output.write(f"timestamp={timestamp}\n")
           PY
 
+      - name: Test Python dashboard
+        run: python -m unittest discover -s tests -v
+
       - name: Generate daily dashboard
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           INVESTOR_PROFILE: ${{ vars.INVESTOR_PROFILE }}
           GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
         run: |
-          mkdir -p react-portfolio/public
-          python daily_report.py --no-html --data-output react-portfolio/public/market_data.json
-
-      - name: Build React dashboard
-        run: npm run build:dashboard --prefix react-portfolio
+          mkdir -p public
+          python daily_report.py --output public/index.html --data-output public/market_data.json
 
       - name: Verify Pages output
         run: |
           test -s public/index.html
           test -s public/market_data.json
+          grep -q 'id="watchlist-heatmap"' public/index.html
+          grep -q 'id="portfolio-heatmap"' public/index.html
+          grep -q 'id="stock-grid"' public/index.html
+          grep -q 'data-sparkline=' public/index.html
 
       - name: Prepare Gemini cache key
         id: gemini-cache-after

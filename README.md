@@ -1,6 +1,6 @@
 # Radar bursátil diario
 
-El backend Python obtiene cotizaciones, titulares y fundamentales de Yahoo Finance, calcula métricas de cartera y puede generar un análisis con Gemini. La vista publicada es una aplicación estática React/TypeScript: Python exporta el contrato `market_data.json` y React lo carga al abrirse. Se conservan el screener, las noticias, los eventos, los gráficos y la cartera con cierres históricos. La cotización y las noticias no requieren claves; el análisis IA es opcional y necesita una clave Gemini.
+El backend Python obtiene cotizaciones, titulares y fundamentales de Yahoo Finance, calcula métricas de cartera y puede generar un análisis con Gemini. La vista publicada conserva el dashboard original generado por `daily_report.py`: empieza con el mapa de calor del mercado, incluye el mapa de las posiciones y mantiene debajo el screener con tarjetas, sentimiento, noticias y sparklines. El mismo proceso exporta `market_data.json` para consumidores de datos. La cotización y las noticias no requieren claves; el análisis IA es opcional y necesita una clave Gemini.
 
 El reporte también solicita un análisis estructurado a Gemini 3.8 Flash (`gemini-3.8-flash`) usando la API estándar `generateContent` (no Batch), con `gemini-3.7-flash` como alternativa. Envía a Google las posiciones de `PORTFOLIO`, los datos de `COMPANIES`, titulares/resúmenes de los RSS de Yahoo Finance y un radar global con hasta 250 titulares recientes de Yahoo Finance, CNBC, WSJ, Bloomberg e Investing.com España. El radar global conserva titulares y resúmenes tal como se publican, incluye fuente/fecha/enlace y se inyecta en `global_market_radar` para que Gemini detecte oportunidades externas. Las peticiones usan el payload estándar de generación, sin Google Search Grounding. Si se omite un feed, el informe continúa; si no se obtiene ninguna noticia de hoy, el prompt pide un análisis técnico basado en los datos disponibles. La petición usa un presupuesto de razonamiento de 2048 tokens. No se envían claves de API dentro del prompt.
 El análisis se guarda en `gemini_cache.json` con un timestamp UTC y se reutiliza hasta el siguiente hito horario de análisis. `GEMINI_API_KEY` admite varias claves separadas por comas. Cada consulta empieza con la clave siguiente a la que resolvió el análisis anterior; los fallos rotan secuencialmente el pool. Si todas las claves fallan en el modelo principal con HTTP 429 o 503, se repite la rotación desde el mismo índice con `gemini-3.7-flash`; también se prueba ese modelo si el principal no existe. Solo tras agotar también el modelo alternativo se conserva el aviso: hasta el siguiente hito (`TARGET_HOURS`) si el error final identifica explícitamente una cuota diaria, o cinco minutos para 503, límites por minuto/tokens y errores 429 sin detalle diario claro. Importante: las cuotas de Gemini se aplican por proyecto, no por clave API; rotar varias claves asociadas al mismo proyecto no suma cuota. Google puede responder 429 por RPM, TPM o RPD (solicitudes/minuto, tokens/minuto o solicitudes/día). El aviso de cuota recomienda comprobar en AI Studio el proyecto realmente asociado a cada clave y los límites del modelo. La caché negativa guarda únicamente la huella SHA-256 y el índice del conjunto ordenado de claves (nunca las claves); al cambiar el conjunto se reinicia la rotación. Los archivos de caché se excluyen de Git. GitHub Actions conserva únicamente la caché de Gemini.
@@ -20,7 +20,14 @@ El archivo se crea en `dashboard.html`. Se puede elegir otra ruta:
 python daily_report.py --output public\index.html
 ```
 
-Para generar solo el JSON que consume React:
+Para generar la página original y el JSON de datos en la carpeta publicada:
+
+```powershell
+New-Item -ItemType Directory -Force public | Out-Null
+python daily_report.py --output public\index.html --data-output public\market_data.json
+```
+
+Para trabajar con el prototipo opcional de React, genera el JSON en su carpeta:
 
 ```powershell
 New-Item -ItemType Directory -Force react-portfolio\public | Out-Null
@@ -43,9 +50,10 @@ Para compilar la salida estática:
 npm --prefix react-portfolio run build:dashboard
 ```
 
-Vite escribe el sitio en `public\`; la URL de los recursos es relativa para que
-funcione tanto en el dominio de proyecto de GitHub Pages como bajo una ruta.
-La salida generada no se versiona.
+React se conserva como un prototipo independiente y no reemplaza la página
+publicada por GitHub Pages. Su build de Vite escribe en `public\`; la URL de los
+recursos es relativa para funcionar tanto en el dominio de proyecto de GitHub
+Pages como bajo una ruta. La salida generada no se versiona.
 
 ### Importar operaciones de cartera (opcional)
 
@@ -65,7 +73,7 @@ La lista de seguimiento está en `COMPANIES` y la cartera fija en `PORTFOLIO`, a
 
 ## Automatización y GitHub Pages
 
-El workflow `.github/workflows/daily_report.yml` instala Python y Node, ejecuta las pruebas React, exporta `react-portfolio\public\market_data.json`, compila el frontend en `public\` y despliega esa carpeta a GitHub Pages cada **5 minutos** (el intervalo mínimo de GitHub Actions para `schedule`). GitHub puede retrasar o descartar ejecuciones programadas cuando hay carga, así que no se garantiza una actualización exacta cada 5 minutos. Si una ejecución sigue en curso, no se cancela para iniciar otra; se procesa la más reciente cuando queda disponible. El cron se ejecuta en UTC, pero la hora que aparece en el informe usa `Europe/Madrid`. También se puede iniciar manualmente con `workflow_dispatch`. Cada tarjeta muestra el último precio que Yahoo Finance devuelve durante esa generación, convertido a euros cuando hay tipo de cambio disponible; el proveedor puede retrasar los datos o no cambiar el precio cuando el mercado está cerrado. Las ejecuciones programadas deben estar habilitadas y el workflow debe estar en la rama predeterminada del repositorio.
+El workflow `.github/workflows/daily_report.yml` instala Python, ejecuta la suite de pruebas y genera `public\index.html` con el dashboard original y `public\market_data.json` con los datos estructurados. Despliega esa carpeta a GitHub Pages cada **5 minutos** (el intervalo mínimo de GitHub Actions para `schedule`). GitHub puede retrasar o descartar ejecuciones programadas cuando hay carga, así que no se garantiza una actualización exacta cada 5 minutos. Si una ejecución sigue en curso, no se cancela para iniciar otra; se procesa la más reciente cuando queda disponible. El cron se ejecuta en UTC, pero la hora que aparece en el informe usa `Europe/Madrid`. También se puede iniciar manualmente con `workflow_dispatch`. Cada tarjeta muestra el último precio que Yahoo Finance devuelve durante esa generación, convertido a euros cuando hay tipo de cambio disponible; el proveedor puede retrasar los datos o no cambiar el precio cuando el mercado está cerrado. Las ejecuciones programadas deben estar habilitadas y el workflow debe estar en la rama predeterminada del repositorio.
 
 El archivo `market_data.json` publicado es accesible públicamente, como el resto
 del sitio. Incluye las posiciones y el historial de inversión que ya se

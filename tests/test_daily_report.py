@@ -336,6 +336,92 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('<strong class="text-bearish">2.10</strong></div>', html)
         self.assertIn('<span title="Price/Earnings-to-Growth; ratio informativo">PEG</span><strong class="">—</strong>', html)
 
+    def test_dashboard_keeps_market_summary_and_orders_heatmaps_portfolio_and_news(self):
+        generated_at = datetime(2026, 10, 26, 12, 0, tzinfo=TIMEZONE)
+        report = StockReport(
+            Company("Example Technology", "EX"),
+            headlines=[
+                Headline(
+                    "Quarterly results improve",
+                    "https://example.com/results",
+                    "Example News",
+                    generated_at,
+                    0.7,
+                )
+            ],
+            quote=Quote(
+                daily_change_pct=2.5,
+                market_date=generated_at.date(),
+                market_timezone=TIMEZONE.key,
+                analyst_consensus="Compra",
+                analyst_count=3,
+                sector="Technology",
+            ),
+            news_sentiment=0.7,
+        )
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Example Technology", "EX", 2, 100, "EUR"),
+            prices_eur={"Hoy": 52.5, "1D": 51.2},
+            returns_pct={"1D": 2.5},
+            current_value_eur=105,
+            price_date=generated_at.date(),
+            market_timezone=TIMEZONE.key,
+        )
+
+        html = render_dashboard(
+            [report],
+            generated_at=generated_at,
+            portfolio=[position],
+            analysis=PortfolioAnalysis(
+                portfolio_assessment="Mantener diversificación.",
+                last_updated_utc="2026-10-26T10:00:00+00:00",
+            ),
+            market_events=[
+                MarketEvent(
+                    generated_at.date() + timedelta(days=4),
+                    "EX",
+                    "Example Technology",
+                    "Resultados",
+                )
+            ],
+        )
+
+        self.assertIn("Instrumentos seguidos", html)
+        self.assertIn("Cotizaciones actuales", html)
+        self.assertIn(">1 / 1</div>", html)
+        self.assertIn("Titulares recogidos", html)
+        self.assertIn("Empresas con noticias", html)
+        self.assertIn("Consenso de analistas", html)
+        self.assertIn("Technology", html)
+        self.assertIn("+2.50%", html)
+        self.assertIn("Próximos eventos", html)
+        self.assertIn("Quarterly results improve", html)
+        self.assertIn("Análisis de cartera con Gemini Flash", html)
+        self.assertLess(
+            html.index('id="watchlist-heatmap"'),
+            html.index('aria-label="Resumen ejecutivo del mercado"'),
+        )
+        self.assertLess(
+            html.index('aria-label="Resumen ejecutivo del mercado"'),
+            html.index('id="portfolio-heatmap"'),
+        )
+        self.assertLess(
+            html.index('id="portfolio-heatmap"'),
+            html.index('id="market-events-title"'),
+        )
+        self.assertLess(
+            html.index('id="market-events-title"'),
+            html.index('id="key-title"'),
+        )
+        self.assertLess(
+            html.index('id="key-title"'),
+            html.index('id="ai-analysis-title"'),
+        )
+        self.assertLess(
+            html.index('id="ai-analysis-title"'),
+            html.index('id="stocks-title"'),
+        )
+
     def test_peg_color_thresholds(self):
         for peg, css in [(None, ""), (-0.4, ""), (0.99, "text-bullish"), (1.0, "text-orange"),
                          (1.5, "text-orange"), (1.51, "text-bearish")]:
@@ -2664,6 +2750,56 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["watchlist"], [])
         self.assertEqual(payload["portfolio"]["positions"], [])
+
+    @patch("daily_report.collect_market_events", return_value=[])
+    @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
+    @patch("daily_report.analyze_portfolio", return_value=PortfolioAnalysis())
+    @patch("daily_report.fetch_portfolio", return_value=[])
+    @patch("daily_report.collect_reports", return_value=[])
+    def test_main_writes_original_dashboard_and_json_together(
+        self,
+        _reports_mock,
+        _portfolio_mock,
+        _analysis_mock,
+        _charts_mock,
+        _events_mock,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_path = root / "public" / "market_data.json"
+            html_path = root / "public" / "index.html"
+            with (
+                patch("daily_report.PORTFOLIO_ACTIVITY_FILE", root / "missing.json"),
+                patch(
+                    "sys.argv",
+                    [
+                        "daily_report.py",
+                        "--output",
+                        str(html_path),
+                        "--data-output",
+                        str(data_path),
+                    ],
+                ),
+            ):
+                result = main()
+
+            html = html_path.read_text(encoding="utf-8")
+            payload = json.loads(data_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertLess(
+            html.index('id="watchlist-heatmap"'),
+            html.index('<h2 id="portfolio-title">Mi cartera'),
+        )
+        self.assertLess(
+            html.index('<h2 id="portfolio-title">Mi cartera'),
+            html.index('<h2 id="stocks-title">Lista de seguimiento'),
+        )
+        self.assertIn('id="portfolio-heatmap"', html)
+        self.assertIn('id="stock-grid"', html)
+        self.assertIn("data-sparkline=", html)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["watchlist"], [])
 
 
 if __name__ == "__main__":

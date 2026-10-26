@@ -4573,6 +4573,33 @@ def render_dashboard(
     analyst_breakdown = " · ".join(
         f"{_esc(name)}: {count}" for name, count in summary["analyst_counts"].items()
     ) or "Sin datos"
+    current_quote_count = sum(quote_is_current(report) for report in reports)
+    sector_changes: dict[str, list[float]] = {}
+    for report in reports:
+        if (
+            quote_is_current(report)
+            and report.quote.sector
+            and report.quote.daily_change_pct is not None
+        ):
+            sector_changes.setdefault(report.quote.sector, []).append(
+                report.quote.daily_change_pct
+            )
+    sector_performance = sorted(
+        (
+            (sector, fmean(changes), len(changes))
+            for sector, changes in sector_changes.items()
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    sector_cards_html = "".join(
+        '<article class="sector-card">'
+        f'<span>{_esc(sector)}</span>'
+        f'<strong class="{"text-bullish" if change > 0 else "text-bearish" if change < 0 else "text-neutral"}">'
+        f'{change:+.2f}%</strong>'
+        f"<small>{companies} instrumentos</small></article>"
+        for sector, change, companies in sector_performance[:4]
+    )
     key_headlines_html = "".join(
         f'<li><a href="{_esc(item.url)}" target="_blank" rel="noopener noreferrer">'
         f"{_esc(item.title_es or item.title)}</a>"
@@ -4720,12 +4747,16 @@ def render_dashboard(
     h1 {{ font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; line-height: 1.1; margin: 7px 0; }}
     .subtitle, .muted {{ color: var(--muted); }}
     .updated {{ color: var(--muted); font-size: 13px; text-align: right; }}
-    .summary {{ display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px; margin-bottom: 30px; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 10px; margin-bottom: 12px; }}
     .summary-card {{ background: linear-gradient(140deg, #172238, #111827); border: 1px solid var(--line);
       border-radius: 16px; padding: 20px; min-height: 130px; }}
     .summary-label {{ color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }}
     .summary-value {{ display: flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 750; margin: 9px 0 3px; }}
     .summary-detail {{ color: var(--muted); font-size: 13px; }}
+    .sector-strip {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 9px; margin: 0 0 24px; }}
+    .sector-card {{ display: grid; gap: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 11px 14px; }}
+    .sector-card span, .sector-card small {{ color: var(--muted); font-size: 11px; }}
+    .sector-card strong {{ font-size: 17px; font-variant-numeric: tabular-nums; }}
     .dot, .badge i {{ width: 9px; height: 9px; display: inline-block; border-radius: 50%; background: currentColor; }}
     .bullish {{ color: var(--green); }} .bearish {{ color: var(--red); }} .neutral {{ color: var(--yellow); }}
     .disclaimer {{ border: 1px solid var(--line); border-radius: 12px; background: #0e1522; color: var(--muted);
@@ -4897,27 +4928,34 @@ def render_dashboard(
         </article>
       </div>
     </section>
-    <section class="summary" aria-label="Resumen ejecutivo">
+    <section class="summary" aria-label="Resumen ejecutivo del mercado">
       <article class="summary-card"><div class="summary-label">Sentimiento de noticias</div>
         <div class="summary-value"><span class="dot {signal}"></span>{label}</div>
-        <div class="summary-detail">Puntuación media VADER {score_text} · {summary["companies_with_news"]} empresas con titulares</div></article>
+        <div class="summary-detail">Puntuación media VADER {score_text}</div></article>
+      <article class="summary-card"><div class="summary-label">Instrumentos seguidos</div>
+        <div class="summary-value">{len(reports)}</div>
+        <div class="summary-detail">Empresas e instrumentos de la lista</div></article>
+      <article class="summary-card"><div class="summary-label">Cotizaciones actuales</div>
+        <div class="summary-value">{current_quote_count} / {len(reports)}</div>
+        <div class="summary-detail">Cotizaciones de la sesión vigente</div></article>
+      <article class="summary-card"><div class="summary-label">Titulares recogidos</div>
+        <div class="summary-value">{summary["headline_count"]}</div>
+        <div class="summary-detail">{warnings_count} avisos de datos</div></article>
+      <article class="summary-card"><div class="summary-label">Empresas con noticias</div>
+        <div class="summary-value">{summary["companies_with_news"]}</div>
+        <div class="summary-detail">Con titulares analizados hoy</div></article>
       <article class="summary-card"><div class="summary-label">Consenso de analistas</div>
         <div class="summary-value">{_esc(summary["analyst_total"])} empresas</div>
         <div class="summary-detail">{_esc(summary["consensus_summary"])}<br>{analyst_breakdown}</div></article>
-      <article class="summary-card"><div class="summary-label">Cobertura de hoy</div>
-        <div class="summary-value">{summary["headline_count"]} titulares</div>
-        <div class="summary-detail">{len(reports)} empresas seguidas · {warnings_count} avisos de datos</div></article>
+    </section>
+    <section class="sector-strip" aria-label="Rendimiento diario medio de sectores seguidos">
+      {sector_cards_html or '<p class="muted">No hay datos sectoriales actuales.</p>'}
     </section>
     <p class="disclaimer"><strong>Metodología:</strong> la señal de sentimiento se calcula sobre los titulares del día con VADER;
       no es una recomendación de inversión. El PEG, consenso y objetivos provienen de Yahoo Finance cuando están disponibles;
       el PEG es una referencia informativa, no una recomendación de inversión.
       La cartera usa movimientos filtrados del extracto de inversión cuando están disponibles; no se conecta al broker ni se consultan las tenencias internas de fondos.
       Los feeds y datos pueden faltar o retrasarse.</p>
-    <section aria-labelledby="key-title">
-      <div class="section-heading"><h2 id="key-title">Titulares clave</h2><span>Los de mayor polaridad detectados hoy</span></div>
-      <ul class="key-headlines">{key_headlines_html}</ul>
-    </section>
-    {_market_events_section(market_events)}
     <section aria-labelledby="portfolio-title">
       <div class="section-heading"><h2 id="portfolio-title">Mi cartera</h2>
         <div class="portfolio-controls">
@@ -4964,6 +5002,11 @@ def render_dashboard(
         {_portfolio_activity_section(portfolio_activity)}
         {portfolio_warning_html}
       </div>
+    </section>
+    {_market_events_section(market_events)}
+    <section aria-labelledby="key-title">
+      <div class="section-heading"><h2 id="key-title">Titulares clave</h2><span>Los de mayor polaridad detectados hoy</span></div>
+      <ul class="key-headlines">{key_headlines_html}</ul>
     </section>
     {_analysis_section(analysis)}
     <section aria-labelledby="stocks-title">
