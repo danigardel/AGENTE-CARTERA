@@ -58,6 +58,7 @@ from daily_report import (
     portfolio_assets_from_transactions,
     portfolio_transactions_from_activity,
     portfolio_history_from_transactions,
+    _portfolio_transaction_chart_data,
     collect_reports,
     render_dashboard,
     translate_headline,
@@ -883,6 +884,60 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual([point["value"] for point in series], [20, 22, 12])
 
+    def test_portfolio_profit_history_includes_fees_dividends_and_saveback(self):
+        transactions = [
+            PortfolioTransaction(
+                date(2026, 1, 1), "EX", "Example", "BUY", 2, 10, "EUR",
+                fees_eur=1, gross_amount_eur=20,
+            ),
+            PortfolioTransaction(
+                date(2026, 1, 3), "EX", "Example", "SELL", 1, 12, "EUR",
+                fees_eur=1, gross_amount_eur=12,
+            ),
+        ]
+        activities = [
+            PortfolioActivity(
+                date(2026, 1, 2), "DIVIDEND", "EX", "Example", "STOCK", "EUR",
+                1, None, 2, 0, -0.3,
+            ),
+            PortfolioActivity(
+                date(2026, 1, 3), "BENEFITS_SAVEBACK", "EX", "Example", "STOCK",
+                "EUR", None, None, 1, 0, 0,
+            ),
+        ]
+        closes = {
+            "EX": [
+                (date(2026, 1, 1), 10),
+                (date(2026, 1, 2), 11),
+                (date(2026, 1, 3), 12),
+            ],
+            "SXR8.DE": [
+                (date(2026, 1, 1), 100),
+                (date(2026, 1, 2), 101),
+                (date(2026, 1, 3), 102),
+            ],
+            "EUNL.DE": [
+                (date(2026, 1, 1), 200),
+                (date(2026, 1, 2), 202),
+                (date(2026, 1, 3), 204),
+            ],
+        }
+
+        chart_data = _portfolio_transaction_chart_data(
+            transactions, activities, closes
+        )
+
+        self.assertEqual(
+            [point["value"] for point in chart_data["portfolio_profit_series"]],
+            [-1, 3, 5],
+        )
+        self.assertEqual(len(chart_data["portfolio_transaction_events"]), 4)
+        self.assertEqual(chart_data["portfolio_transaction_events"][1]["action"], "DIVIDEND")
+        self.assertEqual(
+            [item["ticker"] for item in chart_data["benchmark_history_series"]],
+            ["SXR8.DE", "EUNL.DE"],
+        )
+
     def test_market_events_include_only_upcoming_quote_dates(self):
         reports = [
             StockReport(
@@ -965,6 +1020,19 @@ class SentimentTests(unittest.TestCase):
             portfolio_series=[
                 {"timestamp": "2026-10-07T09:00:00+00:00", "value": -0.5}
             ],
+            portfolio_profit_series=[
+                {"timestamp": "2026-10-07T09:00:00+00:00", "value": -3.2}
+            ],
+            portfolio_transaction_events=[
+                {
+                    "timestamp": "2026-10-07T09:00:00+00:00",
+                    "ticker": "EX",
+                    "action": "BUY",
+                    "shares": 1,
+                    "price_eur": 10,
+                    "amount_eur": 10,
+                }
+            ],
         )
         analysis = PortfolioAnalysis(
             portfolio_assessment="Evaluación",
@@ -978,7 +1046,10 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn('id="dashboard-chart-data"', html)
         self.assertIn(r"\u003c/script\u003e", html)
-        self.assertIn("Rendimiento medio de la lista de seguimiento", html)
+        self.assertIn("Beneficio o pérdida intradía de la cartera", html)
+        self.assertIn('id="portfolio-history-period"', html)
+        self.assertIn('<option value="YTD">YTD</option>', html)
+        self.assertIn("portfolio_transaction_events", html)
         self.assertIn("07/10/2026 · 11:15 CEST", html)
 
     def test_watchlist_matches_updated_company_list(self):
