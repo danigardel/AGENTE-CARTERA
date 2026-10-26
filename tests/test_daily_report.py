@@ -21,6 +21,7 @@ from daily_report import (
     MAX_MARKET_RADAR_ITEMS,
     MarketEvent,
     PortfolioAnalysis,
+    PortfolioActivity,
     PortfolioAsset,
     PortfolioPosition,
     PortfolioTransaction,
@@ -52,7 +53,9 @@ from daily_report import (
     _fetch_macro_feed,
     fetch_quote,
     load_portfolio_transactions,
+    load_portfolio_activity,
     portfolio_assets_from_transactions,
+    portfolio_transactions_from_activity,
     portfolio_history_from_transactions,
     collect_reports,
     render_dashboard,
@@ -598,6 +601,167 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(assets[0].shares, 8)
         self.assertAlmostEqual(assets[0].investment_eur, 80.8)
 
+    def test_portfolio_activity_builds_positions_and_keeps_benefits_separate(self):
+        rows = [
+            {
+                "date": "2026-01-01",
+                "action": "BUY",
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "asset_class": "STOCK",
+                "currency": "USD",
+                "shares": 10,
+                "price_eur": 10,
+                "amount_eur": -100,
+                "fee_eur": -1,
+                "tax_eur": 0,
+            },
+            {
+                "date": "2026-01-02",
+                "action": "DIVIDEND",
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "asset_class": "STOCK",
+                "currency": "USD",
+                "shares": 10,
+                "price_eur": None,
+                "amount_eur": 2,
+                "fee_eur": 0,
+                "tax_eur": -0.3,
+            },
+            {
+                "date": "2026-01-03",
+                "action": "SELL",
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "asset_class": "STOCK",
+                "currency": "USD",
+                "shares": 2,
+                "price_eur": 15,
+                "amount_eur": 30,
+                "fee_eur": -1,
+                "tax_eur": 0,
+            },
+            {
+                "date": "2026-01-04",
+                "action": "STOCKPERK",
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "asset_class": "STOCK",
+                "currency": "USD",
+                "shares": None,
+                "price_eur": None,
+                "amount_eur": 5,
+                "fee_eur": 0,
+                "tax_eur": -0.5,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            activity_path = Path(directory) / "portfolio_activity.json"
+            activity_path.write_text(json.dumps(rows), encoding="utf-8")
+            activities = load_portfolio_activity(activity_path)
+
+        transactions = portfolio_transactions_from_activity(activities)
+        assets = portfolio_assets_from_transactions(transactions)
+
+        self.assertEqual(len(activities), 4)
+        self.assertEqual(len(transactions), 2)
+        self.assertEqual(assets[0].shares, 8)
+        self.assertAlmostEqual(assets[0].investment_eur, 80.8)
+        self.assertEqual(activities[1].action, "DIVIDEND")
+        self.assertEqual(activities[3].action, "STOCKPERK")
+
+    def test_public_portfolio_activity_matches_configured_active_tickers(self):
+        activity_path = Path(__file__).parents[1] / "portfolio_activity.json"
+        raw_activities = json.loads(activity_path.read_text(encoding="utf-8"))
+        activities = load_portfolio_activity(activity_path)
+        transactions = portfolio_transactions_from_activity(activities)
+        assets = portfolio_assets_from_transactions(transactions)
+        assets_by_ticker = {asset.ticker: asset for asset in assets}
+        configured_tickers = {
+            report.ticker for report in COMPANIES if report.ticker
+        }
+        public_fields = {
+            "date",
+            "action",
+            "ticker",
+            "name",
+            "asset_class",
+            "currency",
+            "shares",
+            "price_eur",
+            "amount_eur",
+            "fee_eur",
+            "tax_eur",
+        }
+
+        self.assertEqual(len(activities), 54)
+        self.assertTrue(all(set(row) == public_fields for row in raw_activities))
+        self.assertTrue(all(item.ticker in configured_tickers for item in activities))
+        self.assertEqual(set(assets_by_ticker), {asset.ticker for asset in PORTFOLIO})
+        for configured in PORTFOLIO:
+            self.assertAlmostEqual(
+                assets_by_ticker[configured.ticker].shares,
+                configured.shares,
+            )
+        self.assertIn("NKE", configured_tickers)
+        self.assertIn("NVO", configured_tickers)
+        dashboard = render_dashboard([], portfolio_activity=activities)
+        self.assertIn("Historial de inversión · 54 movimientos", dashboard)
+        self.assertEqual(dashboard.count('data-label="Movimiento"'), 54)
+
+    def test_dashboard_renders_filtered_portfolio_activity(self):
+        activities = [
+            PortfolioActivity(
+                trade_date=date(2026, 10, 2),
+                action="DIVIDEND",
+                ticker="NVDA",
+                name="NVIDIA",
+                asset_class="STOCK",
+                currency="USD",
+                shares=0.5,
+                price_eur=None,
+                amount_eur=1.2,
+                fee_eur=0,
+                tax_eur=-0.2,
+            ),
+            PortfolioActivity(
+                trade_date=date(2026, 10, 1),
+                action="BUY",
+                ticker="NVDA",
+                name="NVIDIA",
+                asset_class="STOCK",
+                currency="USD",
+                shares=0.1,
+                price_eur=100,
+                amount_eur=-10,
+                fee_eur=-1,
+                tax_eur=0,
+            ),
+            PortfolioActivity(
+                trade_date=date(2026, 9, 30),
+                action="BENEFITS_SAVEBACK",
+                ticker="ASML.AS",
+                name="ASML",
+                asset_class="STOCK",
+                currency="EUR",
+                shares=None,
+                price_eur=None,
+                amount_eur=5,
+                fee_eur=0,
+                tax_eur=-1,
+            ),
+        ]
+
+        dashboard = render_dashboard([], portfolio_activity=activities)
+
+        self.assertIn("Historial de inversión · 3 movimientos", dashboard)
+        self.assertIn("02/10/2026", dashboard)
+        self.assertIn("Dividendos netos", dashboard)
+        self.assertIn("Beneficios netos", dashboard)
+        self.assertIn("Beneficio Saveback", dashboard)
+        self.assertIn("Flujo neto", dashboard)
+
     def test_portfolio_csv_rejects_sales_above_owned_quantity(self):
         transactions = [
             PortfolioTransaction(
@@ -731,7 +895,7 @@ class SentimentTests(unittest.TestCase):
 
     def test_watchlist_matches_updated_company_list(self):
         companies = [(company.name, company.ticker) for company in COMPANIES]
-        self.assertEqual(len(COMPANIES), 55)
+        self.assertEqual(len(COMPANIES), 57)
         self.assertEqual(
             companies[:5],
             [
@@ -746,6 +910,9 @@ class SentimentTests(unittest.TestCase):
         self.assertIn(("Amper", "AMP.MC"), companies)
         self.assertIn(("IREN", "IREN"), companies)
         self.assertIn(("Applied Optoelectronics", "AAOI"), companies)
+        self.assertIn(("Core MSCI World USD (Acc)", "EUNL.DE"), companies)
+        self.assertIn(("Nike (B)", "NKE"), companies)
+        self.assertIn(("Novo Nordisk (ADR)", "NVO"), companies)
         self.assertEqual(
             next(company.ticker for company in COMPANIES if company.name == "SpaceX"),
             "SPCX",

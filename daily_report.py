@@ -35,6 +35,7 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_FALLBACK_MODEL = "gemini-3.7-flash"
 GEMINI_CACHE_FILE = Path("gemini_cache.json")
+PORTFOLIO_ACTIVITY_FILE = Path("portfolio_activity.json")
 YAHOO_FINANCE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 MACRO_FEEDS = (
     ("Yahoo Finance", "https://finance.yahoo.com/rss/topstories"),
@@ -159,6 +160,22 @@ class PortfolioTransaction:
     price_eur: float
     currency: str
     fees_eur: float = 0.0
+    gross_amount_eur: float | None = None
+
+
+@dataclass(frozen=True)
+class PortfolioActivity:
+    trade_date: date
+    action: str
+    ticker: str
+    name: str
+    asset_class: str
+    currency: str
+    shares: float | None
+    price_eur: float | None
+    amount_eur: float
+    fee_eur: float
+    tax_eur: float
 
 
 @dataclass(frozen=True)
@@ -226,6 +243,27 @@ PORTFOLIO = (
     PortfolioAsset("MercadoLibre", "MELI", 0.002776, 5.00, "USD"),
 )
 
+PORTFOLIO_TICKER_CURRENCIES = {
+    "NVDA": "USD",
+    "GOOGL": "USD",
+    "EUNL.DE": "EUR",
+    "ASML.AS": "EUR",
+    "NKE": "USD",
+    "NVO": "USD",
+    "MELI": "USD",
+    "CSH2.PA": "EUR",
+    "GEV": "USD",
+    "AVGO": "USD",
+    "VST": "USD",
+    "XDWT.DE": "EUR",
+}
+PORTFOLIO_ACTIVITY_ACTIONS = {
+    "BUY",
+    "SELL",
+    "DIVIDEND",
+    "BENEFITS_SAVEBACK",
+    "STOCKPERK",
+}
 
 # LISTA DE SEGUIMIENTO
 COMPANIES = (
@@ -252,7 +290,7 @@ COMPANIES = (
     Company("Nebius Group (A)", "NBIS"),
     Company("Space Innovators USD (A)", "JEDI"),
     Company("Smart Overnight Return ETF", "CSH2.PA"),
-    Company("Core MSCI World USD (Acc)", "SWDA.L"),
+    Company("Core MSCI World USD (Acc)", "EUNL.DE"),
     Company("Alphabet (A)", "GOOGL"),
     Company("FTSE All-World USD (Acc)", "VWRP.L"),
     Company("IREN", "IREN"),
@@ -284,6 +322,8 @@ COMPANIES = (
     Company("Modine Manufacturing", "MOD"),
     Company("Vertiv", "VRT"),
     Company("Dell Technologies", "DELL"),
+    Company("Nike (B)", "NKE"),
+    Company("Novo Nordisk (ADR)", "NVO"),
 )
 
 ANALYST_LABELS = {
@@ -812,6 +852,125 @@ def load_portfolio_transactions(path: Path) -> list[PortfolioTransaction]:
     return sorted(transactions, key=lambda item: item.trade_date)
 
 
+def load_portfolio_activity(path: Path) -> list[PortfolioActivity]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("El archivo de movimientos debe contener una lista JSON")
+
+    expected_fields = {
+        "date",
+        "action",
+        "ticker",
+        "name",
+        "asset_class",
+        "currency",
+        "shares",
+        "price_eur",
+        "amount_eur",
+        "fee_eur",
+        "tax_eur",
+    }
+    activities: list[PortfolioActivity] = []
+    for index, row in enumerate(payload, start=1):
+        if not isinstance(row, dict) or set(row) != expected_fields:
+            raise ValueError(
+                f"Movimiento {index} del archivo de cartera tiene campos no válidos"
+            )
+        if any(
+            not isinstance(row[field], str)
+            for field in ("date", "action", "ticker", "name", "asset_class", "currency")
+        ):
+            raise ValueError(
+                f"Movimiento {index} del archivo de cartera tiene texto no válido"
+            )
+        if any(
+            isinstance(row[field], bool)
+            for field in ("shares", "price_eur", "amount_eur", "fee_eur", "tax_eur")
+        ):
+            raise ValueError(
+                f"Movimiento {index} del archivo de cartera tiene números no válidos"
+            )
+        try:
+            trade_date = date.fromisoformat(row["date"])
+            ticker = row["ticker"].strip()
+            name = row["name"].strip()
+            action = row["action"]
+            asset_class = row["asset_class"]
+            currency = row["currency"]
+            shares = (
+                _finite_float(row["shares"])
+                if row["shares"] is not None
+                else None
+            )
+            price_eur = (
+                _finite_float(row["price_eur"])
+                if row["price_eur"] is not None
+                else None
+            )
+            amount_eur = _finite_float(row["amount_eur"])
+            fee_eur = _finite_float(row["fee_eur"])
+            tax_eur = _finite_float(row["tax_eur"])
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Movimiento {index} del archivo de cartera no válido: {error}"
+            ) from error
+
+        if (
+            not ticker
+            or not name
+            or action not in PORTFOLIO_ACTIVITY_ACTIONS
+            or asset_class not in {"STOCK", "FUND"}
+            or PORTFOLIO_TICKER_CURRENCIES.get(ticker) != currency
+            or amount_eur is None
+            or fee_eur is None
+            or tax_eur is None
+            or (shares is not None and shares <= 0)
+            or (price_eur is not None and price_eur <= 0)
+            or (action in {"BUY", "SELL"} and (shares is None or price_eur is None))
+        ):
+            raise ValueError(
+                f"Movimiento {index} del archivo de cartera contiene valores no válidos"
+            )
+        activities.append(
+            PortfolioActivity(
+                trade_date=trade_date,
+                action=action,
+                ticker=ticker,
+                name=name,
+                asset_class=asset_class,
+                currency=currency,
+                shares=shares,
+                price_eur=price_eur,
+                amount_eur=amount_eur,
+                fee_eur=fee_eur,
+                tax_eur=tax_eur,
+            )
+        )
+    if not activities:
+        raise ValueError("El archivo de movimientos no contiene operaciones")
+    return sorted(activities, key=lambda item: item.trade_date)
+
+
+def portfolio_transactions_from_activity(
+    activities: list[PortfolioActivity],
+) -> list[PortfolioTransaction]:
+    return [
+        PortfolioTransaction(
+            trade_date=activity.trade_date,
+            ticker=activity.ticker,
+            name=activity.name,
+            side=activity.action,
+            quantity=activity.shares or 0,
+            price_eur=activity.price_eur or 0,
+            currency=activity.currency,
+            fees_eur=abs(activity.fee_eur),
+            gross_amount_eur=abs(activity.amount_eur),
+        )
+        for activity in activities
+        if activity.action in {"BUY", "SELL"}
+    ]
+
+
 def portfolio_assets_from_transactions(
     transactions: list[PortfolioTransaction],
 ) -> tuple[PortfolioAsset, ...]:
@@ -833,8 +992,13 @@ def portfolio_assets_from_transactions(
         if transaction.side == "BUY":
             holding["shares"] += transaction.quantity
             holding["cost_eur"] += (
-                transaction.quantity * transaction.price_eur + transaction.fees_eur
-            )
+                    (
+                        transaction.gross_amount_eur
+                        if transaction.gross_amount_eur is not None
+                        else transaction.quantity * transaction.price_eur
+                    )
+                    + transaction.fees_eur
+                )
             continue
         if transaction.quantity > holding["shares"] + 1e-9:
             raise ValueError(
@@ -1249,6 +1413,8 @@ THEMES: dict[str, str] = {
     "MRNA": "Salud",
     "TEM": "Salud",
     "RKLB": "Espacio",
+    "NKE": "Consumo y medios",
+    "NVO": "Salud",
 }
 TECH_IA_THEMES = {
     "Semiconductores",
@@ -3021,6 +3187,81 @@ def _portfolio_value(value: float | None, kind: str) -> str:
     return f"<td>{_portfolio_cell(value, ' €')}</td>"
 
 
+def _signed_eur(value: float) -> str:
+    sign = "+" if value > 0 else "−" if value < 0 else ""
+    return f"{sign}{_format_number(abs(value))} €"
+
+
+def _portfolio_activity_section(
+    activities: list[PortfolioActivity],
+) -> str:
+    if not activities:
+        return ""
+
+    purchases = sum(
+        abs(item.amount_eur) for item in activities if item.action == "BUY"
+    )
+    sales = sum(item.amount_eur for item in activities if item.action == "SELL")
+    dividends = sum(
+        item.amount_eur + item.fee_eur + item.tax_eur
+        for item in activities
+        if item.action == "DIVIDEND"
+    )
+    benefits = sum(
+        item.amount_eur + item.fee_eur + item.tax_eur
+        for item in activities
+        if item.action in {"BENEFITS_SAVEBACK", "STOCKPERK"}
+    )
+    labels = {
+        "BUY": "Compra",
+        "SELL": "Venta",
+        "DIVIDEND": "Dividendo",
+        "BENEFITS_SAVEBACK": "Beneficio Saveback",
+        "STOCKPERK": "Beneficio de acción",
+    }
+    rows = "".join(
+        "<tr>"
+        f'<td data-label="Fecha">{item.trade_date.strftime("%d/%m/%Y")}</td>'
+        f'<td data-label="Movimiento">{labels[item.action]}</td>'
+        f'<td data-label="Ticker">{_esc(item.ticker)}</td>'
+        f'<td data-label="Activo">{_esc(item.name)}</td>'
+        f'<td data-label="Participaciones">'
+        f'{_format_number(item.shares, 6) if item.action in {"BUY", "SELL"} and item.shares is not None else "—"}</td>'
+        f'<td data-label="Precio unitario">'
+        f'{_portfolio_cell(item.price_eur, " €") if item.price_eur is not None else "—"}</td>'
+        f'<td data-label="Importe bruto">{_signed_eur(item.amount_eur)}</td>'
+        f'<td data-label="Comisión">{_signed_eur(item.fee_eur)}</td>'
+        f'<td data-label="Impuesto">{_signed_eur(item.tax_eur)}</td>'
+        f'<td data-label="Flujo neto">{_signed_eur(item.amount_eur + item.fee_eur + item.tax_eur)}</td>'
+        "</tr>"
+        for item in reversed(activities)
+    )
+    summary_cards = (
+        ("Compras", _signed_eur(-purchases)),
+        ("Ventas", _signed_eur(sales)),
+        ("Dividendos netos", _signed_eur(dividends)),
+        ("Beneficios netos", _signed_eur(benefits)),
+    )
+    summaries = "".join(
+        f'<article><span>{label}</span><strong>{value}</strong></article>'
+        for label, value in summary_cards
+    )
+    return (
+        '<div class="portfolio-activity-summary" aria-label="Resumen de movimientos">'
+        f"{summaries}</div>"
+        '<details class="portfolio-activity-details">'
+        f"<summary>Historial de inversión · {len(activities)} movimientos</summary>"
+        '<div class="portfolio-activity-wrap"><table class="portfolio-activity-table">'
+        "<thead><tr><th>Fecha</th><th>Movimiento</th><th>Ticker</th><th>Activo</th>"
+        "<th>Participaciones</th><th>Precio unitario</th><th>Importe bruto</th>"
+        "<th>Comisión</th><th>Impuesto</th><th>Flujo neto</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+        '<p class="portfolio-note">Incluye solo operaciones de acciones/fondos, dividendos y beneficios ligados a valores. '
+        "Importes en euros; los beneficios no se suman a las participaciones.</p>"
+        "</details>"
+    )
+
+
 def _analysis_paragraph(value: str | None) -> str:
     return _esc(value or "Sin datos en la respuesta.").replace("\n", "<br>")
 
@@ -3810,9 +4051,11 @@ def render_dashboard(
     analysis: PortfolioAnalysis | None = None,
     chart_data: DashboardCharts | None = None,
     market_events: list[MarketEvent] | None = None,
+    portfolio_activity: list[PortfolioActivity] | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     portfolio = portfolio or []
+    portfolio_activity = portfolio_activity or []
     chart_data = chart_data or DashboardCharts()
     market_events = market_events or []
     
@@ -4166,6 +4409,19 @@ def render_dashboard(
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
+    .portfolio-activity-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin-top: 17px; }}
+    .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; }}
+    .portfolio-activity-summary span {{ color: var(--muted); font-size: 11px; }}
+    .portfolio-activity-summary strong {{ font-size: 15px; font-variant-numeric: tabular-nums; }}
+    .portfolio-activity-details {{ margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }}
+    .portfolio-activity-details summary {{ cursor: pointer; padding: 12px; font-size: 13px; font-weight: 650; }}
+    .portfolio-activity-details summary:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+    .portfolio-activity-wrap {{ max-height: 520px; overflow: auto; }}
+    .portfolio-activity-table {{ border-collapse: collapse; min-width: 950px; width: 100%; font-size: 11px; }}
+    .portfolio-activity-table th, .portfolio-activity-table td {{ border-bottom: 1px solid var(--line); padding: 8px 9px; text-align: right; white-space: nowrap; }}
+    .portfolio-activity-table th {{ position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); }}
+    .portfolio-activity-table th:nth-child(-n+4), .portfolio-activity-table td:nth-child(-n+4) {{ text-align: left; }}
+    .portfolio-activity-table td:nth-child(3) {{ font-weight: 650; }}
     .market-events {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 9px;
       list-style: none; padding: 0; margin: 0; }}
     .market-events li {{ display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; align-items: baseline;
@@ -4308,7 +4564,7 @@ def render_dashboard(
     <p class="disclaimer"><strong>Metodología:</strong> la señal de sentimiento se calcula sobre los titulares del día con VADER;
       no es una recomendación de inversión. El PEG, consenso y objetivos provienen de Yahoo Finance cuando están disponibles;
       el PEG es una referencia informativa, no una recomendación de inversión.
-      La cartera mostrada se basa en posiciones configuradas manualmente; no se consultan las tenencias internas de fondos.
+      La cartera usa movimientos filtrados del extracto de inversión cuando están disponibles; no se conecta al broker ni se consultan las tenencias internas de fondos.
       Los feeds y datos pueden faltar o retrasarse.</p>
     <section aria-labelledby="key-title">
       <div class="section-heading"><h2 id="key-title">Titulares clave</h2><span>Los de mayor polaridad detectados hoy</span></div>
@@ -4358,6 +4614,7 @@ def render_dashboard(
           </table>
         </div>
         <p class="portfolio-note">Selecciona periodo y métrica para ver cierres históricos, rendimiento porcentual o ganancia MAX. Cierres históricos de Yahoo Finance; los tickers estadounidenses se convierten a EUR con el cambio USD/EUR de cada fecha.</p>
+        {_portfolio_activity_section(portfolio_activity)}
         {portfolio_warning_html}
       </div>
     </section>
@@ -4450,6 +4707,13 @@ def build_parser() -> argparse.ArgumentParser:
             "PORTFOLIO_TRANSACTIONS_CSV."
         ),
     )
+    parser.add_argument(
+        "--portfolio-activity",
+        help=(
+            "Archivo JSON de movimientos filtrados de acciones y fondos. "
+            f"Si existe {PORTFOLIO_ACTIVITY_FILE}, se carga automáticamente."
+        ),
+    )
     return parser
 
 
@@ -4457,13 +4721,26 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args()
     transactions: list[PortfolioTransaction] = []
+    portfolio_activity: list[PortfolioActivity] = []
     assets = PORTFOLIO
+    if args.portfolio_csv and args.portfolio_activity:
+        logging.error("Usa --portfolio-csv o --portfolio-activity, no ambos.")
+        return 2
     if args.portfolio_csv:
         try:
             transactions = load_portfolio_transactions(Path(args.portfolio_csv))
             assets = portfolio_assets_from_transactions(transactions)
         except (OSError, ValueError) as error:
             logging.error("No se pudo cargar el CSV de cartera: %s", error)
+            return 2
+    elif args.portfolio_activity or PORTFOLIO_ACTIVITY_FILE.is_file():
+        activity_path = Path(args.portfolio_activity or PORTFOLIO_ACTIVITY_FILE)
+        try:
+            portfolio_activity = load_portfolio_activity(activity_path)
+            transactions = portfolio_transactions_from_activity(portfolio_activity)
+            assets = portfolio_assets_from_transactions(transactions)
+        except (OSError, ValueError) as error:
+            logging.error("No se pudo cargar el historial de cartera: %s", error)
             return 2
     reports = collect_reports()
     portfolio = fetch_portfolio(assets)
@@ -4475,6 +4752,7 @@ def main() -> int:
         analysis=analysis,
         chart_data=chart_data,
         market_events=collect_market_events(reports),
+        portfolio_activity=portfolio_activity,
     )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
