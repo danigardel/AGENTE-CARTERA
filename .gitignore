@@ -5,3 +5,5 @@ venv/
 gemini_cache.json
 .gemini_cache.json.tmp
 GEMINI_API_KEY.txt 
+/public/
+/react-portfolio/public/market_data.json

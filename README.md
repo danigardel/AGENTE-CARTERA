@@ -1,6 +1,6 @@
 # Radar bursátil diario
 
-Genera `dashboard.html` con noticias del día, una señal de sentimiento para cada empresa, cotizaciones y fundamentales disponibles en Yahoo Finance, un screener local por sector/valoración/rendimiento/consenso y una agenda próxima de resultados y fechas ex-dividendo. Incluye la cartera configurada en `PORTFOLIO`, con cierres históricos, rendimientos por periodo y rendimiento máximo seleccionables. La cotización y las noticias no requieren claves; el análisis IA es opcional y necesita una clave Gemini.
+El backend Python obtiene cotizaciones, titulares y fundamentales de Yahoo Finance, calcula métricas de cartera y puede generar un análisis con Gemini. La vista publicada es una aplicación estática React/TypeScript: Python exporta el contrato `market_data.json` y React lo carga al abrirse. Se conservan el screener, las noticias, los eventos, los gráficos y la cartera con cierres históricos. La cotización y las noticias no requieren claves; el análisis IA es opcional y necesita una clave Gemini.
 
 El reporte también solicita un análisis estructurado a Gemini 3.8 Flash (`gemini-3.8-flash`) usando la API estándar `generateContent` (no Batch), con `gemini-3.7-flash` como alternativa. Envía a Google las posiciones de `PORTFOLIO`, los datos de `COMPANIES`, titulares/resúmenes de los RSS de Yahoo Finance y un radar global con hasta 250 titulares recientes de Yahoo Finance, CNBC, WSJ, Bloomberg e Investing.com España. El radar global conserva titulares y resúmenes tal como se publican, incluye fuente/fecha/enlace y se inyecta en `global_market_radar` para que Gemini detecte oportunidades externas. Las peticiones usan el payload estándar de generación, sin Google Search Grounding. Si se omite un feed, el informe continúa; si no se obtiene ninguna noticia de hoy, el prompt pide un análisis técnico basado en los datos disponibles. La petición usa un presupuesto de razonamiento de 2048 tokens. No se envían claves de API dentro del prompt.
 El análisis se guarda en `gemini_cache.json` con un timestamp UTC y se reutiliza hasta el siguiente hito horario de análisis. `GEMINI_API_KEY` admite varias claves separadas por comas. Cada consulta empieza con la clave siguiente a la que resolvió el análisis anterior; los fallos rotan secuencialmente el pool. Si todas las claves fallan en el modelo principal con HTTP 429 o 503, se repite la rotación desde el mismo índice con `gemini-3.7-flash`; también se prueba ese modelo si el principal no existe. Solo tras agotar también el modelo alternativo se conserva el aviso: hasta el siguiente hito (`TARGET_HOURS`) si el error final identifica explícitamente una cuota diaria, o cinco minutos para 503, límites por minuto/tokens y errores 429 sin detalle diario claro. Importante: las cuotas de Gemini se aplican por proyecto, no por clave API; rotar varias claves asociadas al mismo proyecto no suma cuota. Google puede responder 429 por RPM, TPM o RPD (solicitudes/minuto, tokens/minuto o solicitudes/día). El aviso de cuota recomienda comprobar en AI Studio el proyecto realmente asociado a cada clave y los límites del modelo. La caché negativa guarda únicamente la huella SHA-256 y el índice del conjunto ordenado de claves (nunca las claves); al cambiar el conjunto se reinicia la rotación. Los archivos de caché se excluyen de Git. GitHub Actions conserva únicamente la caché de Gemini.
@@ -20,6 +20,33 @@ El archivo se crea en `dashboard.html`. Se puede elegir otra ruta:
 python daily_report.py --output public\index.html
 ```
 
+Para generar solo el JSON que consume React:
+
+```powershell
+New-Item -ItemType Directory -Force react-portfolio\public | Out-Null
+python daily_report.py --no-html --data-output react-portfolio\public\market_data.json
+```
+
+Para probar la aplicación React localmente, genera primero el JSON anterior y
+ejecuta:
+
+```powershell
+npm ci --prefix react-portfolio
+npm --prefix react-portfolio run dev
+```
+
+La carga inicial muestra un estado de espera; si falta el JSON o no cumple su
+versión de esquema, la página ofrece un error visible y permite reintentar.
+Para compilar la salida estática:
+
+```powershell
+npm --prefix react-portfolio run build:dashboard
+```
+
+Vite escribe el sitio en `public\`; la URL de los recursos es relativa para que
+funcione tanto en el dominio de proyecto de GitHub Pages como bajo una ruta.
+La salida generada no se versiona.
+
 ### Importar operaciones de cartera (opcional)
 
 Se puede sustituir la cartera fija por un CSV local de operaciones, sin iniciar sesión ni conectar con el broker:
@@ -38,7 +65,12 @@ La lista de seguimiento está en `COMPANIES` y la cartera fija en `PORTFOLIO`, a
 
 ## Automatización y GitHub Pages
 
-El workflow `.github/workflows/daily_report.yml` genera y despliega el dashboard cada **5 minutos** (el intervalo mínimo de GitHub Actions para `schedule`). GitHub puede retrasar o descartar ejecuciones programadas cuando hay carga, así que no se garantiza una actualización exacta cada 5 minutos. Si una ejecución sigue en curso, no se cancela para iniciar otra; se procesa la más reciente cuando queda disponible. El cron se ejecuta en UTC, pero la hora que aparece en el informe usa `Europe/Madrid`. También se puede iniciar manualmente con `workflow_dispatch`. Cada tarjeta muestra el último precio que Yahoo Finance devuelve durante esa generación, convertido a euros cuando hay tipo de cambio disponible; el proveedor puede retrasar los datos o no cambiar el precio cuando el mercado está cerrado. Las ejecuciones programadas deben estar habilitadas y el workflow debe estar en la rama predeterminada del repositorio.
+El workflow `.github/workflows/daily_report.yml` instala Python y Node, ejecuta las pruebas React, exporta `react-portfolio\public\market_data.json`, compila el frontend en `public\` y despliega esa carpeta a GitHub Pages cada **5 minutos** (el intervalo mínimo de GitHub Actions para `schedule`). GitHub puede retrasar o descartar ejecuciones programadas cuando hay carga, así que no se garantiza una actualización exacta cada 5 minutos. Si una ejecución sigue en curso, no se cancela para iniciar otra; se procesa la más reciente cuando queda disponible. El cron se ejecuta en UTC, pero la hora que aparece en el informe usa `Europe/Madrid`. También se puede iniciar manualmente con `workflow_dispatch`. Cada tarjeta muestra el último precio que Yahoo Finance devuelve durante esa generación, convertido a euros cuando hay tipo de cambio disponible; el proveedor puede retrasar los datos o no cambiar el precio cuando el mercado está cerrado. Las ejecuciones programadas deben estar habilitadas y el workflow debe estar en la rama predeterminada del repositorio.
+
+El archivo `market_data.json` publicado es accesible públicamente, como el resto
+del sitio. Incluye las posiciones y el historial de inversión que ya se
+mostraban en el dashboard; no contiene claves de API ni el extracto bancario
+original.
 
 Para activar el análisis IA, crea una o varias claves Gemini en Google AI Studio y guárdalas en un único secreto de repositorio **Settings → Secrets and variables → Actions → New repository secret → `GEMINI_API_KEY`**, separadas por comas y sin espacios obligatorios (por ejemplo `clave1,clave2,clave3`). Localmente, configura `GEMINI_API_KEY` con el mismo formato antes de ejecutar el informe. Si falta una clave o Gemini no responde, el informe se genera igualmente y muestra un aviso en la sección de análisis. El modelo predeterminado es `gemini-3.8-flash`; puede cambiarse con `GEMINI_MODEL`, y cuando el modelo elegido devuelve un error de modelo inexistente se prueba `gemini-3.7-flash`. El presupuesto de razonamiento está fijado en 2048 tokens. `INVESTOR_PROFILE` permite personalizar el perfil; este valor se envía a Gemini, así que no incluyas información sensible. En GitHub Actions, los ajustes opcionales se leen de **Actions variables**. Con respuestas válidas, el análisis se renueva en los hitos de las 00:00, 09:00, 12:00, 15:00, 18:00 y 21:00 en `Europe/Madrid`, no en cada generación del dashboard. La clave inicial rota de una consulta a la siguiente, y los fallos prueban secuencialmente el resto del pool; solo cuando todas fallan se publica el aviso hasta el próximo hito. Los feeds macro RSS son públicos y no requieren claves; las peticiones a Gemini siguen sujetas a cuotas y posibles costes del proyecto.
 

@@ -33,6 +33,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: react-portfolio/package-lock.json
+
+      - name: Install React dependencies
+        run: npm ci --prefix react-portfolio
+
+      - name: Test React dashboard
+        run: npm test --prefix react-portfolio
+
       - name: Restore Gemini analysis cache
         id: gemini-cache-restore
         uses: actions/cache/restore@v4
@@ -67,9 +80,16 @@ jobs:
           INVESTOR_PROFILE: ${{ vars.INVESTOR_PROFILE }}
           GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
         run: |
-          mkdir -p public
-          # Genera el reporte directamente en la carpeta public como index.html
-          python daily_report.py --output public/index.html
+          mkdir -p react-portfolio/public
+          python daily_report.py --no-html --data-output react-portfolio/public/market_data.json
+
+      - name: Build React dashboard
+        run: npm run build:dashboard --prefix react-portfolio
+
+      - name: Verify Pages output
+        run: |
+          test -s public/index.html
+          test -s public/market_data.json
 
       - name: Prepare Gemini cache key
         id: gemini-cache-after

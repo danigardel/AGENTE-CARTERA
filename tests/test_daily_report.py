@@ -36,6 +36,7 @@ from daily_report import (
     _gemini_request_warning,
     analyze_portfolio,
     build_analysis_prompt,
+    build_market_data,
     build_request_body,
     classify_peg,
     classify_sentiment,
@@ -60,6 +61,7 @@ from daily_report import (
     collect_reports,
     render_dashboard,
     translate_headline,
+    main,
 )
 
 
@@ -2516,6 +2518,152 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(saved_timestamp.tzinfo, timezone.utc)
         self.assertLess(abs((datetime.now(timezone.utc) - saved_timestamp).total_seconds()), 5)
         post_mock.assert_called_once()
+
+    def test_market_data_export_contains_frontend_contract_and_finite_json(self):
+        generated_at = datetime(2026, 10, 26, 12, tzinfo=TIMEZONE)
+        headline = Headline(
+            title="Strong quarterly results",
+            url="https://example.com/results",
+            source="Example News",
+            published=generated_at,
+            sentiment=0.8,
+            title_es="Fuertes resultados trimestrales",
+        )
+        report = StockReport(
+            company=Company("Example Fund", "EXF"),
+            headlines=[headline],
+            quote=Quote(
+                current_price_eur=11,
+                daily_change_pct=10,
+                market_date=generated_at.date(),
+                market_timezone=TIMEZONE.key,
+                currency="EUR",
+                sector="Technology",
+                extra={"quote_type": "ETF", "market_cap": float("nan")},
+            ),
+            news_sentiment=0.8,
+        )
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Example Fund", "EXF", 1, 10, "EUR"),
+            prices_eur={
+                "Hoy": 11,
+                "1D": 10,
+                "1W": 9,
+                "1M": 8,
+                "6M": 7,
+                "1Y": 6,
+            },
+            returns_pct={
+                "1D": 10,
+                "1W": 22.2,
+                "1M": 37.5,
+                "6M": 57.1,
+                "1Y": 83.3,
+            },
+            current_value_eur=11,
+            max_profit_eur=1,
+            max_return_pct=10,
+            price_date=generated_at.date(),
+            market_timezone=TIMEZONE.key,
+        )
+        analysis = PortfolioAnalysis(
+            portfolio_assessment="Mantener la diversificación.",
+            risks=["Riesgo de concentración."],
+            last_updated_utc="2026-10-26T11:00:00+00:00",
+        )
+
+        payload = build_market_data(
+            [report],
+            [position],
+            transactions=[
+                PortfolioTransaction(
+                    trade_date=date(2026, 1, 1),
+                    ticker="EXF",
+                    name="Example Fund",
+                    side="BUY",
+                    quantity=2,
+                    price_eur=10,
+                    currency="EUR",
+                ),
+                PortfolioTransaction(
+                    trade_date=date(2026, 2, 1),
+                    ticker="EXF",
+                    name="Example Fund",
+                    side="SELL",
+                    quantity=1,
+                    price_eur=12,
+                    currency="EUR",
+                    fees_eur=1,
+                ),
+            ],
+            analysis=analysis,
+            chart_data=DashboardCharts(watchlist=[{"value": float("inf")}]),
+            generated_at=generated_at,
+        )
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["watchlist"][0]["ticker"], "EXF")
+        self.assertEqual(
+            payload["watchlist"][0]["headlines"][0]["display_title"],
+            "Fuertes resultados trimestrales",
+        )
+        self.assertEqual(payload["market_summary"]["sentiment_label"], "Alcista")
+        self.assertEqual(payload["market_summary"]["current_quote_count"], 1)
+        self.assertEqual(payload["portfolio"]["positions"][0]["asset_class"], "fund")
+        self.assertEqual(payload["portfolio"]["positions"][0]["avg_cost_eur"], 10)
+        self.assertEqual(payload["portfolio"]["positions"][0]["day_delta_eur"], 1)
+        self.assertEqual(payload["portfolio"]["positions"][0]["invested_cost_eur"], 20)
+        self.assertEqual(payload["portfolio"]["positions"][0]["realized_pnl_eur"], 1)
+        self.assertEqual(payload["portfolio"]["totals"]["current_value_eur"], 11)
+        self.assertEqual(payload["portfolio"]["totals"]["total_return_pct"], 10)
+        self.assertEqual(
+            payload["analysis"]["portfolio_assessment"],
+            "Mantener la diversificación.",
+        )
+        self.assertIsNone(payload["watchlist"][0]["fundamentals"]["market_cap"])
+        self.assertIsNone(payload["charts"]["watchlist"][0]["value"])
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+
+    @patch("daily_report.collect_market_events", return_value=[])
+    @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
+    @patch("daily_report.analyze_portfolio", return_value=PortfolioAnalysis())
+    @patch("daily_report.fetch_portfolio", return_value=[])
+    @patch("daily_report.collect_reports", return_value=[])
+    def test_main_writes_data_only_without_generating_legacy_html(
+        self,
+        _reports_mock,
+        _portfolio_mock,
+        _analysis_mock,
+        _charts_mock,
+        _events_mock,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_path = root / "market_data.json"
+            html_path = root / "dashboard.html"
+            with (
+                patch("daily_report.PORTFOLIO_ACTIVITY_FILE", root / "missing.json"),
+                patch(
+                    "sys.argv",
+                    [
+                        "daily_report.py",
+                        "--no-html",
+                        "--data-output",
+                        str(data_path),
+                        "--output",
+                        str(html_path),
+                    ],
+                ),
+            ):
+                result = main()
+
+            payload = json.loads(data_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertFalse(html_path.exists())
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["watchlist"], [])
+        self.assertEqual(payload["portfolio"]["positions"], [])
 
 
 if __name__ == "__main__":

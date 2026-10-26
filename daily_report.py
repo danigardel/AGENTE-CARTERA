@@ -3093,6 +3093,353 @@ def executive_summary(reports: list[StockReport]) -> dict[str, Any]:
     }
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if hasattr(value, "__dataclass_fields__"):
+        return _json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"Tipo no serializable en market_data.json: {type(value).__name__}")
+
+
+def build_market_data(
+    reports: list[StockReport],
+    portfolio: list[PortfolioPosition],
+    transactions: list[PortfolioTransaction] | None = None,
+    analysis: PortfolioAnalysis | None = None,
+    chart_data: DashboardCharts | None = None,
+    market_events: list[MarketEvent] | None = None,
+    portfolio_activity: list[PortfolioActivity] | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    generated_at = generated_at or datetime.now(TIMEZONE)
+    chart_data = chart_data or DashboardCharts()
+    transactions = transactions or []
+    market_events = market_events or []
+    portfolio_activity = portfolio_activity or []
+    reports_by_ticker = {
+        report.company.ticker: report
+        for report in reports
+        if report.company.ticker
+    }
+    reports_by_name = {report.company.name.casefold(): report for report in reports}
+
+    def headline_data(headline: Headline) -> dict[str, Any]:
+        label, signal = classify_sentiment(headline.sentiment)
+        return {
+            "title": headline.title,
+            "title_es": headline.title_es,
+            "display_title": headline.title_es or headline.title,
+            "url": headline.url,
+            "source": headline.source,
+            "published": headline.published,
+            "sentiment": headline.sentiment,
+            "sentiment_label": label,
+            "sentiment_signal": signal,
+        }
+
+    watchlist = []
+    for report in reports:
+        quote = report.quote
+        watchlist.append(
+            {
+                "ticker": report.company.ticker,
+                "name": report.company.name,
+                "sector": quote.sector,
+                "current_price_eur": quote.current_price_eur,
+                "currency": quote.currency,
+                "daily_change_abs_eur": quote.daily_change_abs_eur,
+                "daily_change_pct": quote.daily_change_pct,
+                "market_date": quote.market_date,
+                "market_timezone": quote.market_timezone,
+                "market_data_current": _market_data_is_current(
+                    quote.market_date,
+                    quote.market_timezone,
+                    generated_at,
+                ),
+                "news_sentiment_label": (
+                    classify_sentiment(report.news_sentiment)[0]
+                    if report.news_sentiment is not None
+                    else None
+                ),
+                "news_sentiment_score": report.news_sentiment,
+                "peg_ratio": quote.peg_ratio,
+                "pe_ratio": quote.pe_ratio,
+                "analyst_consensus": quote.analyst_consensus,
+                "analyst_count": quote.analyst_count,
+                "target_mean_eur": quote.target_mean_eur,
+                "fundamentals": quote.extra,
+                "warning": quote.warning,
+                "headlines": [
+                    headline_data(headline) for headline in report.headlines
+                ],
+            }
+        )
+    watchlist.sort(
+        key=lambda item: (
+            item["market_data_current"],
+            item["daily_change_pct"]
+            if item["daily_change_pct"] is not None
+            else -math.inf,
+        ),
+        reverse=True,
+    )
+
+    activity_classes = {
+        activity.ticker: activity.asset_class.casefold()
+        for activity in portfolio_activity
+    }
+    transaction_totals: dict[str, dict[str, float | int]] = {}
+    for transaction in transactions:
+        if transaction.side not in {"BUY", "SELL"}:
+            continue
+        totals = transaction_totals.setdefault(
+            transaction.ticker,
+            {
+                "shares": 0.0,
+                "cost_basis_eur": 0.0,
+                "invested_cost_eur": 0.0,
+                "realized_pnl_eur": 0.0,
+            },
+        )
+        gross_amount = (
+            transaction.gross_amount_eur
+            if transaction.gross_amount_eur is not None
+            else transaction.quantity * transaction.price_eur
+        )
+        if transaction.side == "BUY":
+            purchase_cost = gross_amount + transaction.fees_eur
+            totals["shares"] += transaction.quantity
+            totals["cost_basis_eur"] += purchase_cost
+            totals["invested_cost_eur"] += purchase_cost
+        else:
+            shares_before_sale = totals["shares"]
+            if transaction.quantity > shares_before_sale + 1e-9:
+                raise ValueError(
+                    f"Venta de {transaction.ticker} supera las participaciones compradas"
+                )
+            average_cost = (
+                totals["cost_basis_eur"] / shares_before_sale
+                if shares_before_sale > 0
+                else 0
+            )
+            sale_proceeds = gross_amount - transaction.fees_eur
+            totals["realized_pnl_eur"] += (
+                sale_proceeds - average_cost * transaction.quantity
+            )
+            totals["shares"] -= transaction.quantity
+            totals["cost_basis_eur"] -= average_cost * transaction.quantity
+
+    positions = []
+    for position in portfolio:
+        asset = position.asset
+        report = reports_by_ticker.get(asset.ticker) or reports_by_name.get(
+            asset.name.casefold()
+        )
+        quote = report.quote if report else Quote()
+        quote_type = str(quote.extra.get("quote_type") or "").casefold()
+        class_hint = activity_classes.get(asset.ticker, quote_type)
+        asset_class = (
+            "cash"
+            if class_hint in {"cash", "efectivo", "liquidity", "liquidez"}
+            else "fund"
+            if any(term in class_hint for term in ("etf", "fund", "fondo", "index"))
+            else "stock"
+        )
+        current_price = position.prices_eur.get("Hoy")
+        previous_price = position.prices_eur.get("1D")
+        transaction_data = transaction_totals.get(asset.ticker)
+        daily_change = (
+            (current_price - previous_price) * asset.shares
+            if current_price is not None and previous_price is not None
+            else None
+        )
+        is_current = (
+            _market_data_is_current(
+                quote.market_date,
+                quote.market_timezone,
+                generated_at,
+            )
+            if report is not None
+            else _market_data_is_current(
+                position.price_date,
+                position.market_timezone,
+                generated_at,
+            )
+        )
+        positions.append(
+            {
+                "ticker": asset.ticker,
+                "name": asset.name,
+                "asset_class": asset_class,
+                "currency": asset.currency,
+                "shares": asset.shares,
+                "investment_eur": asset.investment_eur,
+                "invested_cost_eur": (
+                    transaction_data["invested_cost_eur"]
+                    if transaction_data is not None
+                    else asset.investment_eur
+                ),
+                "avg_cost_eur": (
+                    asset.investment_eur / asset.shares if asset.shares > 0 else None
+                ),
+                "current_price_eur": current_price,
+                "current_value_eur": position.current_value_eur,
+                "day_delta_eur": daily_change,
+                "day_delta_pct": (
+                    quote.daily_change_pct
+                    if is_current and quote.daily_change_pct is not None
+                    else position.returns_pct.get("1D")
+                ),
+                "returns_pct": position.returns_pct,
+                "prices_eur": position.prices_eur,
+                "max_profit_eur": position.max_profit_eur,
+                "max_return_pct": position.max_return_pct,
+                "price_date": position.price_date,
+                "quote_is_stale": not is_current,
+                "sector": quote.sector,
+                "quote_type": quote.extra.get("quote_type"),
+                "realized_pnl_eur": (
+                    transaction_data["realized_pnl_eur"]
+                    if transaction_data is not None
+                    else None
+                ),
+                "warning": position.warning or quote.warning,
+            }
+        )
+
+    priced_values = [
+        position["current_value_eur"]
+        for position in positions
+        if position["current_value_eur"] is not None
+    ]
+    valuation_complete = len(priced_values) == len(positions)
+    total_value = sum(priced_values)
+    open_cost_basis = sum(position["investment_eur"] for position in positions)
+    has_transaction_history = bool(transaction_totals)
+    invested_value = (
+        sum(value["invested_cost_eur"] for value in transaction_totals.values())
+        if has_transaction_history
+        else open_cost_basis
+    )
+    realized_total = (
+        sum(value["realized_pnl_eur"] for value in transaction_totals.values())
+        if has_transaction_history
+        else None
+    )
+    unrealized_total = total_value - open_cost_basis if valuation_complete else None
+    total_return_pct = (
+        (realized_total + unrealized_total) / invested_value * 100
+        if valuation_complete
+        and realized_total is not None
+        and abs(realized_total) >= 0.005
+        and unrealized_total is not None
+        and invested_value > 0
+        else None
+    )
+    daily_changes = [position["day_delta_eur"] for position in positions]
+    daily_complete = all(value is not None for value in daily_changes)
+    returns_by_period: dict[str, float | None] = {}
+    for period, _ in PORTFOLIO_PERIODS:
+        historic_values = [
+            position["prices_eur"].get(period)
+            for position in positions
+        ]
+        if (
+            valuation_complete
+            and all(value is not None and value > 0 for value in historic_values)
+            and sum(
+                value * position["shares"]
+                for value, position in zip(historic_values, positions)
+            )
+            > 0
+        ):
+            historic_total = sum(
+                value * position["shares"]
+                for value, position in zip(historic_values, positions)
+            )
+            returns_by_period[period] = (total_value / historic_total - 1) * 100
+        else:
+            returns_by_period[period] = None
+    returns_by_period["MAX"] = (
+        ((realized_total or 0) + unrealized_total) / invested_value * 100
+        if valuation_complete and unrealized_total is not None and invested_value > 0
+        else None
+    )
+    portfolio_data = {
+        "positions": positions,
+        "totals": {
+            "investment_base_eur": invested_value,
+            "open_cost_basis_eur": open_cost_basis,
+            "current_value_eur": total_value,
+            "valuation_complete": valuation_complete,
+            "priced_positions": len(priced_values),
+            "position_count": len(positions),
+            "unrealized_pnl_eur": unrealized_total,
+            "realized_pnl_eur": realized_total,
+            "total_return_pct": total_return_pct,
+            "daily_change_eur": (
+                sum(daily_changes) if daily_complete else None
+            ),
+            "returns_pct": returns_by_period,
+        },
+    }
+
+    summary = executive_summary(reports)
+    sector_changes: dict[str, list[float]] = {}
+    for report in reports:
+        if report.quote.sector and report.quote.daily_change_pct is not None:
+            sector_changes.setdefault(report.quote.sector, []).append(
+                report.quote.daily_change_pct
+            )
+    sector_performance = [
+        {
+            "sector": sector,
+            "average_daily_change_pct": fmean(changes),
+            "companies": len(changes),
+        }
+        for sector, changes in sector_changes.items()
+    ]
+    sector_performance.sort(
+        key=lambda item: item["average_daily_change_pct"],
+        reverse=True,
+    )
+    market_summary = {
+        **summary,
+        "key_headlines": [
+            headline_data(headline) for headline in summary["key_headlines"]
+        ],
+        "company_count": len(reports),
+        "current_quote_count": sum(
+            bool(item["market_data_current"]) for item in watchlist
+        ),
+        "sector_performance": sector_performance,
+    }
+
+    return _json_safe(
+        {
+            "schema_version": 1,
+            "generated_at": generated_at,
+            "market_summary": market_summary,
+            "watchlist": watchlist,
+            "portfolio": portfolio_data,
+            "analysis": asdict(analysis) if analysis is not None else None,
+            "market_events": market_events,
+            "portfolio_activity": portfolio_activity,
+            "charts": asdict(chart_data),
+        }
+    )
+
+
 def collect_market_events(
     reports: list[StockReport],
     as_of: date | None = None,
@@ -4699,6 +5046,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ruta del dashboard HTML resultante (por defecto: dashboard.html).",
     )
     parser.add_argument(
+        "--data-output",
+        help="Ruta opcional del JSON consumido por el frontend (por ejemplo, public/market_data.json).",
+    )
+    parser.add_argument(
+        "--no-html",
+        action="store_true",
+        help="Omite la generación del dashboard HTML; requiere --data-output.",
+    )
+    parser.add_argument(
         "--portfolio-csv",
         default=os.getenv("PORTFOLIO_TRANSACTIONS_CSV"),
         help=(
@@ -4720,6 +5076,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args()
+    if args.no_html and not args.data_output:
+        logging.error("--no-html requiere --data-output.")
+        return 2
     transactions: list[PortfolioTransaction] = []
     portfolio_activity: list[PortfolioActivity] = []
     assets = PORTFOLIO
@@ -4746,22 +5105,49 @@ def main() -> int:
     portfolio = fetch_portfolio(assets)
     analysis = analyze_portfolio(reports, portfolio)
     chart_data = collect_chart_data(reports, portfolio, transactions)
-    report_html = render_dashboard(
-        reports,
-        portfolio=portfolio,
-        analysis=analysis,
-        chart_data=chart_data,
-        market_events=collect_market_events(reports),
-        portfolio_activity=portfolio_activity,
-    )
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as output_file:
-        output_file.write(report_html)
+    market_events = collect_market_events(reports)
+    generated_at = datetime.now(TIMEZONE)
+    if not args.no_html:
+        report_html = render_dashboard(
+            reports,
+            generated_at=generated_at,
+            portfolio=portfolio,
+            analysis=analysis,
+            chart_data=chart_data,
+            market_events=market_events,
+            portfolio_activity=portfolio_activity,
+        )
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as output_file:
+            output_file.write(report_html)
+        logging.info("Dashboard HTML generado en %s.", args.output)
+    if args.data_output:
+        market_data = build_market_data(
+            reports,
+            portfolio,
+            transactions=transactions,
+            analysis=analysis,
+            chart_data=chart_data,
+            market_events=market_events,
+            portfolio_activity=portfolio_activity,
+            generated_at=generated_at,
+        )
+        data_path = Path(args.data_output)
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        with data_path.open("w", encoding="utf-8") as data_file:
+            json.dump(
+                market_data,
+                data_file,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            data_file.write("\n")
+        logging.info("Datos del mercado generados en %s.", args.data_output)
     summary = executive_summary(reports)
     logging.info(
-        "Dashboard generado en %s: %s empresas, %s titulares, sentimiento %s.",
-        args.output,
+        "Datos recopilados: %s empresas, %s titulares, sentimiento %s.",
         len(reports),
         summary["headline_count"],
         summary["sentiment_label"],
