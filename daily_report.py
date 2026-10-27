@@ -197,6 +197,7 @@ class PortfolioPosition:
     warning: str | None = None
     price_date: date | None = None
     market_timezone: str | None = None
+    risk_zones: dict[str, float] | None = None
 
 
 @dataclass
@@ -1281,6 +1282,60 @@ def portfolio_history_from_transactions(
     )
 
 
+def calculate_risk_zones(
+    history: pd.DataFrame,
+    price_eur: float,
+    atr_days: int = 14,
+    mult: float = 2.5,
+    reward_risk: float = 2.0,
+) -> dict[str, float] | None:
+    try:
+        ohlc = history[["High", "Low", "Close"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).dropna()
+        if len(ohlc) < atr_days + 1:
+            return None
+
+        high, low, close = ohlc["High"], ohlc["Low"], ohlc["Close"]
+        previous_close = close.shift()
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - previous_close).abs(),
+                (low - previous_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr = float(true_range.rolling(atr_days).mean().iloc[-1])
+        latest_close = float(close.iloc[-1])
+        price_eur = float(price_eur)
+        trailing_high = float(high.tail(22).max())
+        values = (atr, latest_close, price_eur, trailing_high)
+        if (
+            not all(math.isfinite(value) for value in values)
+            or latest_close <= 0
+            or price_eur <= 0
+        ):
+            return None
+
+        atr_pct = atr / latest_close
+        risk = price_eur * atr_pct * mult
+        review_eur = trailing_high * price_eur / latest_close - risk
+        target_eur = price_eur + reward_risk * risk
+        result = {
+            "atr_pct": atr_pct * 100,
+            "review_eur": review_eur,
+            "review_pct": (review_eur / price_eur - 1) * 100,
+            "target_eur": target_eur,
+            "target_pct": reward_risk * risk / price_eur * 100,
+            "risk_reward": reward_risk,
+        }
+        return result if all(math.isfinite(value) for value in result.values()) else None
+    except (IndexError, KeyError, OverflowError, TypeError, ValueError) as error:
+        logging.warning("No se pudieron calcular los niveles ATR: %s", error)
+        return None
+
+
 def fetch_portfolio(
     assets: tuple[PortfolioAsset, ...] = PORTFOLIO,
     as_of: date | None = None,
@@ -1363,6 +1418,7 @@ def fetch_portfolio(
 
         current_price = position.prices_eur["Hoy"]
         if current_price is not None:
+            position.risk_zones = calculate_risk_zones(history, current_price)
             position.current_value_eur = current_price * asset.shares
             position.max_profit_eur = position.current_value_eur - asset.investment_eur
             position.max_return_pct = (
@@ -2678,6 +2734,7 @@ HEATMAP_NAME_OVERRIDES = {
     "meta platforms (a)": "Meta",
     "marvell technology": "Marvell",
     "msci emerging markets (acc)": "Emerging Markets",
+    "msci world information technology": "World IT",
     "msci world information tech.": "World IT",
     "nasdaq 100 usd (acc)": "Nasdaq 100",
     "nebius group (a)": "Nebius",
@@ -4924,6 +4981,40 @@ def render_dashboard(
         + f"<span>{_esc(item.source)}</span></li>"
         for item in summary["key_headlines"]
     ) or "<li>Aún no hay titulares con fecha de hoy.</li>"
+
+    def portfolio_risk_cell(position: PortfolioPosition) -> str:
+        risk = position.risk_zones
+        if risk is None:
+            return '<td data-label="Riesgo ATR">—</td>'
+
+        title = (
+            "Nivel de revisión trailing basado en el máximo de 22 sesiones: "
+            f'{_portfolio_cell(risk["review_eur"], " €")} '
+            f'({_format_number(risk["review_pct"])}% respecto al precio actual). '
+            "Toma de beneficios desde el precio actual: "
+            f'{_portfolio_cell(risk["target_eur"], " €")} '
+            f'(+{_format_number(risk["target_pct"])}%). '
+            f'ATR(14): {_format_number(risk["atr_pct"])}%; '
+            f'ratio beneficio/riesgo {risk["risk_reward"]:.1f}:1.'
+        )
+        current_price = position.prices_eur.get("Hoy")
+        review_status = (
+            '<strong class="text-bearish">Revisar</strong>'
+            if current_price is not None and current_price <= risk["review_eur"]
+            else ""
+        )
+        return (
+            '<td data-label="Riesgo ATR" class="portfolio-risk-cell">'
+            f'<div class="portfolio-risk" title="{_esc(title)}">'
+            f"{review_status}"
+            f'<span>Revisión {_portfolio_cell(risk["review_eur"], " €")} '
+            f'({_format_number(risk["review_pct"])}%)</span>'
+            f'<span>TP {_portfolio_cell(risk["target_eur"], " €")} '
+            f'(+{_format_number(risk["target_pct"])}%)</span>'
+            f'<span>ATR {_format_number(risk["atr_pct"])}%</span>'
+            "</div></td>"
+        )
+
     portfolio_rows = "".join(
         f'<tr data-ticker="{_esc(position.asset.ticker)}" '
         f'data-quantity="{_num_attr(position.asset.shares)}" '
@@ -4936,6 +5027,7 @@ def render_dashboard(
         f'<td data-label="Precio actual"><span data-live-price>{_portfolio_cell(position.prices_eur.get("Hoy"), " €")}</span></td>'
         f'<td data-label="Valor actual" data-live-value>'
         f"{_portfolio_cell(position.current_value_eur, ' €')}</td>"
+        + portfolio_risk_cell(position)
         + "".join(
             _portfolio_value(position.returns_pct.get(period), "return").replace(
                 "<td",
@@ -5105,6 +5197,9 @@ def render_dashboard(
     .portfolio-table tbody th {{ font-weight: 650; }}
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
+    .portfolio-risk-cell {{ min-width: 155px; }}
+    .portfolio-risk {{ display: grid; gap: 3px; font-size: 10px; font-variant-numeric: tabular-nums; }}
+    .portfolio-risk strong {{ color: var(--red); text-align: right; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
     .portfolio-activity-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin-top: 17px; }}
     .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; }}
@@ -5312,9 +5407,10 @@ def render_dashboard(
               <th scope="col">Inversión base</th>
               <th scope="col">Precio actual</th>
               <th scope="col">Valor actual</th>
+              <th scope="col">Riesgo ATR</th>
               <th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>
             </tr></thead>
-            <tbody>{portfolio_rows or '<tr><td colspan="6">No hay posiciones definidas.</td></tr>'}</tbody>
+            <tbody>{portfolio_rows or '<tr><td colspan="7">No hay posiciones definidas.</td></tr>'}</tbody>
           </table>
         </div>
         <p class="portfolio-note">Selecciona periodo y métrica para ver cierres históricos, rendimiento porcentual o ganancia MAX. Cierres históricos de Yahoo Finance; los tickers estadounidenses se convierten a EUR con el cambio USD/EUR de cada fecha.</p>

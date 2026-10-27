@@ -43,6 +43,7 @@ from daily_report import (
     collect_market_events,
     collect_market_radar,
     collect_chart_data,
+    calculate_risk_zones,
     extra_quote_fields,
     external_ideas_html,
     executive_summary,
@@ -650,15 +651,29 @@ class SentimentTests(unittest.TestCase):
         as_of = date(2025, 1, 11)
         asset = PortfolioAsset("Example", "EX", 2, 100, "USD")
         dates = pd.date_range("2024-01-01", "2025-01-11", freq="D")
+        closes = [
+            100.0 if day.date() == date(2025, 1, 10) else 110.0
+            for day in dates
+        ]
         stock_history = pd.DataFrame(
-            {"Close": [100.0 if day.date() == date(2025, 1, 10) else 110.0 for day in dates]},
+            {
+                "High": [close + 2 for close in closes],
+                "Low": [close - 2 for close in closes],
+                "Close": closes,
+            },
             index=dates,
         )
         fx_history = pd.DataFrame({"Close": [0.9] * len(dates)}, index=dates)
+        history_calls = {"USDEUR=X": 0, "EX": 0}
 
         def ticker_factory(symbol):
             history = fx_history if symbol == "USDEUR=X" else stock_history
-            return SimpleNamespace(history=lambda **_kwargs: history)
+
+            def get_history(**_kwargs):
+                history_calls[symbol] += 1
+                return history
+
+            return SimpleNamespace(history=get_history)
 
         ticker_mock.side_effect = ticker_factory
 
@@ -671,7 +686,40 @@ class SentimentTests(unittest.TestCase):
         self.assertAlmostEqual(position.current_value_eur, 198.0)
         self.assertAlmostEqual(position.max_profit_eur, 98.0)
         self.assertAlmostEqual(position.max_return_pct, 98.0)
+        self.assertIsNotNone(position.risk_zones)
+        self.assertEqual(history_calls, {"USDEUR=X": 1, "EX": 1})
         self.assertEqual(tuple(position.returns_pct), tuple(period for period, _ in PORTFOLIO_PERIODS))
+
+    def test_calculate_risk_zones_uses_atr_and_trailing_22_session_high(self):
+        index = pd.date_range("2025-01-01", periods=40, freq="D")
+        history = pd.DataFrame(
+            {
+                "High": [120.0 if position == 20 else 101.0 for position in range(40)],
+                "Low": [99.0] * 40,
+                "Close": [100.0] * 40,
+            },
+            index=index,
+        )
+
+        risk = calculate_risk_zones(history, price_eur=100)
+
+        self.assertIsNotNone(risk)
+        self.assertAlmostEqual(risk["atr_pct"], 2.0)
+        self.assertAlmostEqual(risk["review_eur"], 115.0)
+        self.assertAlmostEqual(risk["review_pct"], 15.0)
+        self.assertAlmostEqual(risk["target_eur"], 110.0)
+        self.assertAlmostEqual(risk["target_pct"], 10.0)
+        self.assertEqual(risk["risk_reward"], 2.0)
+
+    def test_calculate_risk_zones_omits_insufficient_or_invalid_history(self):
+        short_history = pd.DataFrame(
+            {"High": [101.0] * 14, "Low": [99.0] * 14, "Close": [100.0] * 14}
+        )
+        missing_ohlc = pd.DataFrame({"Close": [100.0] * 30})
+
+        self.assertIsNone(calculate_risk_zones(short_history, price_eur=100))
+        self.assertIsNone(calculate_risk_zones(missing_ohlc, price_eur=100))
+        self.assertIsNone(calculate_risk_zones(short_history, price_eur=0))
 
     def test_portfolio_csv_import_builds_remaining_position_at_average_cost(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1005,6 +1053,30 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('data-portfolio-kind="close">70.00 €', html)
         self.assertIn("Precio de cierre (€)", html)
         self.assertIn("DashboardPortfolioChartSelect", html)
+
+    def test_dashboard_shows_trailing_risk_and_marks_breached_review_level(self):
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Example", "EX", 1, 100, "EUR"),
+            prices_eur={"Hoy": 90},
+            risk_zones={
+                "atr_pct": 2.0,
+                "review_eur": 95.0,
+                "review_pct": 5.56,
+                "target_eur": 100.0,
+                "target_pct": 11.11,
+                "risk_reward": 2.0,
+            },
+        )
+
+        html = render_dashboard([], portfolio=[position])
+
+        self.assertIn('<th scope="col">Riesgo ATR</th>', html)
+        self.assertIn('<strong class="text-bearish">Revisar</strong>', html)
+        self.assertIn("Revisión 95.00 € (5.56%)", html)
+        self.assertIn("TP 100.00 € (+11.11%)", html)
+        self.assertIn("ATR 2.00%", html)
+        self.assertIn("máximo de 22 sesiones", html)
+        self.assertEqual(html.count('class="portfolio-risk"'), 1)
 
     def test_dashboard_embeds_chart_data_safely_and_shows_last_ai_query_time(self):
         charts = DashboardCharts(
@@ -1520,6 +1592,27 @@ class SentimentTests(unittest.TestCase):
         )
         self.assertIn('id="card-EUNL.DE"', html)
         self.assertIn('id="card-PLTR"', html)
+
+    @patch("daily_report.yf.download", return_value=pd.DataFrame())
+    def test_portfolio_heatmap_shortens_world_information_technology(self, _download_mock):
+        position = PortfolioPosition(
+            asset=PortfolioAsset(
+                "MSCI World Information Technology",
+                "XDWT.DE",
+                1,
+                100,
+                "EUR",
+            ),
+            prices_eur={"Hoy": 100, "1D": 99},
+            returns_pct={"1D": 1.01},
+            current_value_eur=100,
+            price_date=date(2026, 10, 26),
+            market_timezone=TIMEZONE.key,
+        )
+
+        charts = collect_chart_data([], [position])
+
+        self.assertEqual(charts.portfolio[0]["name"], "World IT")
 
     def test_heatmap_labels_are_clipped_and_mobile_layout_is_fluid(self):
         html = render_dashboard([])
