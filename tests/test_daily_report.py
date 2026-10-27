@@ -11,6 +11,12 @@ import requests
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from daily_report import (
+    ATR_MULTIPLIER,
+    ATR_WINDOW,
+    CONFIDENCE_HIGH_SESSIONS,
+    CONFIDENCE_MEDIUM_SESSIONS,
+    PEAK_WINDOW,
+    REWARD_RISK_RATIO,
     Company,
     COMPANIES,
     Headline,
@@ -28,11 +34,13 @@ from daily_report import (
     PORTFOLIO,
     PORTFOLIO_PERIODS,
     Quote,
+    RiskZones,
     StockReport,
     TIMEZONE,
     _model_pool_allows_fallback,
     _market_session_series,
     _read_gemini_cache,
+    _risk_no_data_reason,
     _gemini_request_warning,
     analyze_portfolio,
     build_analysis_prompt,
@@ -650,9 +658,13 @@ class SentimentTests(unittest.TestCase):
     def test_fetch_portfolio_converts_historical_prices_and_calculates_returns(self, ticker_mock):
         as_of = date(2025, 1, 11)
         asset = PortfolioAsset("Example", "EX", 2, 100, "USD")
-        dates = pd.date_range("2024-01-01", "2025-01-11", freq="D")
+        dates = pd.date_range("2024-01-01", "2025-01-12", freq="D")
         closes = [
-            100.0 if day.date() == date(2025, 1, 10) else 110.0
+            100.0
+            if day.date() == date(2025, 1, 10)
+            else 1000.0
+            if day.date() == date(2025, 1, 12)
+            else 110.0
             for day in dates
         ]
         stock_history = pd.DataFrame(
@@ -687,14 +699,73 @@ class SentimentTests(unittest.TestCase):
         self.assertAlmostEqual(position.max_profit_eur, 98.0)
         self.assertAlmostEqual(position.max_return_pct, 98.0)
         self.assertIsNotNone(position.risk_zones)
+        expected_history = stock_history.loc[
+            [timestamp.date() <= as_of for timestamp in stock_history.index]
+        ]
+        previous_close = expected_history["Close"].shift()
+        true_range = pd.concat(
+            [
+                expected_history["High"] - expected_history["Low"],
+                (expected_history["High"] - previous_close).abs(),
+                (expected_history["Low"] - previous_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        expected_atr_pct = (
+            true_range.rolling(ATR_WINDOW).mean().iloc[-1]
+            / expected_history["Close"].iloc[-1]
+            * 100
+        )
+        self.assertAlmostEqual(position.risk_zones.atr_pct, expected_atr_pct)
+        self.assertAlmostEqual(
+            position.risk_zones.primary_review_pct,
+            -ATR_MULTIPLIER * expected_atr_pct,
+        )
+        self.assertAlmostEqual(
+            position.risk_zones.primary_target_pct,
+            REWARD_RISK_RATIO * ATR_MULTIPLIER * expected_atr_pct,
+        )
+        self.assertEqual(
+            position.risk_zones.sessions_used,
+            len(expected_history.dropna(subset=["High", "Low", "Close"])),
+        )
+        self.assertEqual(position.risk_zones.confidence, "high")
         self.assertEqual(history_calls, {"USDEUR=X": 1, "EX": 1})
         self.assertEqual(tuple(position.returns_pct), tuple(period for period, _ in PORTFOLIO_PERIODS))
 
-    def test_calculate_risk_zones_uses_atr_and_trailing_22_session_high(self):
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_portfolio_warns_and_keeps_position_when_risk_history_is_short(
+        self, ticker_mock
+    ):
+        as_of = date(2025, 1, 15)
+        history = pd.DataFrame(
+            {
+                "High": [101.0] * 14,
+                "Low": [99.0] * 14,
+                "Close": [100.0] * 14,
+            },
+            index=pd.date_range("2025-01-01", periods=14, freq="D"),
+        )
+        ticker_mock.return_value.history.return_value = history
+
+        with self.assertLogs(level="WARNING") as captured:
+            positions = fetch_portfolio(
+                (PortfolioAsset("Short History", "SHORT", 2, 180, "EUR"),),
+                as_of=as_of,
+            )
+
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0].risk_zones.status, "no_data")
+        self.assertTrue(
+            any("SHORT: niveles de riesgo sin datos: histórico insuficiente (14 de 15" in message
+                for message in captured.output)
+        )
+
+    def test_calculate_risk_zones_uses_atr_and_trailing_peak_for_normal_position(self):
         index = pd.date_range("2025-01-01", periods=40, freq="D")
         history = pd.DataFrame(
             {
-                "High": [120.0 if position == 20 else 101.0 for position in range(40)],
+                "High": [101.0] * 40,
                 "Low": [99.0] * 40,
                 "Close": [100.0] * 40,
             },
@@ -703,23 +774,161 @@ class SentimentTests(unittest.TestCase):
 
         risk = calculate_risk_zones(history, price_eur=100)
 
-        self.assertIsNotNone(risk)
-        self.assertAlmostEqual(risk["atr_pct"], 2.0)
-        self.assertAlmostEqual(risk["review_eur"], 115.0)
-        self.assertAlmostEqual(risk["review_pct"], 15.0)
-        self.assertAlmostEqual(risk["target_eur"], 110.0)
-        self.assertAlmostEqual(risk["target_pct"], 10.0)
-        self.assertEqual(risk["risk_reward"], 2.0)
+        self.assertEqual(risk.status, "ok")
+        self.assertAlmostEqual(risk.atr_pct, 2.0)
+        self.assertAlmostEqual(risk.review_eur, 96.0)
+        self.assertAlmostEqual(risk.review_pct, -4.0)
+        self.assertAlmostEqual(risk.target_eur, 108.0)
+        self.assertAlmostEqual(risk.target_pct, 8.0)
+        self.assertEqual(risk.atr_days, ATR_WINDOW)
+        self.assertEqual(risk.atr_multiplier, ATR_MULTIPLIER)
+        self.assertEqual(risk.peak_window, PEAK_WINDOW)
+        self.assertEqual(risk.reward_risk, REWARD_RISK_RATIO)
+        self.assertAlmostEqual(risk.primary_review_eur, 95.0)
+        self.assertAlmostEqual(risk.primary_review_pct, -5.0)
+        self.assertAlmostEqual(risk.primary_target_eur, 110.0)
+        self.assertAlmostEqual(risk.primary_target_pct, 10.0)
+        self.assertEqual(risk.sessions_used, 40)
+        self.assertEqual(risk.confidence, "medium")
 
-    def test_calculate_risk_zones_omits_insufficient_or_invalid_history(self):
+    def test_calculate_risk_zones_confidence_thresholds_and_actual_session_count(self):
+        for sessions, expected_confidence in (
+            (ATR_WINDOW + 1, "low"),
+            (CONFIDENCE_MEDIUM_SESSIONS - 1, "low"),
+            (CONFIDENCE_MEDIUM_SESSIONS, "medium"),
+            (CONFIDENCE_HIGH_SESSIONS - 1, "medium"),
+            (CONFIDENCE_HIGH_SESSIONS, "high"),
+            (CONFIDENCE_HIGH_SESSIONS + 15, "high"),
+        ):
+            with self.subTest(sessions=sessions):
+                history = pd.DataFrame(
+                    {
+                        "High": [101.0] * sessions,
+                        "Low": [99.0] * sessions,
+                        "Close": [100.0] * sessions,
+                    },
+                    index=pd.date_range("2025-01-01", periods=sessions, freq="D"),
+                )
+                risk = calculate_risk_zones(history, price_eur=100)
+
+                self.assertEqual(risk.sessions_used, sessions)
+                self.assertEqual(risk.confidence, expected_confidence)
+
+    def test_risk_confidence_badges_and_explanation_for_each_label(self):
+        for sessions, confidence in (
+            (ATR_WINDOW + 1, "low"),
+            (CONFIDENCE_MEDIUM_SESSIONS, "medium"),
+            (CONFIDENCE_HIGH_SESSIONS, "high"),
+        ):
+            with self.subTest(confidence=confidence):
+                history = pd.DataFrame(
+                    {
+                        "High": [101.0] * sessions,
+                        "Low": [99.0] * sessions,
+                        "Close": [100.0] * sessions,
+                    },
+                    index=pd.date_range("2025-01-01", periods=sessions, freq="D"),
+                )
+                position = PortfolioPosition(
+                    asset=PortfolioAsset("Example", confidence.upper(), 1, 100, "EUR"),
+                    prices_eur={"Hoy": 100},
+                    current_value_eur=100,
+                    risk_zones=calculate_risk_zones(history, 100),
+                )
+                html = render_dashboard([], portfolio=[position])
+
+                self.assertIn(
+                    f'class="portfolio-risk-confidence confidence-{confidence}">'
+                    f"{confidence}</span>",
+                    html,
+                )
+                self.assertIn(
+                    f"Confianza {confidence} según las {sessions} sesiones de "
+                    "histórico usadas en el cálculo.",
+                    html,
+                )
+                self.assertNotIn("Confianza / sesiones", html)
+
+    def test_no_data_warning_reason_distinguishes_missing_price_and_invalid_history(self):
+        self.assertIn("precio ausente", _risk_no_data_reason(pd.DataFrame(), None))
+        self.assertIn(
+            "histórico insuficiente",
+            _risk_no_data_reason(
+                pd.DataFrame(
+                    {"High": [101.0] * 14, "Low": [99.0] * 14, "Close": [100.0] * 14}
+                ),
+                100,
+            ),
+        )
+        self.assertIn(
+            "datos históricos no válidos",
+            _risk_no_data_reason(pd.DataFrame({"Close": [100.0] * 30}), 100),
+        )
+
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_portfolio_logs_missing_current_price_reason(self, ticker_mock):
+        history = pd.DataFrame(
+            {
+                "High": [101.0] * 20,
+                "Low": [99.0] * 20,
+                "Close": [100.0] * 20,
+            },
+            index=pd.date_range("2025-01-11", periods=20, freq="D"),
+        )
+        ticker_mock.return_value.history.return_value = history
+
+        with self.assertLogs(level="WARNING") as captured:
+            positions = fetch_portfolio(
+                (PortfolioAsset("Future Quote", "FUTURE", 1, 100, "EUR"),),
+                as_of=date(2025, 1, 10),
+            )
+
+        self.assertEqual(positions[0].risk_zones.status, "no_data")
+        self.assertTrue(
+            any("FUTURE: niveles de riesgo sin datos: precio ausente" in message
+                for message in captured.output)
+        )
+
+    def test_calculate_risk_zones_marks_crossed_and_omits_target(self):
+        history = pd.DataFrame(
+            {
+                "High": [120.0 if position == 20 else 101.0 for position in range(40)],
+                "Low": [99.0] * 40,
+                "Close": [100.0] * 40,
+            },
+            index=pd.date_range("2025-01-01", periods=40, freq="D"),
+        )
+
+        risk = calculate_risk_zones(history, price_eur=100)
+
+        self.assertEqual(risk.status, "crossed")
+        self.assertAlmostEqual(risk.review_eur, 115.0)
+        self.assertAlmostEqual(risk.review_pct, 15.0)
+        self.assertIsNone(risk.target_eur)
+        self.assertIsNone(risk.target_pct)
+        self.assertIsNotNone(risk.primary_review_eur)
+        self.assertIsNotNone(risk.primary_target_eur)
+
+    def test_calculate_risk_zones_returns_no_data_for_short_or_invalid_history(self):
         short_history = pd.DataFrame(
             {"High": [101.0] * 14, "Low": [99.0] * 14, "Close": [100.0] * 14}
         )
         missing_ohlc = pd.DataFrame({"Close": [100.0] * 30})
 
-        self.assertIsNone(calculate_risk_zones(short_history, price_eur=100))
-        self.assertIsNone(calculate_risk_zones(missing_ohlc, price_eur=100))
-        self.assertIsNone(calculate_risk_zones(short_history, price_eur=0))
+        short = calculate_risk_zones(short_history, price_eur=100)
+        invalid = calculate_risk_zones(missing_ohlc, price_eur=100)
+        no_price = calculate_risk_zones(short_history, price_eur=0)
+
+        self.assertEqual(short.status, "no_data")
+        self.assertEqual(invalid.status, "no_data")
+        self.assertEqual(no_price.status, "no_data")
+        self.assertIsNone(short.atr_pct)
+        self.assertIsNone(short.review_eur)
+        self.assertIsNone(short.target_eur)
+        self.assertIsNone(short.primary_review_eur)
+        self.assertIsNone(short.primary_target_eur)
+        self.assertEqual(short.sessions_used, 14)
+        self.assertIsNone(short.confidence)
 
     def test_portfolio_csv_import_builds_remaining_position_at_average_cost(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1056,27 +1265,151 @@ class SentimentTests(unittest.TestCase):
 
     def test_dashboard_shows_trailing_risk_and_marks_breached_review_level(self):
         position = PortfolioPosition(
-            asset=PortfolioAsset("Example", "EX", 1, 100, "EUR"),
+            asset=PortfolioAsset('Example <script>alert("x")</script>', "EX", 1, 100, "EUR"),
             prices_eur={"Hoy": 90},
-            risk_zones={
-                "atr_pct": 2.0,
-                "review_eur": 95.0,
-                "review_pct": 5.56,
-                "target_eur": 100.0,
-                "target_pct": 11.11,
-                "risk_reward": 2.0,
-            },
+            risk_zones=RiskZones(
+                status="crossed",
+                atr_pct=2.0,
+                review_eur=95.0,
+                review_pct=5.56,
+                target_eur=None,
+                target_pct=None,
+                atr_days=ATR_WINDOW,
+                atr_multiplier=ATR_MULTIPLIER,
+                peak_window=PEAK_WINDOW,
+                reward_risk=REWARD_RISK_RATIO,
+                confidence="low",
+                sessions_used=PEAK_WINDOW,
+            ),
         )
 
         html = render_dashboard([], portfolio=[position])
 
-        self.assertIn('<th scope="col">Riesgo ATR</th>', html)
-        self.assertIn('<strong class="text-bearish">Revisar</strong>', html)
-        self.assertIn("Revisión 95.00 € (5.56%)", html)
-        self.assertIn("TP 100.00 € (+11.11%)", html)
-        self.assertIn("ATR 2.00%", html)
-        self.assertIn("máximo de 22 sesiones", html)
-        self.assertEqual(html.count('class="portfolio-risk"'), 1)
+        self.assertIn('aria-label="Ver niveles de riesgo de Example &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; (EX)"', html)
+        self.assertIn('popovertarget="portfolio-risk-', html)
+        self.assertIn('popover="auto"', html)
+        self.assertIn('class="portfolio-risk-trigger"', html)
+        self.assertNotIn('class="portfolio-risk-trigger is-crossed"', html)
+        self.assertIn('class="portfolio-risk-confidence confidence-low">low</span>', html)
+        self.assertIn("Confianza low según las 22 sesiones de histórico usadas en el cálculo.", html)
+        self.assertIn('class="portfolio-risk-secondary is-crossed"', html)
+        self.assertIn("Zonas de alerta · EX", html)
+        self.assertIn("▼ Nivel de revisión", html)
+        self.assertIn("▲ Toma de beneficios", html)
+        self.assertIn("95.00 €", html)
+        self.assertIn("—", html)
+        self.assertIn("Desde máximos de 22 sesiones", html)
+        self.assertIn("El precio está un 5.26 % por debajo de ese nivel.", html)
+        self.assertIn("Precio actual", html)
+        self.assertIn("Precio medio", html)
+        self.assertIn("Volatilidad (ATR 14d)", html)
+        self.assertIn("2.5 × ATR(14)", html)
+        self.assertIn("¿Por qué estos niveles?", html)
+        self.assertIn("Niveles educativos, no órdenes de compra/venta.", html)
+        self.assertNotIn('<th scope="col">Riesgo ATR</th>', html)
+        self.assertNotIn('<script>alert("x")</script>', html)
+        self.assertIn('data-risk-atr-pct="2.0000"', html)
+        self.assertIn('data-risk-secondary-level="95.0000"', html)
+
+    def test_dashboard_renders_no_data_risk_panel(self):
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Short History", "SHORT", 1, 100, "EUR"),
+            prices_eur={"Hoy": 100},
+            risk_zones=calculate_risk_zones(pd.DataFrame(), 100),
+        )
+
+        html = render_dashboard([], portfolio=[position])
+
+        self.assertIn("▼ Nivel de revisión", html)
+        self.assertIn("▲ Toma de beneficios", html)
+        self.assertIn("Se necesitan al menos 15 sesiones válidas de histórico.", html)
+        self.assertIn('aria-label="Ver niveles de riesgo de Short History (SHORT)"', html)
+        self.assertIn('class="portfolio-risk-trigger is-no-data"', html)
+
+    def test_risk_explanation_covers_cost_relationships_and_missing_position_data(self):
+        examples = (
+            (
+                "near",
+                100,
+                100,
+                "El nivel de revisión casi coincide con tu coste medio",
+            ),
+            (
+                "below",
+                100,
+                110,
+                "Podrías perder hasta 9.09 % sobre tu coste",
+            ),
+            (
+                "above",
+                100,
+                90,
+                "conservarías 11.11 % de ganancia sobre tu coste",
+            ),
+        )
+        for ticker, price, average, expected in examples:
+            with self.subTest(ticker=ticker):
+                position = PortfolioPosition(
+                    asset=PortfolioAsset(
+                        "Example",
+                        ticker,
+                        1,
+                        average,
+                        "EUR",
+                    ),
+                    prices_eur={"Hoy": price},
+                    current_value_eur=price,
+                    risk_zones=RiskZones(
+                        status="ok",
+                        atr_pct=2.0,
+                        review_eur=95.0,
+                        review_pct=-5.0,
+                        target_eur=110.0,
+                        target_pct=10.0,
+                        atr_days=ATR_WINDOW,
+                        atr_multiplier=ATR_MULTIPLIER,
+                        peak_window=PEAK_WINDOW,
+                        reward_risk=REWARD_RISK_RATIO,
+                        primary_review_eur=100,
+                        primary_review_pct=-5.0,
+                        primary_target_eur=110.0,
+                        primary_target_pct=10.0,
+                        confidence="low",
+                        sessions_used=PEAK_WINDOW,
+                    ),
+                )
+                html = render_dashboard([], portfolio=[position])
+                self.assertIn(expected, html)
+                self.assertIn("La toma de beneficios supone", html)
+                self.assertIn("ratio 1:2", html)
+                self.assertIn("100.00 €", html)
+                self.assertIn("-5.00%", html)
+                self.assertIn("+10.00%", html)
+                self.assertIn("Confianza low según las 22 sesiones", html)
+
+        missing_position = PortfolioPosition(
+            asset=PortfolioAsset("No Cost", "NOCOST", 0, 0, "EUR"),
+            prices_eur={"Hoy": None},
+            risk_zones=calculate_risk_zones(pd.DataFrame(), None),
+        )
+        missing_html = render_dashboard([], portfolio=[missing_position])
+        self.assertIn("Niveles educativos, no órdenes de compra/venta.", missing_html)
+        self.assertNotIn("Tienes 0.000000 acciones", missing_html)
+        self.assertNotIn("El nivel de revisión casi coincide", missing_html)
+
+    def test_live_risk_script_contains_dynamic_level_and_secondary_state_updates(self):
+        html = render_dashboard([])
+
+        self.assertIn("row.dataset.riskAtrPct", html)
+        self.assertIn("row.dataset.riskSecondaryLevel", html)
+        self.assertIn("price - riskDistance", html)
+        self.assertIn("price + rewardRatio * riskDistance", html)
+        self.assertIn("(secondaryLevel / price - 1) * 100", html)
+        self.assertIn("secondaryBlockNode.classList.toggle('is-crossed', crossed)", html)
+        self.assertIn("riskButton.classList.toggle('is-no-data', !hasSecondaryLevel)", html)
+        self.assertNotIn("riskButton.classList.toggle('is-crossed'", html)
+        self.assertIn("const maxTop = Math.max(", html)
+        self.assertIn(": Math.min(maxTop, Math.max(margin", html)
 
     def test_dashboard_embeds_chart_data_safely_and_shows_last_ai_query_time(self):
         charts = DashboardCharts(
@@ -2815,6 +3148,24 @@ class SentimentTests(unittest.TestCase):
             max_return_pct=10,
             price_date=generated_at.date(),
             market_timezone=TIMEZONE.key,
+            risk_zones=RiskZones(
+                status="ok",
+                atr_pct=2.0,
+                review_eur=9.5,
+                review_pct=-13.64,
+                target_eur=14.0,
+                target_pct=27.27,
+                atr_days=ATR_WINDOW,
+                atr_multiplier=ATR_MULTIPLIER,
+                peak_window=PEAK_WINDOW,
+                reward_risk=REWARD_RISK_RATIO,
+                primary_review_eur=10.45,
+                primary_review_pct=-5.0,
+                primary_target_eur=12.1,
+                primary_target_pct=10.0,
+                confidence="high",
+                sessions_used=CONFIDENCE_HIGH_SESSIONS,
+            ),
         )
         analysis = PortfolioAnalysis(
             portfolio_assessment="Mantener la diversificación.",
@@ -2863,6 +3214,27 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(payload["portfolio"]["positions"][0]["avg_cost_eur"], 10)
         self.assertEqual(payload["portfolio"]["positions"][0]["day_delta_eur"], 1)
         self.assertEqual(payload["portfolio"]["positions"][0]["invested_cost_eur"], 20)
+        self.assertEqual(
+            payload["portfolio"]["positions"][0]["risk_zones"],
+            {
+                "status": "ok",
+                "atr_pct": 2.0,
+                "review_eur": 9.5,
+                "review_pct": -13.64,
+                "target_eur": 14.0,
+                "target_pct": 27.27,
+                "atr_days": ATR_WINDOW,
+                "atr_multiplier": ATR_MULTIPLIER,
+                "peak_window": PEAK_WINDOW,
+                "reward_risk": REWARD_RISK_RATIO,
+                "primary_review_eur": 10.45,
+                "primary_review_pct": -5.0,
+                "primary_target_eur": 12.1,
+                "primary_target_pct": 10.0,
+                "confidence": "high",
+                "sessions_used": CONFIDENCE_HIGH_SESSIONS,
+            },
+        )
         self.assertEqual(payload["portfolio"]["positions"][0]["realized_pnl_eur"], 1)
         self.assertEqual(payload["portfolio"]["totals"]["current_value_eur"], 11)
         self.assertEqual(payload["portfolio"]["totals"]["total_return_pct"], 10)

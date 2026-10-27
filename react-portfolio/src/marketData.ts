@@ -54,12 +54,32 @@ export interface PortfolioPositionData {
   prices_eur: Record<string, number | null>;
   max_profit_eur: number | null;
   max_return_pct: number | null;
+  risk_zones?: RiskZonesData | null;
   price_date: string | null;
   quote_is_stale: boolean;
   sector: string | null;
   quote_type: string | null;
   realized_pnl_eur: number | null;
   warning: string | null;
+}
+
+export interface RiskZonesData {
+  status: "ok" | "crossed" | "no_data";
+  atr_pct: number | null;
+  review_eur: number | null;
+  review_pct: number | null;
+  target_eur: number | null;
+  target_pct: number | null;
+  atr_days: number;
+  atr_multiplier: number;
+  peak_window: number;
+  reward_risk: number;
+  primary_review_eur?: number | null;
+  primary_review_pct?: number | null;
+  primary_target_eur?: number | null;
+  primary_target_pct?: number | null;
+  confidence?: "high" | "medium" | "low" | null;
+  sessions_used?: number | null;
 }
 
 export interface PortfolioData {
@@ -250,12 +270,126 @@ function isPortfolioPosition(value: unknown): value is PortfolioPositionData {
     isNumberRecord(value.prices_eur) &&
     isNullableNumber(value.max_profit_eur) &&
     isNullableNumber(value.max_return_pct) &&
+    (value.risk_zones === undefined ||
+      value.risk_zones === null ||
+      isRiskZonesData(value.risk_zones)) &&
     isNullableString(value.price_date) &&
     typeof value.quote_is_stale === "boolean" &&
     isNullableString(value.sector) &&
     isNullableString(value.quote_type) &&
     isNullableNumber(value.realized_pnl_eur) &&
     isNullableString(value.warning)
+  );
+}
+
+function isRiskZonesData(value: unknown): value is RiskZonesData {
+  if (!isRecord(value)) return false;
+  const primaryFields = [
+    "primary_review_eur",
+    "primary_review_pct",
+    "primary_target_eur",
+    "primary_target_pct",
+  ];
+  const hasPrimaryFields = primaryFields.some(
+    (field) => value[field] !== undefined,
+  );
+  const primaryFieldsComplete =
+    !hasPrimaryFields ||
+    primaryFields.every((field) => value[field] !== undefined);
+  const hasConfidence = value.confidence !== undefined;
+  const hasSessionsUsed = value.sessions_used !== undefined;
+  const validFields =
+    (value.status === "ok" ||
+      value.status === "crossed" ||
+      value.status === "no_data") &&
+    isNullableNumber(value.atr_pct) &&
+    isNullableNumber(value.review_eur) &&
+    isNullableNumber(value.review_pct) &&
+    isNullableNumber(value.target_eur) &&
+    isNullableNumber(value.target_pct) &&
+    isFiniteNumber(value.atr_days) &&
+    isFiniteNumber(value.atr_multiplier) &&
+    isFiniteNumber(value.peak_window) &&
+    isFiniteNumber(value.reward_risk) &&
+    (value.primary_review_eur === undefined ||
+      isNullableNumber(value.primary_review_eur)) &&
+    (value.primary_review_pct === undefined ||
+      isNullableNumber(value.primary_review_pct)) &&
+    (value.primary_target_eur === undefined ||
+      isNullableNumber(value.primary_target_eur)) &&
+    (value.primary_target_pct === undefined ||
+      isNullableNumber(value.primary_target_pct)) &&
+    (value.confidence === undefined ||
+      value.confidence === null ||
+      value.confidence === "high" ||
+      value.confidence === "medium" ||
+      value.confidence === "low") &&
+    (value.sessions_used === undefined ||
+      value.sessions_used === null ||
+      (isFiniteNumber(value.sessions_used) &&
+        Number.isInteger(value.sessions_used) &&
+        value.sessions_used >= 0)) &&
+    primaryFieldsComplete &&
+    hasConfidence === hasSessionsUsed;
+  if (!validFields) return false;
+  if (value.status === "no_data") {
+    return (
+      value.atr_pct === null &&
+      value.review_eur === null &&
+      value.review_pct === null &&
+      value.target_eur === null &&
+      value.target_pct === null &&
+      (!hasPrimaryFields ||
+        primaryFields.every((field) => value[field] === null)) &&
+      (!hasConfidence ||
+        (value.confidence === null &&
+          (value.sessions_used === null ||
+            (isFiniteNumber(value.sessions_used) &&
+              value.sessions_used >= 0))))
+    );
+  }
+  if (
+    hasConfidence &&
+    (typeof value.confidence !== "string" ||
+      !isFiniteNumber(value.sessions_used) ||
+      (value.confidence === "high" && value.sessions_used < 100) ||
+      (value.confidence === "medium" &&
+        (value.sessions_used < 30 || value.sessions_used >= 100)) ||
+      (value.confidence === "low" && value.sessions_used >= 30))
+  ) {
+    return false;
+  }
+  if (hasPrimaryFields) {
+    if (
+      !isFiniteNumber(value.primary_review_eur) ||
+      !isFiniteNumber(value.primary_review_pct) ||
+      !isFiniteNumber(value.primary_target_eur) ||
+      !isFiniteNumber(value.primary_target_pct) ||
+      value.primary_review_eur <= 0 ||
+      value.primary_target_eur <= 0 ||
+      value.primary_review_pct >= 0 ||
+      value.primary_target_pct <= 0
+    ) {
+      return false;
+    }
+  }
+  if (value.status === "crossed") {
+    return (
+      value.target_eur === null &&
+      value.target_pct === null &&
+      (value.primary_review_eur === undefined ||
+        value.primary_review_eur !== null) &&
+      (value.primary_target_eur === undefined ||
+        value.primary_target_eur !== null)
+    );
+  }
+  return (
+    value.target_eur !== null &&
+    value.target_pct !== null &&
+    (value.primary_review_eur === undefined ||
+      value.primary_review_eur !== null) &&
+    (value.primary_target_eur === undefined ||
+      value.primary_target_eur !== null)
   );
 }
 

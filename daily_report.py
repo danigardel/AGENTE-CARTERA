@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -50,6 +50,12 @@ MAX_GEMINI_NEWS_ITEMS = 48
 MAX_MARKET_RADAR_ITEMS = 250
 MAX_WORKERS = 8
 PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
+ATR_WINDOW = 14
+ATR_MULTIPLIER = 2.5
+PEAK_WINDOW = 22
+REWARD_RISK_RATIO = 2.0
+CONFIDENCE_HIGH_SESSIONS = 100
+CONFIDENCE_MEDIUM_SESSIONS = 30
 MARKET_BENCHMARKS = (("S&P 500 EUR", "SXR8.DE"), ("MSCI World EUR", "EUNL.DE"))
 
 # 1. CACHÉ PARA TIPOS DE CAMBIO
@@ -197,7 +203,27 @@ class PortfolioPosition:
     warning: str | None = None
     price_date: date | None = None
     market_timezone: str | None = None
-    risk_zones: dict[str, float] | None = None
+    risk_zones: RiskZones | None = None
+
+
+@dataclass(frozen=True)
+class RiskZones:
+    status: Literal["ok", "crossed", "no_data"]
+    atr_pct: float | None
+    review_eur: float | None
+    review_pct: float | None
+    target_eur: float | None
+    target_pct: float | None
+    atr_days: int
+    atr_multiplier: float
+    peak_window: int
+    reward_risk: float
+    primary_review_eur: float | None = None
+    primary_review_pct: float | None = None
+    primary_target_eur: float | None = None
+    primary_target_pct: float | None = None
+    confidence: Literal["high", "medium", "low"] | None = None
+    sessions_used: int | None = None
 
 
 @dataclass
@@ -1284,17 +1310,39 @@ def portfolio_history_from_transactions(
 
 def calculate_risk_zones(
     history: pd.DataFrame,
-    price_eur: float,
-    atr_days: int = 14,
-    mult: float = 2.5,
-    reward_risk: float = 2.0,
-) -> dict[str, float] | None:
+    price_eur: float | None,
+    ticker: str | None = None,
+) -> RiskZones:
+    sessions_used = 0
+
+    def no_data() -> RiskZones:
+        return RiskZones(
+            status="no_data",
+            atr_pct=None,
+            review_eur=None,
+            review_pct=None,
+            target_eur=None,
+            target_pct=None,
+            atr_days=ATR_WINDOW,
+            atr_multiplier=ATR_MULTIPLIER,
+            peak_window=PEAK_WINDOW,
+            reward_risk=REWARD_RISK_RATIO,
+            sessions_used=sessions_used,
+        )
+
     try:
+        if not isinstance(history, pd.DataFrame) or not {
+            "High",
+            "Low",
+            "Close",
+        }.issubset(history.columns):
+            return no_data()
         ohlc = history[["High", "Low", "Close"]].apply(
             pd.to_numeric, errors="coerce"
         ).dropna()
-        if len(ohlc) < atr_days + 1:
-            return None
+        sessions_used = len(ohlc)
+        if len(ohlc) < ATR_WINDOW + 1 or price_eur is None:
+            return no_data()
 
         high, low, close = ohlc["High"], ohlc["Low"], ohlc["Close"]
         previous_close = close.shift()
@@ -1306,34 +1354,123 @@ def calculate_risk_zones(
             ],
             axis=1,
         ).max(axis=1)
-        atr = float(true_range.rolling(atr_days).mean().iloc[-1])
+        atr = float(true_range.rolling(ATR_WINDOW).mean().iloc[-1])
         latest_close = float(close.iloc[-1])
         price_eur = float(price_eur)
-        trailing_high = float(high.tail(22).max())
-        values = (atr, latest_close, price_eur, trailing_high)
         if (
-            not all(math.isfinite(value) for value in values)
+            not all(math.isfinite(value) for value in (atr, latest_close, price_eur))
             or latest_close <= 0
             or price_eur <= 0
         ):
-            return None
+            return no_data()
+        peak_relative = float(high.tail(PEAK_WINDOW).max()) / latest_close
+        if not math.isfinite(peak_relative):
+            return no_data()
 
         atr_pct = atr / latest_close
-        risk = price_eur * atr_pct * mult
-        review_eur = trailing_high * price_eur / latest_close - risk
-        target_eur = price_eur + reward_risk * risk
-        result = {
-            "atr_pct": atr_pct * 100,
-            "review_eur": review_eur,
-            "review_pct": (review_eur / price_eur - 1) * 100,
-            "target_eur": target_eur,
-            "target_pct": reward_risk * risk / price_eur * 100,
-            "risk_reward": reward_risk,
-        }
-        return result if all(math.isfinite(value) for value in result.values()) else None
-    except (IndexError, KeyError, OverflowError, TypeError, ValueError) as error:
-        logging.warning("No se pudieron calcular los niveles ATR: %s", error)
-        return None
+        review_relative = peak_relative - ATR_MULTIPLIER * atr_pct
+        review_eur = price_eur * review_relative
+        review_pct = (review_relative - 1) * 100
+        crossed = price_eur <= review_eur
+        risk = price_eur - review_eur
+        target_eur = (
+            price_eur + REWARD_RISK_RATIO * risk if not crossed else None
+        )
+        target_pct = (
+            (target_eur / price_eur - 1) * 100
+            if target_eur is not None
+            else None
+        )
+        primary_risk = price_eur * ATR_MULTIPLIER * atr_pct
+        result = RiskZones(
+            status="crossed" if crossed else "ok",
+            atr_pct=atr_pct * 100,
+            review_eur=review_eur,
+            review_pct=review_pct,
+            target_eur=target_eur,
+            target_pct=target_pct,
+            atr_days=ATR_WINDOW,
+            atr_multiplier=ATR_MULTIPLIER,
+            peak_window=PEAK_WINDOW,
+            reward_risk=REWARD_RISK_RATIO,
+            primary_review_eur=price_eur - primary_risk,
+            primary_review_pct=-ATR_MULTIPLIER * atr_pct * 100,
+            primary_target_eur=(
+                price_eur + REWARD_RISK_RATIO * primary_risk
+            ),
+            primary_target_pct=(
+                REWARD_RISK_RATIO * ATR_MULTIPLIER * atr_pct * 100
+            ),
+            confidence=(
+                "high"
+                if sessions_used >= CONFIDENCE_HIGH_SESSIONS
+                else "medium"
+                if sessions_used >= CONFIDENCE_MEDIUM_SESSIONS
+                else "low"
+            ),
+            sessions_used=sessions_used,
+        )
+        numeric_values = (
+            result.atr_pct,
+            result.review_eur,
+            result.review_pct,
+            result.target_eur,
+            result.target_pct,
+            result.primary_review_eur,
+            result.primary_review_pct,
+            result.primary_target_eur,
+            result.primary_target_pct,
+        )
+        if not all(
+            value is None or math.isfinite(value) for value in numeric_values
+        ):
+            return no_data()
+        return result
+    except (
+        AttributeError,
+        IndexError,
+        KeyError,
+        OverflowError,
+        TypeError,
+        ValueError,
+    ) as error:
+        logging.warning(
+            "No se pudieron calcular los niveles ATR para %s: %s",
+            ticker or "posición",
+            error,
+        )
+        return no_data()
+
+
+def _risk_no_data_reason(
+    history: pd.DataFrame,
+    price_eur: float | None,
+) -> str:
+    if price_eur is None:
+        return "precio ausente"
+    try:
+        if not math.isfinite(float(price_eur)) or float(price_eur) <= 0:
+            return "precio no válido"
+    except (TypeError, ValueError, OverflowError):
+        return "precio no válido"
+    if not isinstance(history, pd.DataFrame) or not {
+        "High",
+        "Low",
+        "Close",
+    }.issubset(history.columns):
+        return "datos históricos no válidos (faltan columnas OHLC)"
+    try:
+        ohlc = history[["High", "Low", "Close"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).dropna()
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return "datos históricos no válidos"
+    if len(ohlc) < ATR_WINDOW + 1:
+        return (
+            f"histórico insuficiente ({len(ohlc)} de "
+            f"{ATR_WINDOW + 1} sesiones válidas)"
+        )
+    return "datos históricos no válidos (cierre o ATR no válido)"
 
 
 def fetch_portfolio(
@@ -1366,9 +1503,18 @@ def fetch_portfolio(
             asset=asset,
             prices_eur={"Hoy": None, **{period: None for period, _ in PORTFOLIO_PERIODS}},
             returns_pct={period: None for period, _ in PORTFOLIO_PERIODS},
+            risk_zones=calculate_risk_zones(pd.DataFrame(), None),
         )
+        def log_risk_no_data(reason: str) -> None:
+            logging.warning(
+                "%s: niveles de riesgo sin datos: %s",
+                asset.ticker,
+                reason,
+            )
+
         if asset.currency == "USD" and fx_warning:
             position.warning = fx_warning
+            log_risk_no_data("precio ausente por falta de tipo de cambio")
             return position
         try:
             history = yf.Ticker(asset.ticker).history(period="2y", auto_adjust=False)
@@ -1390,11 +1536,15 @@ def fetch_portfolio(
                 f"{asset.ticker}: {type(error).__name__}: {error}"
             )
             logging.warning("No se pudo obtener el histórico de %s: %s", asset.ticker, error)
+            log_risk_no_data("precio ausente porque no se pudo obtener el histórico")
             return position
 
         if not closes:
             position.warning = f"{asset.ticker}: Yahoo Finance no devolvió cierres históricos"
             logging.warning("%s", position.warning)
+            log_risk_no_data(
+                f"histórico insuficiente (0 de {ATR_WINDOW + 1} sesiones válidas)"
+            )
             return position
 
         targets = {"Hoy": as_of}
@@ -1417,8 +1567,22 @@ def fetch_portfolio(
             position.prices_eur[label] = close
 
         current_price = position.prices_eur["Hoy"]
+        risk_history = (
+            history.loc[
+                [
+                    pd.Timestamp(timestamp).date() <= position.price_date
+                    for timestamp in history.index
+                ]
+            ]
+            if position.price_date is not None
+            else history.iloc[0:0]
+        )
+        position.risk_zones = calculate_risk_zones(
+            risk_history, current_price, ticker=asset.ticker
+        )
+        if position.risk_zones.status == "no_data":
+            log_risk_no_data(_risk_no_data_reason(risk_history, current_price))
         if current_price is not None:
-            position.risk_zones = calculate_risk_zones(history, current_price)
             position.current_value_eur = current_price * asset.shares
             position.max_profit_eur = position.current_value_eur - asset.investment_eur
             position.max_return_pct = (
@@ -3562,6 +3726,11 @@ def build_market_data(
                 "prices_eur": position.prices_eur,
                 "max_profit_eur": position.max_profit_eur,
                 "max_return_pct": position.max_return_pct,
+                "risk_zones": (
+                    asdict(position.risk_zones)
+                    if position.risk_zones is not None
+                    else None
+                ),
                 "price_date": position.price_date,
                 "quote_is_stale": not is_current,
                 "sector": quote.sector,
@@ -4133,6 +4302,51 @@ PORTFOLIO_SCRIPT = """<script>
 CHARTS_SCRIPT = """<script>
 (() => {
   const payloadNode = document.getElementById('dashboard-chart-data');
+  const portfolioRiskPopovers = Array.from(
+    document.querySelectorAll('.portfolio-risk-popover[popover]')
+  );
+  const positionRiskPopover = (popover) => {
+    if (!popover.matches(':popover-open')) return;
+    const trigger = Array.from(
+      document.querySelectorAll('button[popovertarget]')
+    ).find((button) => button.getAttribute('popovertarget') === popover.id);
+    if (!trigger) return;
+    const margin = 12;
+    popover.style.width = `${Math.max(1, Math.min(360, window.innerWidth - margin * 2))}px`;
+    const triggerRect = trigger.getBoundingClientRect();
+    const panelRect = popover.getBoundingClientRect();
+    const left = Math.max(
+      margin,
+      Math.min(triggerRect.left, window.innerWidth - panelRect.width - margin)
+    );
+    const below = triggerRect.bottom + 8;
+    const maxTop = Math.max(
+      margin,
+      window.innerHeight - panelRect.height - margin
+    );
+    const top = below + panelRect.height <= window.innerHeight - margin
+      ? below
+      : Math.min(maxTop, Math.max(margin, triggerRect.top - panelRect.height - 8));
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+  };
+  portfolioRiskPopovers.forEach((popover) => {
+    popover.addEventListener('toggle', () => positionRiskPopover(popover));
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    const openPopover = portfolioRiskPopovers.find(
+      (popover) => popover.matches(':popover-open')
+    );
+    if (openPopover) openPopover.hidePopover();
+  });
+  window.addEventListener('resize', () => {
+    portfolioRiskPopovers.forEach(positionRiskPopover);
+  }, {passive: true});
+  window.addEventListener('scroll', () => {
+    portfolioRiskPopovers.forEach(positionRiskPopover);
+  }, {passive: true, capture: true});
+
   if (!payloadNode || !window.d3) return;
   const payload = JSON.parse(payloadNode.textContent);
   const d3 = window.d3;
@@ -4629,6 +4843,64 @@ CHARTS_SCRIPT = """<script>
         if (row.dataset.ticker !== ticker) return;
         const priceNode = row.querySelector('[data-live-price]');
         if (priceNode) priceNode.textContent = `${price.toFixed(2)} €`;
+        const riskPanel = row.querySelector('.portfolio-risk-popover');
+        const riskButton = row.querySelector('.portfolio-risk-trigger');
+        if (riskPanel) {
+          const formatRiskNumber = (value) => new Intl.NumberFormat('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }).format(value);
+          const formatSignedPercent = (value) =>
+            `${value > 0 ? '+' : ''}${formatRiskNumber(value)}%`;
+          const riskPrice = riskPanel.querySelector('[data-risk-current-price]');
+          if (riskPrice) riskPrice.textContent = `${formatRiskNumber(price)} €`;
+
+          const atrPct = Number(row.dataset.riskAtrPct);
+          if (Number.isFinite(atrPct) && atrPct >= 0) {
+            const riskDistance = price * Number(row.dataset.riskAtrMultiplier) * atrPct / 100;
+            const rewardRatio = Number(row.dataset.riskRewardRatio);
+            const review = price - riskDistance;
+            const target = price + rewardRatio * riskDistance;
+            const reviewNode = riskPanel.querySelector('[data-risk-primary-review]');
+            const reviewPctNode = riskPanel.querySelector('[data-risk-primary-review-pct]');
+            const targetNode = riskPanel.querySelector('[data-risk-primary-target]');
+            const targetPctNode = riskPanel.querySelector('[data-risk-primary-target-pct]');
+            if (reviewNode) reviewNode.textContent = `${formatRiskNumber(review)} €`;
+            if (reviewPctNode) {
+              reviewPctNode.textContent = formatSignedPercent(-riskDistance / price * 100);
+            }
+            if (targetNode) targetNode.textContent = `${formatRiskNumber(target)} €`;
+            if (targetPctNode) {
+              targetPctNode.textContent = formatSignedPercent(rewardRatio * riskDistance / price * 100);
+            }
+            const atrNode = riskPanel.querySelector('[data-risk-atr-value]');
+            if (atrNode) atrNode.textContent = `${formatRiskNumber(atrPct)}%`;
+          }
+
+          const secondaryLevel = Number(row.dataset.riskSecondaryLevel);
+          const hasSecondaryLevel = row.dataset.riskSecondaryLevel !== ''
+            && Number.isFinite(secondaryLevel)
+            && secondaryLevel > 0;
+          const secondaryPctNode = riskPanel.querySelector('[data-risk-secondary-pct]');
+          const secondaryStateNode = riskPanel.querySelector('[data-risk-secondary-state]');
+          const secondaryBlockNode = riskPanel.querySelector('.portfolio-risk-secondary');
+          const crossed = hasSecondaryLevel && price <= secondaryLevel;
+          if (hasSecondaryLevel && secondaryPctNode) {
+            secondaryPctNode.textContent = formatSignedPercent(
+              (secondaryLevel / price - 1) * 100
+            );
+          }
+          if (secondaryStateNode) {
+            secondaryStateNode.hidden = !crossed;
+            secondaryStateNode.textContent = crossed
+              ? `El precio está un ${formatRiskNumber((secondaryLevel - price) / secondaryLevel * 100)} % por debajo de ese nivel.`
+              : '';
+          }
+          if (secondaryBlockNode) {
+            secondaryBlockNode.classList.toggle('is-crossed', crossed);
+          }
+          if (riskButton) riskButton.classList.toggle('is-no-data', !hasSecondaryLevel);
+        }
         const quantity = Number(row.dataset.quantity);
         const investment = Number(row.dataset.investment);
         const value = Number.isFinite(quantity) ? price * quantity : null;
@@ -4982,52 +5254,231 @@ def render_dashboard(
         for item in summary["key_headlines"]
     ) or "<li>Aún no hay titulares con fecha de hoy.</li>"
 
-    def portfolio_risk_cell(position: PortfolioPosition) -> str:
-        risk = position.risk_zones
-        if risk is None:
-            return '<td data-label="Riesgo ATR">—</td>'
+    portfolio_value_total = sum(
+        position.current_value_eur or 0 for position in portfolio
+    )
+    portfolio_value_complete = all(
+        position.current_value_eur is not None for position in portfolio
+    )
 
-        title = (
-            "Nivel de revisión trailing basado en el máximo de 22 sesiones: "
-            f'{_portfolio_cell(risk["review_eur"], " €")} '
-            f'({_format_number(risk["review_pct"])}% respecto al precio actual). '
-            "Toma de beneficios desde el precio actual: "
-            f'{_portfolio_cell(risk["target_eur"], " €")} '
-            f'(+{_format_number(risk["target_pct"])}%). '
-            f'ATR(14): {_format_number(risk["atr_pct"])}%; '
-            f'ratio beneficio/riesgo {risk["risk_reward"]:.1f}:1.'
+    def signed_percent(value: float | None) -> str:
+        if value is None:
+            return "—"
+        return f"{'+' if value > 0 else ''}{_format_number(value)}%"
+
+    def portfolio_risk_popover(position: PortfolioPosition) -> str:
+        risk = position.risk_zones or calculate_risk_zones(pd.DataFrame(), None)
+        ticker = position.asset.ticker
+        popover_id = (
+            "portfolio-risk-"
+            + hashlib.sha256(ticker.encode("utf-8")).hexdigest()
         )
         current_price = position.prices_eur.get("Hoy")
-        review_status = (
-            '<strong class="text-bearish">Revisar</strong>'
-            if current_price is not None and current_price <= risk["review_eur"]
+        current_value = position.current_value_eur
+        average_price = (
+            position.asset.investment_eur / position.asset.shares
+            if position.asset.shares > 0
+            else None
+        )
+        status_icon = "is-no-data" if risk.status == "no_data" else ""
+        secondary_crossed = (
+            risk.review_eur is not None
+            and current_price is not None
+            and current_price <= risk.review_eur
+        )
+        if secondary_crossed and risk.review_eur and current_price is not None:
+            maximum_below_text = (
+                "El precio está un "
+                f"{_format_number((risk.review_eur - current_price) / risk.review_eur * 100)} "
+                "% por debajo de ese nivel."
+            )
+        else:
+            maximum_below_text = ""
+        maximum_below_note = (
+            '<p class="portfolio-risk-secondary-state" data-risk-secondary-state'
+            + ("" if secondary_crossed else " hidden")
+            + f'>{_esc(maximum_below_text)}</p>'
+        )
+        confidence_badge = (
+            f'<span class="portfolio-risk-confidence confidence-{_esc(risk.confidence)}">'
+            f'{_esc(risk.confidence)}</span>'
+            if risk.confidence is not None
             else ""
         )
+        no_data_note = (
+            f'<p class="portfolio-risk-state is-no-data" data-risk-no-data>Se necesitan al menos '
+            f'{risk.atr_days + 1} sesiones válidas de histórico.</p>'
+            if risk.status == "no_data"
+            else ""
+        )
+        down_margin = (
+            current_price * ATR_MULTIPLIER * risk.atr_pct / 100
+            if current_price is not None and risk.atr_pct is not None
+            else None
+        )
+        up_margin = down_margin * REWARD_RISK_RATIO if down_margin is not None else None
+        return_on_cost = (
+            (current_price / average_price - 1) * 100
+            if current_price is not None and average_price
+            else None
+        )
+        weight_pct = (
+            current_value / portfolio_value_total * 100
+            if current_value is not None
+            and portfolio_value_complete
+            and portfolio_value_total > 0
+            else None
+        )
+        explanation_sentences = []
+        if risk.atr_pct is not None and down_margin is not None and up_margin is not None:
+            explanation_sentences.append(
+                f"Los dos niveles salen del ATR de {risk.atr_days} sesiones "
+                f"({_format_number(risk.atr_pct)} %) multiplicado por "
+                f"{_format_number(risk.atr_multiplier, 1)}. "
+                f"Eso son unos {_portfolio_cell(down_margin, ' €')} de margen "
+                f"hacia abajo (nivel de revisión) y el doble, "
+                f"{_portfolio_cell(up_margin, ' €')}, hacia arriba (toma de "
+                f"beneficios), es decir, un ratio 1:{_format_number(risk.reward_risk, 0)}."
+            )
+        if (
+            position.asset.shares > 0
+            and average_price is not None
+            and current_value is not None
+            and return_on_cost is not None
+            and weight_pct is not None
+        ):
+            explanation_sentences.append(
+                f"Tienes {_format_number(position.asset.shares, 6)} acciones con "
+                f"coste medio {_portfolio_cell(average_price, ' €')}, valor actual "
+                f"{_portfolio_cell(current_value, ' €')} "
+                f"({signed_percent(return_on_cost)} sobre coste); pesa "
+                f"{_format_number(weight_pct)} % de tu cartera."
+            )
+        if average_price is not None and risk.primary_review_eur is not None:
+            review_vs_cost = (
+                risk.primary_review_eur / average_price - 1
+            ) * 100
+            if abs(review_vs_cost) <= 3:
+                cost_relation = (
+                    "El nivel de revisión casi coincide con tu coste medio: "
+                    "si llegara ahí estarías en tablas."
+                )
+            elif review_vs_cost < 0:
+                cost_relation = (
+                    f"Podrías perder hasta {_format_number(abs(review_vs_cost))} % "
+                    "sobre tu coste antes de llegar al nivel."
+                )
+            else:
+                cost_relation = (
+                    f"Incluso en el nivel de revisión conservarías "
+                    f"{_format_number(review_vs_cost)} % de ganancia sobre tu coste."
+                )
+            target_vs_cost = (
+                (risk.primary_target_eur / average_price - 1) * 100
+                if risk.primary_target_eur is not None
+                else None
+            )
+            if target_vs_cost is not None:
+                cost_relation += (
+                    f" La toma de beneficios supone "
+                    f"{signed_percent(target_vs_cost)} sobre tu coste."
+                )
+            explanation_sentences.append(cost_relation)
+        explanation_sentences.append(
+            "El nivel de revisión no es un stop automático: indica que el precio "
+            "ha caído más de lo que justifica la volatilidad habitual y toca "
+            "repasar la tesis. La toma de beneficios es una señal para plantearse "
+            "reducir peso, no un objetivo garantizado."
+        )
+        if risk.confidence is not None and risk.sessions_used is not None:
+            explanation_sentences.append(
+                f"Confianza {risk.confidence} según las {risk.sessions_used} "
+                "sesiones de histórico usadas en el cálculo."
+            )
+        explanation = " ".join(explanation_sentences)
+        primary_review_value = _portfolio_cell(risk.primary_review_eur, " €")
+        primary_target_value = _portfolio_cell(risk.primary_target_eur, " €")
+        secondary_value = (
+            _portfolio_cell(risk.review_eur, " €")
+            if risk.review_eur is not None
+            else "—"
+        )
+        secondary_pct = (
+            signed_percent(risk.review_pct) if risk.review_pct is not None else "—"
+        )
+        multiplier_label = _format_number(ATR_MULTIPLIER, 1)
         return (
-            '<td data-label="Riesgo ATR" class="portfolio-risk-cell">'
-            f'<div class="portfolio-risk" title="{_esc(title)}">'
-            f"{review_status}"
-            f'<span>Revisión {_portfolio_cell(risk["review_eur"], " €")} '
-            f'({_format_number(risk["review_pct"])}%)</span>'
-            f'<span>TP {_portfolio_cell(risk["target_eur"], " €")} '
-            f'(+{_format_number(risk["target_pct"])}%)</span>'
-            f'<span>ATR {_format_number(risk["atr_pct"])}%</span>'
-            "</div></td>"
+            f'<button type="button" class="portfolio-risk-trigger'
+            f'{" " + status_icon if status_icon else ""}" '
+            f'aria-label="Ver niveles de riesgo de {_esc(position.asset.name)} '
+            f'({_esc(ticker)})" aria-haspopup="dialog" aria-controls="{_esc(popover_id)}" '
+            f'popovertarget="{_esc(popover_id)}">'
+            '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+            '<path d="M12 3 19 6v5c0 4.7-2.9 8-7 10-4.1-2-7-5.3-7-10V6l7-3Z"/>'
+            '<path d="m9 12 2 2 4-4"/></svg></button>'
+            f'<div id="{_esc(popover_id)}" popover="auto" '
+            'class="portfolio-risk-popover" role="dialog" tabindex="-1" '
+            f'aria-labelledby="{_esc(popover_id)}-title" '
+            f'data-risk-atr-pct="{_num_attr(risk.atr_pct)}" '
+            f'data-risk-secondary-level="{_num_attr(risk.review_eur)}">'
+            '<div class="portfolio-risk-heading">'
+            f'<h3 id="{_esc(popover_id)}-title">Zonas de alerta · {_esc(ticker)}</h3>'
+            f'{confidence_badge}</div>'
+            f'{no_data_note}'
+            '<dl class="portfolio-risk-levels">'
+            '<div class="portfolio-risk-level"><dt>Precio actual</dt>'
+            f'<dd data-risk-current-price>{_portfolio_cell(current_price, " €")}</dd></div>'
+            '<div class="portfolio-risk-level"><dt>Precio medio</dt>'
+            f'<dd>{_portfolio_cell(average_price, " €")}</dd></div>'
+            '</dl>'
+            '<div class="portfolio-risk-cards">'
+            '<article class="portfolio-risk-card portfolio-risk-card-review">'
+            '<h4>▼ Nivel de revisión</h4>'
+            f'<strong data-risk-primary-review>{primary_review_value}</strong>'
+            f'<span data-risk-primary-review-pct>{signed_percent(risk.primary_review_pct)}</span>'
+            '<p>Si cae aquí, revisa tu tesis antes de actuar.</p></article>'
+            '<article class="portfolio-risk-card portfolio-risk-card-target">'
+            '<h4>▲ Toma de beneficios</h4>'
+            f'<strong data-risk-primary-target>{primary_target_value}</strong>'
+            f'<span data-risk-primary-target-pct>{signed_percent(risk.primary_target_pct)}</span>'
+            f'<p>Ratio 1:{_format_number(risk.reward_risk, 0)} sobre el riesgo asumido.</p></article></div>'
+            f'<div class="portfolio-risk-secondary'
+            f'{" is-crossed" if secondary_crossed else ""}">'
+            f'<strong>Desde máximos de {risk.peak_window} sesiones:</strong> '
+            f'<span data-risk-secondary-level-text>{secondary_value}</span> '
+            f'(<span data-risk-secondary-pct>{secondary_pct}</span>)'
+            f'{maximum_below_note}</div>'
+            '<dl class="portfolio-risk-levels portfolio-risk-meta">'
+            f'<div class="portfolio-risk-level"><dt>Volatilidad (ATR {risk.atr_days}d)</dt>'
+            f'<dd data-risk-atr-value>{_portfolio_cell(risk.atr_pct, "%")}</dd></div>'
+            '<div class="portfolio-risk-level"><dt>Metodología</dt>'
+            f'<dd>{multiplier_label} × ATR({risk.atr_days})</dd></div>'
+            '</dl>'
+            '<details class="portfolio-risk-explanation">'
+            '<summary>¿Por qué estos niveles?</summary>'
+            f'<p>{_esc(explanation)}</p></details>'
+            '<p class="portfolio-risk-disclaimer">Niveles educativos, no órdenes '
+            'de compra/venta.</p></div>'
         )
 
     portfolio_rows = "".join(
         f'<tr data-ticker="{_esc(position.asset.ticker)}" '
         f'data-quantity="{_num_attr(position.asset.shares)}" '
-        f'data-investment="{_num_attr(position.asset.investment_eur)}">'
-        f'<th scope="row" data-label="Activo">{_esc(position.asset.name)}'
-        f'<span>{_esc(position.asset.ticker)}</span></th>'
+        f'data-investment="{_num_attr(position.asset.investment_eur)}" '
+        f'data-risk-atr-pct="{_num_attr(position.risk_zones.atr_pct if position.risk_zones else None)}" '
+        f'data-risk-secondary-level="{_num_attr(position.risk_zones.review_eur if position.risk_zones else None)}" '
+        f'data-risk-atr-multiplier="{ATR_MULTIPLIER}" '
+        f'data-risk-reward-ratio="{REWARD_RISK_RATIO}">'
+        f'<th scope="row" data-label="Activo"><div class="portfolio-asset-line">'
+        f'<span>{_esc(position.asset.name)}'
+        f'<span class="portfolio-asset-ticker">{_esc(position.asset.ticker)}</span></span>'
+        f'{portfolio_risk_popover(position)}</div></th>'
         f'<td data-label="Posición">{_format_number(position.asset.shares, 6)}</td>'
         f'<td data-label="Inversión base">'
         f"{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
         f'<td data-label="Precio actual"><span data-live-price>{_portfolio_cell(position.prices_eur.get("Hoy"), " €")}</span></td>'
         f'<td data-label="Valor actual" data-live-value>'
         f"{_portfolio_cell(position.current_value_eur, ' €')}</td>"
-        + portfolio_risk_cell(position)
         + "".join(
             _portfolio_value(position.returns_pct.get(period), "return").replace(
                 "<td",
@@ -5197,9 +5648,57 @@ def render_dashboard(
     .portfolio-table tbody th {{ font-weight: 650; }}
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
-    .portfolio-risk-cell {{ min-width: 155px; }}
-    .portfolio-risk {{ display: grid; gap: 3px; font-size: 10px; font-variant-numeric: tabular-nums; }}
-    .portfolio-risk strong {{ color: var(--red); text-align: right; }}
+    .portfolio-asset-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
+    .portfolio-asset-line > span {{ color: var(--text); font-size: 12px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }}
+    .portfolio-asset-ticker {{ color: var(--muted) !important; font-size: 10px !important; font-weight: 500 !important; }}
+    .portfolio-risk-trigger {{ display: inline-grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px;
+      border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--muted); cursor: pointer; }}
+    .portfolio-risk-trigger:hover {{ border-color: var(--blue); }}
+    .portfolio-risk-trigger:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+    .portfolio-risk-trigger svg {{ width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8;
+      stroke-linecap: round; stroke-linejoin: round; }}
+    .portfolio-risk-trigger.is-no-data {{ color: var(--muted); }}
+    .portfolio-risk-popover:popover-open {{ position: fixed; inset: auto; margin: 0; z-index: 20; }}
+    .portfolio-risk-popover {{ box-sizing: border-box; max-width: calc(100vw - 24px); max-height: min(70vh, 500px);
+      overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 12px;
+      background: var(--panel); color: var(--text); box-shadow: 0 12px 36px rgba(0, 0, 0, .45); }}
+    .portfolio-risk-heading {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }}
+    .portfolio-risk-popover h3 {{ margin: 0; font-size: 14px; }}
+    .portfolio-risk-confidence {{ flex: 0 0 auto; border: 1px solid currentColor; border-radius: 999px;
+      padding: 3px 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; }}
+    .portfolio-risk-confidence.confidence-high {{ color: var(--green); }}
+    .portfolio-risk-confidence.confidence-medium {{ color: var(--yellow); }}
+    .portfolio-risk-confidence.confidence-low {{ color: var(--muted); }}
+    .portfolio-risk-status {{ margin: 0 0 9px; color: var(--green); font-size: 12px; font-weight: 700; }}
+    .portfolio-risk-status.is-crossed, .portfolio-risk-state.is-crossed {{ color: var(--red); }}
+    .portfolio-risk-status.is-no-data, .portfolio-risk-state.is-no-data {{ color: var(--yellow); }}
+    .portfolio-risk-state {{ margin: 7px 0; font-size: 12px; }}
+    .portfolio-risk-levels {{ display: grid; gap: 6px; margin: 0; }}
+    .portfolio-risk-level {{ display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }}
+    .portfolio-risk-level dt {{ color: var(--muted); }}
+    .portfolio-risk-level dd {{ margin: 0; font-variant-numeric: tabular-nums; text-align: right; }}
+    .portfolio-risk-cards {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 11px 0; }}
+    .portfolio-risk-card {{ display: grid; align-content: start; gap: 5px; min-width: 0; padding: 10px;
+      border: 1px solid var(--line); border-radius: 9px; }}
+    .portfolio-risk-card h4 {{ margin: 0; font-size: 11px; }}
+    .portfolio-risk-card strong {{ font-size: 15px; font-variant-numeric: tabular-nums; }}
+    .portfolio-risk-card > span {{ font-size: 11px; font-variant-numeric: tabular-nums; }}
+    .portfolio-risk-card p {{ margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }}
+    .portfolio-risk-card-review {{ border-color: rgba(248, 113, 113, .55); background: rgba(127, 29, 29, .2); }}
+    .portfolio-risk-card-review h4, .portfolio-risk-card-review strong, .portfolio-risk-card-review > span {{ color: #fca5a5; }}
+    .portfolio-risk-card-target {{ border-color: rgba(74, 222, 128, .45); background: rgba(20, 83, 45, .2); }}
+    .portfolio-risk-card-target h4, .portfolio-risk-card-target strong, .portfolio-risk-card-target > span {{ color: #86efac; }}
+    .portfolio-risk-secondary {{ margin: 9px 0; padding: 8px 9px; border: 1px solid var(--line);
+      border-radius: 8px; color: var(--muted); font-size: 11px; line-height: 1.45; }}
+    .portfolio-risk-secondary.is-crossed {{ border-color: rgba(248, 113, 113, .55); background: rgba(127, 29, 29, .12); }}
+    .portfolio-risk-secondary strong {{ color: var(--text); }}
+    .portfolio-risk-secondary-state {{ margin: 5px 0 0; color: var(--red); }}
+    .portfolio-risk-secondary-state[hidden] {{ display: none; }}
+    .portfolio-risk-meta {{ border-top: 1px solid var(--line); padding-top: 9px; }}
+    .portfolio-risk-explanation {{ border-top: 1px solid var(--line); padding-top: 8px; }}
+    .portfolio-risk-explanation summary {{ cursor: pointer; color: var(--blue); font-size: 12px; }}
+    .portfolio-risk-explanation p {{ margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }}
+    .portfolio-risk-disclaimer {{ margin: 10px 0 0; color: var(--yellow); font-size: 11px; font-weight: 650; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
     .portfolio-activity-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin-top: 17px; }}
     .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; }}
@@ -5407,10 +5906,9 @@ def render_dashboard(
               <th scope="col">Inversión base</th>
               <th scope="col">Precio actual</th>
               <th scope="col">Valor actual</th>
-              <th scope="col">Riesgo ATR</th>
               <th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>
             </tr></thead>
-            <tbody>{portfolio_rows or '<tr><td colspan="7">No hay posiciones definidas.</td></tr>'}</tbody>
+            <tbody>{portfolio_rows or '<tr><td colspan="6">No hay posiciones definidas.</td></tr>'}</tbody>
           </table>
         </div>
         <p class="portfolio-note">Selecciona periodo y métrica para ver cierres históricos, rendimiento porcentual o ganancia MAX. Cierres históricos de Yahoo Finance; los tickers estadounidenses se convierten a EUR con el cambio USD/EUR de cada fecha.</p>
