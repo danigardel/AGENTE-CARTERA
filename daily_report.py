@@ -2898,6 +2898,7 @@ HEATMAP_NAME_OVERRIDES = {
     "meta platforms (a)": "Meta",
     "marvell technology": "Marvell",
     "msci emerging markets (acc)": "Emerging Markets",
+    "msci world information technology usd (acc)": "World IT",
     "msci world information technology": "World IT",
     "msci world information tech.": "World IT",
     "nasdaq 100 usd (acc)": "Nasdaq 100",
@@ -5647,10 +5648,10 @@ def render_dashboard(
     .portfolio-table th:first-child, .portfolio-table td:first-child {{ text-align: left; }}
     .portfolio-table tbody th {{ font-weight: 650; }}
     .portfolio-table [hidden] {{ display: none; }}
-    .portfolio-table tbody th span {{ display: block; color: var(--muted); font-size: 10px; font-weight: 500; }}
+    .portfolio-table tbody th > .portfolio-asset-line > span {{ display: block; }}
     .portfolio-asset-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
     .portfolio-asset-line > span {{ color: var(--text); font-size: 12px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }}
-    .portfolio-asset-ticker {{ color: var(--muted) !important; font-size: 10px !important; font-weight: 500 !important; }}
+    .portfolio-asset-ticker {{ display: block; color: var(--muted) !important; font-size: 10px !important; font-weight: 500 !important; }}
     .portfolio-risk-trigger {{ display: inline-grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px;
       border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--muted); cursor: pointer; }}
     .portfolio-risk-trigger:hover {{ border-color: var(--blue); }}
@@ -5661,9 +5662,11 @@ def render_dashboard(
     .portfolio-risk-popover:popover-open {{ position: fixed; inset: auto; margin: 0; z-index: 20; }}
     .portfolio-risk-popover {{ box-sizing: border-box; max-width: calc(100vw - 24px); max-height: min(70vh, 500px);
       overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 12px;
-      background: var(--panel); color: var(--text); box-shadow: 0 12px 36px rgba(0, 0, 0, .45); }}
+      background: var(--panel); color: var(--text); font-weight: 400;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, .45); }}
     .portfolio-risk-heading {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }}
-    .portfolio-risk-popover h3 {{ margin: 0; font-size: 14px; }}
+    .portfolio-risk-popover h3 {{ margin: 0; font-size: 14px; font-weight: 600; }}
+    .portfolio-risk-popover strong {{ font-weight: 500; }}
     .portfolio-risk-confidence {{ flex: 0 0 auto; border: 1px solid currentColor; border-radius: 999px;
       padding: 3px 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; }}
     .portfolio-risk-confidence.confidence-high {{ color: var(--green); }}
@@ -5680,7 +5683,7 @@ def render_dashboard(
     .portfolio-risk-cards {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 11px 0; }}
     .portfolio-risk-card {{ display: grid; align-content: start; gap: 5px; min-width: 0; padding: 10px;
       border: 1px solid var(--line); border-radius: 9px; }}
-    .portfolio-risk-card h4 {{ margin: 0; font-size: 11px; }}
+    .portfolio-risk-card h4 {{ margin: 0; font-size: 11px; font-weight: 600; }}
     .portfolio-risk-card strong {{ font-size: 15px; font-variant-numeric: tabular-nums; }}
     .portfolio-risk-card > span {{ font-size: 11px; font-variant-numeric: tabular-nums; }}
     .portfolio-risk-card p {{ margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }}
@@ -5698,7 +5701,7 @@ def render_dashboard(
     .portfolio-risk-explanation {{ border-top: 1px solid var(--line); padding-top: 8px; }}
     .portfolio-risk-explanation summary {{ cursor: pointer; color: var(--blue); font-size: 12px; }}
     .portfolio-risk-explanation p {{ margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }}
-    .portfolio-risk-disclaimer {{ margin: 10px 0 0; color: var(--yellow); font-size: 11px; font-weight: 650; }}
+    .portfolio-risk-disclaimer {{ margin: 10px 0 0; color: var(--yellow); font-size: 11px; font-weight: 500; }}
     .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
     .portfolio-activity-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin-top: 17px; }}
     .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; }}
@@ -5802,7 +5805,7 @@ def render_dashboard(
       .portfolio-table tbody th, .portfolio-table tbody td {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; border: 0; padding: 7px 3px; text-align: right; font-size: 11px; min-width: 0; overflow-wrap: anywhere; }}
       .portfolio-table tbody th[data-label="Activo"] {{ display: block; grid-column: 1 / -1; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }}
       .portfolio-table tbody td::before {{ content: attr(data-label); color: var(--muted); text-align: left; font-size: 10px; }}
-      .portfolio-table tbody th span {{ font-size: 9px; }} }}
+      .portfolio-asset-ticker {{ font-size: 9px !important; }} }}
     @media (max-width: 420px) {{
       .shell {{ padding: 20px 12px 32px; }}
       .summary-card, .analysis-panel {{ padding: 12px; }}

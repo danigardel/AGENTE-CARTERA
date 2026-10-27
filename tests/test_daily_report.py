@@ -1930,7 +1930,7 @@ class SentimentTests(unittest.TestCase):
     def test_portfolio_heatmap_shortens_world_information_technology(self, _download_mock):
         position = PortfolioPosition(
             asset=PortfolioAsset(
-                "MSCI World Information Technology",
+                "MSCI World Information Technology USD (Acc)",
                 "XDWT.DE",
                 1,
                 100,
@@ -1944,8 +1944,45 @@ class SentimentTests(unittest.TestCase):
         )
 
         charts = collect_chart_data([], [position])
+        html = render_dashboard([], portfolio=[position], chart_data=charts)
+        payload = json.loads(
+            html.split('id="dashboard-chart-data">', 1)[1].split("</script>", 1)[0]
+        )
 
         self.assertEqual(charts.portfolio[0]["name"], "World IT")
+        self.assertEqual(payload["portfolio"][0]["name"], "World IT")
+
+    def test_risk_popover_typography_and_secondary_level_layout_are_scoped(self):
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Example", "EX", 1, 100, "EUR"),
+            prices_eur={"Hoy": 100},
+            risk_zones=RiskZones(
+                status="ok",
+                atr_pct=2,
+                review_eur=95,
+                review_pct=-5,
+                target_eur=110,
+                target_pct=10,
+                atr_days=ATR_WINDOW,
+                atr_multiplier=ATR_MULTIPLIER,
+                peak_window=PEAK_WINDOW,
+                reward_risk=REWARD_RISK_RATIO,
+            ),
+        )
+        html = render_dashboard([], portfolio=[position])
+
+        self.assertIn("background: var(--panel); color: var(--text); font-weight: 400;", html)
+        self.assertIn(
+            ".portfolio-table tbody th > .portfolio-asset-line > span { display: block; }",
+            html,
+        )
+        self.assertNotIn(".portfolio-table tbody th span { display: block;", html)
+        self.assertIn(
+            '<strong>Desde máximos de 22 sesiones:</strong> '
+            '<span data-risk-secondary-level-text>95.00 €</span> '
+            '(<span data-risk-secondary-pct>-5.00%</span>)',
+            html,
+        )
 
     def test_heatmap_labels_are_clipped_and_mobile_layout_is_fluid(self):
         html = render_dashboard([])
