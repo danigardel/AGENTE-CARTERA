@@ -67,6 +67,8 @@ jobs:
       - name: Generate daily dashboard
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           INVESTOR_PROFILE: ${{ vars.INVESTOR_PROFILE }}
           GEMINI_CACHE_TIMESTAMP_BEFORE: ${{ steps.gemini-cache-before.outputs.timestamp }}
         run: |

@@ -55,6 +55,18 @@ publicada por GitHub Pages. Su build de Vite escribe en `public\`; la URL de los
 recursos es relativa para funcionar tanto en el dominio de proyecto de GitHub
 Pages como bajo una ruta. La salida generada no se versiona.
 
+### Agente interactivo en consola
+
+Ejecuta `python agente_interactivo.py` desde el repositorio para abrir el agente
+de cartera. Lee `GEMINI_API_KEY` del entorno o, si no está definida, las claves
+separadas por comas de `GEMINI_API_KEY.txt` (archivo local ignorado por Git).
+Al iniciar carga la actividad de cartera y la memoria del análisis, y actualiza
+precios y niveles ATR. `/cartera` muestra peso, P&L y nivel ATR; `/vivo` vuelve a
+descargar precios y niveles; `/radar` actualiza los titulares macro; `/salir`
+termina la sesión. Cualquier otra línea se envía a Gemini junto con el contexto
+actual y un historial acotado a 20 turnos. Las consultas de chat envían a Google
+el contexto de cartera cargado en memoria; no se envían automáticamente.
+
 ### Importar operaciones de cartera (opcional)
 
 Se puede sustituir la cartera fija por un CSV local de operaciones, sin iniciar sesión ni conectar con el broker:
@@ -81,6 +93,18 @@ mostraban en el dashboard; no contiene claves de API ni el extracto bancario
 original.
 
 Para activar el análisis IA, crea una o varias claves Gemini en Google AI Studio y guárdalas en un único secreto de repositorio **Settings → Secrets and variables → Actions → New repository secret → `GEMINI_API_KEY`**, separadas por comas y sin espacios obligatorios (por ejemplo `clave1,clave2,clave3`). Localmente, configura `GEMINI_API_KEY` con el mismo formato antes de ejecutar el informe. Si falta una clave o Gemini no responde, el informe se genera igualmente y muestra un aviso en la sección de análisis. El modelo predeterminado es `gemini-3.8-flash`; puede cambiarse con `GEMINI_MODEL`, y cuando el modelo elegido devuelve un error de modelo inexistente se prueba `gemini-3.7-flash`. El presupuesto de razonamiento está fijado en 2048 tokens. `INVESTOR_PROFILE` permite personalizar el perfil; este valor se envía a Gemini, así que no incluyas información sensible. En GitHub Actions, los ajustes opcionales se leen de **Actions variables**. Con respuestas válidas, el análisis se renueva en los hitos de las 00:00, 09:00, 12:00, 15:00, 18:00 y 21:00 en `Europe/Madrid`, no en cada generación del dashboard. La clave inicial rota de una consulta a la siguiente, y los fallos prueban secuencialmente el resto del pool; solo cuando todas fallan se publica el aviso hasta el próximo hito. Los feeds macro RSS son públicos y no requieren claves; las peticiones a Gemini siguen sujetas a cuotas y posibles costes del proyecto.
+
+Además, cada ejecución del workflow comprueba anomalías de cartera. Si una
+posición activa cruza su nivel secundario desde máximos o varía al menos un 4 %
+en el día, se fuerza un análisis aunque la caché siga dentro de su hito horario.
+Cada ticker activa como máximo un análisis de anomalía por fecha local; la
+lista se guarda en `gemini_cache.json`. Un aviso/fallo almacenado desactiva esos
+triggers hasta que se pueda volver a analizar. Para recibir alertas de análisis
+recién generado, configura los secretos opcionales `TELEGRAM_BOT_TOKEN` y
+`TELEGRAM_CHAT_ID` en **Settings → Secrets and variables → Actions**. Telegram
+solo recibe `telegram_summary` (máximo 60 palabras) cuando la señal no es HOLD,
+hay candidatas de venta o se detecta una anomalía; un análisis reutilizado de
+caché nunca genera una alerta.
 
 En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de despliegue. El workflow necesita los permisos de Pages y OIDC que declara en el YAML. Tras una ejecución correcta, el dashboard se publica como `index.html`.
 

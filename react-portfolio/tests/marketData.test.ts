@@ -15,7 +15,10 @@ const legacyRiskZones = {
   reward_risk: 2,
 };
 
-function marketData(riskZones: Record<string, unknown> | null) {
+function marketData(
+  riskZones: Record<string, unknown> | null,
+  analysis: Record<string, unknown> | null = null,
+) {
   return {
     schema_version: 1,
     generated_at: "2026-10-26T12:00:00+01:00",
@@ -76,7 +79,7 @@ function marketData(riskZones: Record<string, unknown> | null) {
         returns_pct: {},
       },
     },
-    analysis: null,
+    analysis,
     market_events: [],
     portfolio_activity: [],
     charts: {
@@ -90,6 +93,41 @@ function marketData(riskZones: Record<string, unknown> | null) {
 test("accepts legacy market data without risk zones and legacy risk-zone fields", () => {
   assert.equal(isMarketData(marketData(null)), true);
   assert.equal(isMarketData(marketData(legacyRiskZones)), true);
+});
+
+test("accepts optional action signals and summaries while preserving old analyses", () => {
+  const legacyAnalysis = {
+    portfolio_assessment: "Evaluación.",
+    diversification: "Diversificación.",
+    recommended_changes: "Mantener.",
+    top_buys: [],
+    external_ideas: [],
+    sell_candidates: [],
+    market_context: "Contexto.",
+    risks: [],
+    warning: null,
+    last_updated_utc: null,
+  };
+  assert.equal(isMarketData(marketData(null, legacyAnalysis)), true);
+  assert.equal(
+    isMarketData(
+      marketData(null, {
+        ...legacyAnalysis,
+        action_signal: "RISK_ALERT",
+        telegram_summary: "Revisar el soporte.",
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, {
+        ...legacyAnalysis,
+        action_signal: "SELL_NOW",
+      }),
+    ),
+    false,
+  );
 });
 
 test("accepts the new levels and confidence label in the crossed secondary state", () => {

@@ -41,6 +41,8 @@ from daily_report import (
     _market_session_series,
     _read_gemini_cache,
     _risk_no_data_reason,
+    _analysis_inputs,
+    _has_urgent_portfolio_trigger,
     _gemini_request_warning,
     analyze_portfolio,
     build_analysis_prompt,
@@ -57,6 +59,7 @@ from daily_report import (
     executive_summary,
     parse_external_ideas,
     post_gemini,
+    send_telegram_alert,
     fetch_portfolio,
     fetch_headlines,
     fetch_financial_news,
@@ -2987,6 +2990,244 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(analysis.top_buys[0]["ticker"], "EX")
         self.assertIsNone(analysis.warning)
         post_mock.assert_not_called()
+
+    def test_urgent_portfolio_trigger_requires_new_unalerted_anomaly(self):
+        today = datetime.now(TIMEZONE).date().isoformat()
+        crossed = PortfolioPosition(
+            asset=PortfolioAsset("Crossed", "CROSS", 1, 100, "EUR"),
+            risk_zones=RiskZones(
+                status="crossed",
+                atr_pct=None,
+                review_eur=None,
+                review_pct=None,
+                target_eur=None,
+                target_pct=None,
+                atr_days=ATR_WINDOW,
+                atr_multiplier=ATR_MULTIPLIER,
+                peak_window=PEAK_WINDOW,
+                reward_risk=REWARD_RISK_RATIO,
+            ),
+        )
+        volatile = PortfolioPosition(
+            asset=PortfolioAsset("Volatile", "VOL", 1, 100, "EUR"),
+            returns_pct={"1D": -4.0},
+            risk_zones=RiskZones(
+                status="ok",
+                atr_pct=1.0,
+                review_eur=95.0,
+                review_pct=-5.0,
+                target_eur=110.0,
+                target_pct=10.0,
+                atr_days=ATR_WINDOW,
+                atr_multiplier=ATR_MULTIPLIER,
+                peak_window=PEAK_WINDOW,
+                reward_risk=REWARD_RISK_RATIO,
+            ),
+        )
+        cache = {
+            "warning": None,
+            "alerted_tickers_date": today,
+            "alerted_tickers_today": [],
+        }
+
+        self.assertTrue(_has_urgent_portfolio_trigger([crossed], cache))
+        self.assertTrue(_has_urgent_portfolio_trigger([volatile], cache))
+        self.assertFalse(
+            _has_urgent_portfolio_trigger(
+                [crossed],
+                {**cache, "alerted_tickers_today": ["CROSS"]},
+            )
+        )
+        self.assertFalse(
+            _has_urgent_portfolio_trigger(
+                [crossed],
+                {**cache, "failure_warning": "fallo temporal"},
+            )
+        )
+
+    def test_analysis_inputs_add_risk_zones_when_available(self):
+        risk = RiskZones(
+            status="ok",
+            atr_pct=1.0,
+            review_eur=95.0,
+            review_pct=-5.0,
+            target_eur=110.0,
+            target_pct=10.0,
+            atr_days=ATR_WINDOW,
+            atr_multiplier=ATR_MULTIPLIER,
+            peak_window=PEAK_WINDOW,
+            reward_risk=REWARD_RISK_RATIO,
+        )
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Example", "EX", 1, 100, "EUR"),
+            risk_zones=risk,
+        )
+
+        payload = _analysis_inputs([], [position])
+
+        self.assertEqual(payload["portfolio"][0]["risk_zones"]["status"], "ok")
+        self.assertEqual(payload["portfolio"][0]["risk_zones"]["atr_pct"], 1.0)
+
+    @patch("daily_report.send_telegram_alert")
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_urgent_trigger_bypasses_fresh_cache_and_records_ticker(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+        telegram_mock,
+    ):
+        now = datetime(2026, 10, 6, 9, 5, tzinfo=TIMEZONE).astimezone(timezone.utc)
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Volatile", "VOL", 1, 100, "EUR"),
+            returns_pct={"1D": -4.0},
+            prices_eur={"Hoy": 100.0},
+        )
+        cached_data = {
+            "timestamp": datetime(2026, 10, 6, 9, 1, tzinfo=TIMEZONE).isoformat(),
+            "portfolio_assessment": "Caché reciente.",
+            "diversification": "Diversificación previa.",
+            "recommended_changes": "Mantener.",
+            "top_buys": [],
+            "external_ideas": [],
+            "sell_candidates": [],
+            "market_context": "Contexto anterior.",
+            "risks": [],
+            "warning": None,
+        }
+        result = {
+            "portfolio_assessment": "Análisis actualizado.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Revisar la volatilidad.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+
+            analysis = analyze_portfolio(
+                [],
+                [position],
+                api_key="urgent-test-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+            saved_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(analysis.portfolio_assessment, "Análisis actualizado.")
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertEqual(saved_cache["alerted_tickers_today"], ["VOL"])
+        self.assertEqual(saved_cache["alerted_tickers_date"], "2026-10-06")
+        telegram_mock.assert_called_once_with(analysis, True)
+
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_analysis_prompt_includes_valid_previous_analysis_memory(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+    ):
+        now = datetime(2026, 10, 6, 9, 5, tzinfo=TIMEZONE).astimezone(timezone.utc)
+        cached_data = {
+            "timestamp": datetime(2026, 10, 6, 8, 59, tzinfo=TIMEZONE).isoformat(),
+            "last_updated_utc": datetime(
+                2026, 10, 6, 6, 59, tzinfo=timezone.utc
+            ).isoformat(),
+            "portfolio_assessment": "La cartera estaba equilibrada.",
+            "recommended_changes": "Mantener DCA.",
+            "top_buys": [
+                {"ticker": "EX", "name": "Example", "reason": "Razón previa."}
+            ],
+            "sell_candidates": [],
+        }
+        result = {
+            "portfolio_assessment": "Evaluación actual.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="memory-test-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+
+        self.assertEqual(analysis.portfolio_assessment, "Evaluación actual.")
+        prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertIn('"previous_analysis_memory": {', prompt)
+        self.assertIn('"portfolio_assessment": "La cartera estaba equilibrada."', prompt)
+        self.assertIn('"recommended_changes": "Mantener DCA."', prompt)
+        self.assertIn('"ticker": "EX"', prompt)
+
+    @patch("daily_report.requests.post")
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_TOKEN": "test-bot-token", "TELEGRAM_CHAT_ID": "12345"},
+    )
+    def test_send_telegram_alert_posts_only_for_actionable_analysis(self, post_mock):
+        post_mock.return_value.raise_for_status.return_value = None
+        analysis = PortfolioAnalysis(
+            action_signal="RISK_ALERT",
+            telegram_summary="Revisar el soporte de la cartera.",
+        )
+
+        send_telegram_alert(analysis, triggered_by_anomaly=False)
+
+        post_mock.assert_called_once()
+        endpoint = post_mock.call_args.args[0]
+        self.assertIn("/bottest-bot-token/sendMessage", endpoint)
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"],
+            {
+                "chat_id": "12345",
+                "text": "Revisar el soporte de la cartera.",
+            },
+        )
+        post_mock.reset_mock()
+        send_telegram_alert(PortfolioAnalysis(), triggered_by_anomaly=False)
+        post_mock.assert_not_called()
+        long_summary = PortfolioAnalysis(
+            action_signal="WATCH",
+            telegram_summary="palabra " * 61,
+        )
+        send_telegram_alert(long_summary, triggered_by_anomaly=False)
+        self.assertEqual(len(post_mock.call_args.kwargs["json"]["text"].split()), 60)
+        post_mock.reset_mock()
+        post_mock.side_effect = requests.ConnectionError("offline")
+        with self.assertLogs(level="WARNING"):
+            send_telegram_alert(analysis, triggered_by_anomaly=False)
+        self.assertEqual(post_mock.call_count, 1)
 
     def test_gemini_cache_schedule_uses_local_midnight_and_evening_milestones(self):
         cached_data = {

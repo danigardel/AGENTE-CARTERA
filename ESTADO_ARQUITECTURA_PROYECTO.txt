@@ -1,15 +1,15 @@
 ESTADO Y ARQUITECTURA DEL PROYECTO
 
-Fecha del informe: 19 de octubre de 2026
+Fecha del informe: 29 de octubre de 2026
 Repositorio: danigardel/AGENTE-CARTERA
 Directorio de trabajo: C:\Users\danig\Desktop\agente
 Rama: main
-Último commit observado: 91001a9 - ajuste de etiquetas y navegación en los mapas de calor.
+Último commit publicado observado: bd92700 - mejora de lectura de zonas de riesgo y alias del mapa.
 
 
 1. PROPÓSITO GENERAL
 
-Este proyecto genera un radar bursátil diario como página web estática. Combina cotizaciones públicas, titulares, indicadores de sentimiento y análisis de una cartera configurada por el usuario. El resultado se puede consultar localmente o publicar en GitHub Pages mediante GitHub Actions.
+Este proyecto genera un radar bursátil como página web estática y ofrece dos superficies de agente: un análisis de cartera programado/reactivo y un agente interactivo en consola. Combina cotizaciones públicas, titulares, indicadores de sentimiento y análisis de una cartera configurada por el usuario. El dashboard se puede consultar localmente o publicar en GitHub Pages mediante GitHub Actions.
 
 La página reúne:
 
@@ -18,6 +18,8 @@ La página reúne:
 - Mapas de calor, minigráficos intradía y curvas de rendimiento comparativas.
 - Un screener que filtra y ordena los datos ya cargados en la página.
 - Un análisis opcional de cartera generado por Gemini.
+- Alertas de anomalías intradía con niveles ATR y variación diaria.
+- Una consola interactiva Gemini con contexto y memoria de cartera.
 - Una agenda de eventos corporativos y un radar de noticias macroeconómicas.
 
 El dashboard se construye como HTML estático: no tiene backend propio ni una base de datos de mercado. Usa fuentes públicas; no inicia sesión en Trade Republic ni reutiliza sus tokens, sesiones o identificadores de cuenta, y no depende de endpoints privados del broker.
@@ -49,6 +51,8 @@ Configuración y credenciales
 
 - Gemini es opcional. La variable GEMINI_API_KEY puede contener un pool de claves separados por comas; GEMINI_MODEL permite elegir el modelo y INVESTOR_PROFILE personalizar el perfil enviado al análisis.
 - El flujo de Gemini usa gemini-3.8-flash y conserva gemini-3.7-flash como fallback.
+- La consola puede leer `GEMINI_API_KEY.txt` si `GEMINI_API_KEY` no está definida; el archivo está excluido de Git.
+- `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` son secretos opcionales y no se escriben en la caché ni en el dashboard.
 - REPORT_TIMEZONE permite cambiar la zona horaria y PORTFOLIO_TRANSACTIONS_CSV indicar un CSV de operaciones.
 - .gitignore excluye cachés, bytecode y el archivo local de credenciales. No copiar valores de claves ni archivos de credenciales al contexto del siguiente agente; en CI deben permanecer como GitHub Secrets.
 - Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.
@@ -66,8 +70,11 @@ Flujo de ejecución de alto nivel:
 2. collect_reports() ejecuta en paralelo la descarga de titulares y cotizaciones; luego traduce los titulares secuencialmente con una pausa de 0,2 s entre peticiones reales.
 3. fetch_portfolio() obtiene precios actuales e históricos, calcula cierres y rendimientos por periodo y los valores de la cartera.
 4. analyze_portfolio() reúne contexto, consulta Gemini si está configurado, valida su respuesta y usa caché y rotación del pool de claves.
-5. collect_chart_data() reúne las series intradía e históricas para heatmaps, sparklines y gráficos de cartera y referencias.
-6. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
+5. Antes de reutilizar la caché, analiza triggers urgentes nuevos (soporte ATR cruzado o variación diaria >= 4 %) y fuerza una consulta solo una vez por ticker y fecha local. La memoria del análisis previo se añade al prompt; Telegram solo recibe alertas de un análisis recién generado y accionable.
+6. collect_chart_data() reúne las series intradía e históricas para heatmaps, sparklines y gráficos de cartera y referencias.
+7. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
+
+`agente_interactivo.py` carga claves desde el entorno o el archivo local ignorado `GEMINI_API_KEY.txt`, usa la actividad/cache existentes y permite consultar la cartera, refrescar precios ATR, actualizar el radar y conversar con Gemini conservando hasta 20 turnos.
 
 Responsabilidades representativas dentro del archivo:
 
@@ -75,18 +82,22 @@ Responsabilidades representativas dentro del archivo:
 - fetch_headlines(), fetch_financial_news(), collect_market_radar() y translate_headline(): noticias, RSS y traducción.
 - fetch_quote(), fetch_portfolio() y extra_quote_fields(): cotizaciones, cartera y métricas financieras.
 - load_portfolio_transactions(), portfolio_assets_from_transactions() y portfolio_history_from_transactions(): importación y reconstrucción estimada de operaciones CSV.
-- build_analysis_prompt(), post_gemini(), analyze_portfolio() y funciones auxiliares: generación IA, fallback, rotación y caché.
+- build_analysis_prompt(), post_gemini(), analyze_portfolio() y funciones auxiliares: generación IA, memoria temporal validada, triggers intradía, fallback, rotación, caché y Telegram.
 - collect_chart_data() y _market_session_series(): preparación de series intradía e históricas.
 - SORT_SCRIPT, PORTFOLIO_SCRIPT y CHARTS_SCRIPT: filtros del screener, controles de la cartera, heatmaps y gráficos D3 del cliente.
 - render_dashboard(): serialización segura de datos e integración del HTML, CSS y JavaScript.
 
+agente_interactivo.py
+
+Agente de consola basado en `cmd.Cmd`, separado del generador del dashboard. Comparte las funciones de cartera, radar, parseo de claves, rotación y fallback de Gemini de `daily_report.py`. No reemplaza ni modifica la publicación estática.
+
 tests\test_daily_report.py
 
-Aproximadamente 2.137 líneas con pruebas unittest para noticias, cartera, Gemini, gráficas, generación HTML, screener y comportamiento de cotizaciones stale. En la última validación de cambios se ejecutaron 64 pruebas correctamente.
+Suite unittest para noticias, cartera, Gemini, caché, triggers, Telegram, gráficas, generación HTML, screener y comportamiento de cotizaciones stale.
 
 README.md
 
-Documenta ejecución, cartera CSV, automatización, fuentes y límites funcionales. Contiene algunas descripciones que no reflejan del todo los cambios visuales más recientes; ver “Pendientes y siguiente hito”.
+Documenta ejecución del dashboard y de la consola, triggers intradía, alertas, fuentes y límites funcionales.
 
 requirements.txt
 
@@ -94,7 +105,7 @@ Lista las dependencias Python directas. No se observa un lockfile en la raíz in
 
 .github\workflows\daily_report.yml
 
-Instala dependencias, restaura y guarda exclusivamente gemini_cache.json, ejecuta el generador y publica public\index.html mediante GitHub Pages. Tiene ejecución programada cada cinco minutos y permite ejecución manual.
+Instala dependencias, restaura y guarda exclusivamente gemini_cache.json, ejecuta el generador y publica public\index.html mediante GitHub Pages. Tiene ejecución programada cada cinco minutos y permite ejecución manual. El step de generación mapea los secretos opcionales de Telegram.
 
 HTML generado
 
@@ -123,6 +134,10 @@ Noticias y análisis IA
 - Gemini recibe información de empresas, cartera y noticias disponibles. No se usa Google Search Grounding.
 - La rotación de claves, caché positiva/negativa y fallback de modelo deben conservarse: son funcionalidades centrales y existen pruebas de regresión.
 - La rotación de varias claves del mismo proyecto no aumenta la cuota del proyecto.
+- La memoria temporal del prompt solo usa campos estructurados y validados de la caché anterior; no desplaza los datos actuales.
+- Los triggers ignoran posiciones ya alertadas ese día y no se ejecutan mientras la caché contiene un warning/failure_warning. Los tickers se guardan junto a la fecha local en la misma caché de Gemini.
+- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT; los valores omitidos o no válidos se resuelven de forma segura a HOLD. Telegram se intenta solo para análisis recién generado, nunca para un resultado reutilizado.
+- `market_data.json` expone `action_signal` y `telegram_summary` de forma aditiva; el validador React acepta ambos campos opcionales y sigue aceptando análisis antiguos.
 
 Interfaz y frescura de mercado
 
@@ -146,8 +161,8 @@ Límites de confianza
 5. ESTADO ACTUAL
 
 - El último trabajo de interfaz implementó etiquetas de heatmap forzadas para activos actuales, identificadores estables en las tarjetas y navegación desde las celdas del mapa.
-- El worktree aparecía limpio en la inspección; la rama actual es main.
-- El último conjunto de validación reportó 64 pruebas OK, compilación de Python con SyntaxWarning tratado como error, y git diff --check sin errores.
+- Git se inspeccionó antes de editar: rama `main`, commit publicado `bd92700`; `portfolio_analysis.json` estaba sin seguimiento y se conserva fuera de alcance.
+- Se añadieron `action_signal`, resumen Telegram, memoria del análisis previo, triggers urgentes limitados por ticker/fecha local y el agente interactivo `agente_interactivo.py`.
 - La comprobación manual en navegador a 390 px confirmó:
   - Sin desbordamiento horizontal.
   - Las celdas de instrumentos actuales muestran texto.
@@ -156,18 +171,13 @@ Límites de confianza
 
 “Sin errores” se refiere a esas comprobaciones; no implica que todas las fuentes externas estén siempre disponibles ni que las cotizaciones sean tiempo real.
 
-Desajuste documental detectado
-
-El README todavía contiene descripciones anteriores que discrepan del comportamiento actual: menciona que las etiquetas se omiten cuando no caben y que inversión base/valor actual solo aparecen en MAX. La implementación reciente mantiene visibles los cinco campos base de cartera y recorta las etiquetas del heatmap en vez de ocultarlas. También debe comprobarse la descripción del uso de sparklines en la tabla móvil. Conviene corregir el README para evitar que el agente siguiente implemente contra documentación obsoleta.
-
-
 6. PRÓXIMO OBJETIVO O HITO RECOMENDADO
 
-No hay un siguiente cambio funcional explícitamente acordado en el contexto. El hito recomendado para la migración es:
+Antes de habilitar alertas reales en GitHub, configurar `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` como secretos y comprobar el flujo con respuestas mockeadas. Para la consola:
 
-1. Sincronizar el README con el comportamiento actual, especialmente etiquetas de heatmap, tarjetas stale, campos siempre visibles de cartera y navegación con foco.
-2. Añadir o consolidar pruebas de integración de navegador para clic/teclado en heatmap, visibilidad stale y ancho móvil, si se desea que esos comportamientos queden cubiertos automáticamente.
-3. Después, elegir una nueva mejora funcional con el usuario; no hay que asumir una conexión de datos en vivo ni una integración con Trade Republic.
+1. Ejecutar `python agente_interactivo.py` localmente con las claves almacenadas fuera de Git.
+2. Comprobar `/cartera`, `/vivo` y `/radar` con fuentes disponibles.
+3. Seguir conservando el dashboard original como la salida publicada; React continúa siendo solo un prototipo opcional.
 
 
 INICIO RÁPIDO PARA EL SIGUIENTE AGENTE

@@ -144,6 +144,8 @@ export interface MarketData {
     risks: string[];
     warning: string | null;
     last_updated_utc: string | null;
+    action_signal?: "HOLD" | "WATCH" | "REBALANCE" | "RISK_ALERT";
+    telegram_summary?: string;
   } | null;
   market_events: {
     event_date: string;
@@ -177,6 +179,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
+}
+
+function isActionSignal(
+  value: unknown,
+): value is "HOLD" | "WATCH" | "REBALANCE" | "RISK_ALERT" {
+  return (
+    value === "HOLD" ||
+    value === "WATCH" ||
+    value === "REBALANCE" ||
+    value === "RISK_ALERT"
+  );
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -521,7 +534,11 @@ export function isMarketData(value: unknown): value is MarketData {
         Array.isArray(analysis.risks) &&
         analysis.risks.every((risk) => typeof risk === "string") &&
         isNullableString(analysis.warning) &&
-        isNullableString(analysis.last_updated_utc))) &&
+        isNullableString(analysis.last_updated_utc) &&
+        (analysis.action_signal === undefined ||
+          isActionSignal(analysis.action_signal)) &&
+        (analysis.telegram_summary === undefined ||
+          typeof analysis.telegram_summary === "string"))) &&
     Array.isArray(value.market_events) &&
     value.market_events.every(isMarketEvent) &&
     Array.isArray(value.portfolio_activity) &&
