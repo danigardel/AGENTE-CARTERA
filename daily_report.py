@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -38,16 +39,23 @@ GEMINI_CACHE_FILE = Path("gemini_cache.json")
 PORTFOLIO_ACTIVITY_FILE = Path("portfolio_activity.json")
 YAHOO_FINANCE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 MACRO_FEEDS = (
-    ("Yahoo Finance", "https://finance.yahoo.com/rss/topstories"),
+    ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+    (
+        "Yahoo Finance Markets",
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
+    ),
     ("CNBC Top News", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+    ("CNBC Markets", "https://www.cnbc.com/id/15839135/device/rss/rss.html"),
+    ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
+    ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
     ("WSJ Markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
     ("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss"),
     ("Investing.com España", "https://es.investing.com/rss/news.rss"),
 )
 TARGET_HOURS = (0, 9, 12, 15, 18, 21)
-MAX_HEADLINES = 4
-MAX_GEMINI_NEWS_ITEMS = 48
-MAX_MARKET_RADAR_ITEMS = 250
+MAX_HEADLINES = 8
+MAX_GEMINI_NEWS_ITEMS = 200
+MAX_MARKET_RADAR_ITEMS = 400
 MAX_WORKERS = 8
 PORTFOLIO_PERIODS = (("1D", 1), ("1W", 7), ("1M", 30), ("6M", 180), ("1Y", 365))
 ATR_WINDOW = 14
@@ -656,7 +664,20 @@ def collect_market_radar(
                 )
 
     items.sort(key=lambda item: item.published, reverse=True)
-    return items[:MAX_MARKET_RADAR_ITEMS]
+    unique_items: list[GlobalMarketNews] = []
+    seen_titles: set[str] = set()
+    for item in items:
+        normalized_title = unicodedata.normalize("NFKC", item.title).casefold()
+        normalized_title = " ".join(
+            re.sub(r"[^\w]+", " ", normalized_title, flags=re.UNICODE).split()
+        )
+        if not normalized_title or normalized_title in seen_titles:
+            continue
+        seen_titles.add(normalized_title)
+        unique_items.append(item)
+        if len(unique_items) == MAX_MARKET_RADAR_ITEMS:
+            break
+    return unique_items
 
 
 def fetch_quote(company: Company) -> Quote:
@@ -1667,7 +1688,7 @@ def _analysis_inputs(
                         "published": item.published.isoformat(),
                         "sentiment": round(item.sentiment, 2),
                     }
-                    for item in report.headlines[:3]
+                    for item in report.headlines[:MAX_HEADLINES]
                 ]
                 if report
                 else [],
@@ -1705,7 +1726,7 @@ def _analysis_inputs(
                         "published": item.published.isoformat(),
                         "sentiment": round(item.sentiment, 2),
                     }
-                    for item in report.headlines[:3]
+                    for item in report.headlines[:MAX_HEADLINES]
                 ],
             }
         )

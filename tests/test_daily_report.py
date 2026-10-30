@@ -25,6 +25,8 @@ from daily_report import (
     GlobalMarketNews,
     MACRO_FEEDS,
     MAX_MARKET_RADAR_ITEMS,
+    MAX_HEADLINES,
+    MAX_GEMINI_NEWS_ITEMS,
     MarketEvent,
     PortfolioAnalysis,
     PortfolioActivity,
@@ -52,6 +54,7 @@ from daily_report import (
     classify_sentiment,
     collect_market_events,
     collect_market_radar,
+    collect_financial_news,
     collect_chart_data,
     calculate_risk_zones,
     extra_quote_fields,
@@ -1589,7 +1592,26 @@ class SentimentTests(unittest.TestCase):
 
     def test_macro_feeds_include_bloomberg_and_investing_spain(self):
         self.assertIn(
-            ("Yahoo Finance", "https://finance.yahoo.com/rss/topstories"),
+            ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+            MACRO_FEEDS,
+        )
+        self.assertIn(
+            (
+                "Yahoo Finance Markets",
+                "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
+            ),
+            MACRO_FEEDS,
+        )
+        self.assertIn(
+            ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
+            MACRO_FEEDS,
+        )
+        self.assertIn(
+            ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
+            MACRO_FEEDS,
+        )
+        self.assertIn(
+            ("CNBC Markets", "https://www.cnbc.com/id/15839135/device/rss/rss.html"),
             MACRO_FEEDS,
         )
         self.assertIn(
@@ -1607,7 +1629,7 @@ class SentimentTests(unittest.TestCase):
         fetch_mock.side_effect = [
             [
                 GlobalMarketNews(
-                    title=f"Headline {index}",
+                    title=f"{source} Headline {index}",
                     source=source,
                     published=reference - timedelta(minutes=index),
                     url=f"https://news.example/{index}",
@@ -1620,10 +1642,106 @@ class SentimentTests(unittest.TestCase):
         news = collect_market_radar(reference)
 
         self.assertEqual(len(news), MAX_MARKET_RADAR_ITEMS)
-        self.assertEqual(len(news), 250)
+        self.assertEqual(len(news), 400)
         self.assertEqual(news[0].published, reference)
-        self.assertEqual(news[-1].published, reference - timedelta(minutes=49))
+        self.assertEqual(
+            news[-1].published,
+            reference
+            - timedelta(minutes=(MAX_MARKET_RADAR_ITEMS - 1) // len(MACRO_FEEDS)),
+        )
         self.assertEqual(fetch_mock.call_count, len(MACRO_FEEDS))
+
+    @patch("daily_report._fetch_macro_feed")
+    def test_collect_market_radar_deduplicates_normalized_titles(self, fetch_mock):
+        reference = datetime(2026, 10, 11, 12, 0, tzinfo=TIMEZONE)
+        feed_patch = patch(
+            "daily_report.MACRO_FEEDS",
+            (
+                ("Feed A", "https://news.example/a"),
+                ("Feed B", "https://news.example/b"),
+                ("Feed C", "https://news.example/c"),
+            ),
+        )
+        feed_patch.start()
+        self.addCleanup(feed_patch.stop)
+        fetch_mock.side_effect = [
+            [
+                GlobalMarketNews(
+                    title="Fed holds rates steady!",
+                    source="Feed A",
+                    published=reference,
+                    url="https://news.example/a/1",
+                )
+            ],
+            [
+                GlobalMarketNews(
+                    title=" fed   HOLDS rates steady ",
+                    source="Feed B",
+                    published=reference - timedelta(minutes=1),
+                    url="https://news.example/b/1",
+                )
+            ],
+            [
+                GlobalMarketNews(
+                    title="Markets rise after earnings",
+                    source="Feed C",
+                    published=reference - timedelta(minutes=2),
+                    url="https://news.example/c/1",
+                )
+            ],
+        ]
+
+        news = collect_market_radar(reference)
+
+        self.assertEqual(
+            [item.title for item in news],
+            ["Fed holds rates steady!", "Markets rise after earnings"],
+        )
+        self.assertEqual(fetch_mock.call_count, 3)
+
+    def test_analysis_inputs_include_up_to_max_headlines(self):
+        published = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+        report = StockReport(
+            Company("Example", "EX"),
+            headlines=[
+                Headline(
+                    title=f"Headline {index}",
+                    url=f"https://news.example/{index}",
+                    source="Example News",
+                    published=published,
+                    sentiment=0.1,
+                )
+                for index in range(MAX_HEADLINES + 2)
+            ],
+        )
+
+        inputs = _analysis_inputs([report], [])
+
+        self.assertEqual(len(inputs["watchlist"][0]["headlines"]), MAX_HEADLINES)
+
+    @patch("daily_report.fetch_financial_news")
+    def test_collect_financial_news_caps_items_at_the_gemini_limit(self, fetch_mock):
+        companies = tuple(
+            Company(f"Company {index}", f"T{index}")
+            for index in range(30)
+        )
+        published = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+        fetch_mock.side_effect = lambda company, _report_date: [
+            FinancialNewsItem(
+                ticker=company.ticker or "",
+                company=company.name,
+                title=f"{company.ticker} headline {headline_index}",
+                summary="Summary",
+                url=f"https://news.example/{company.ticker}/{headline_index}",
+                published=published,
+            )
+            for headline_index in range(MAX_HEADLINES)
+        ]
+
+        news = collect_financial_news(companies, published.date())
+
+        self.assertEqual(len(news), MAX_GEMINI_NEWS_ITEMS)
+        self.assertEqual(fetch_mock.call_count, len(companies))
 
     @patch(
         "daily_report._fetch_macro_feed",
