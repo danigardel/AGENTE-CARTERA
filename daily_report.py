@@ -1,4 +1,4 @@
-    from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -2529,10 +2529,6 @@ def _write_gemini_failure_cache(
 def _limit_words(text: str, max_words: int = 60) -> str:
     return " ".join(text.split()[:max_words])
 
-# TEMPORAL PARA TESTING
-analysis.action_signal = "RISK_ALERT"
-analysis.telegram_summary = "Test de integración: El agente cuantitativo está operativo y conectado a Telegram."
-send_telegram_alert(analysis, triggered_by_anomaly=True)
 
 def send_telegram_alert(
     analysis: PortfolioAnalysis,
