@@ -1614,36 +1614,27 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(news[0].summary, "Global markets gain after results.")
 
     def test_macro_feeds_include_bloomberg_and_investing_spain(self):
-        self.assertIn(
-            ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+        self.assertEqual(
             MACRO_FEEDS,
-        )
-        self.assertIn(
             (
-                "Yahoo Finance Markets",
-                "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
+                (
+                    "Yahoo Finance Markets",
+                    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC,%5EIXIC,%5EDJI&region=US&lang=en-US",
+                ),
+                (
+                    "CNBC Top News",
+                    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+                ),
+                (
+                    "CNBC Finance",
+                    "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+                ),
+                ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
+                ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
+                ("WSJ Markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
+                ("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss"),
+                ("Investing.com España", "https://es.investing.com/rss/news.rss"),
             ),
-            MACRO_FEEDS,
-        )
-        self.assertIn(
-            ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
-            MACRO_FEEDS,
-        )
-        self.assertIn(
-            ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
-            MACRO_FEEDS,
-        )
-        self.assertIn(
-            ("CNBC Markets", "https://www.cnbc.com/id/15839135/device/rss/rss.html"),
-            MACRO_FEEDS,
-        )
-        self.assertIn(
-            ("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss"),
-            MACRO_FEEDS,
-        )
-        self.assertIn(
-            ("Investing.com España", "https://es.investing.com/rss/news.rss"),
-            MACRO_FEEDS,
         )
 
     @patch("daily_report._fetch_macro_feed")

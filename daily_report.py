@@ -83,13 +83,12 @@ GEMINI_FLASH_LITE_MODEL = os.getenv(
 PORTFOLIO_ACTIVITY_FILE = Path("portfolio_activity.json")
 YAHOO_FINANCE_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 MACRO_FEEDS = (
-    ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
     (
         "Yahoo Finance Markets",
-        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC,%5EIXIC,%5EDJI&region=US&lang=en-US",
     ),
     ("CNBC Top News", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
-    ("CNBC Markets", "https://www.cnbc.com/id/15839135/device/rss/rss.html"),
+    ("CNBC Finance", "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
     ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
     ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
     ("WSJ Markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
