@@ -173,6 +173,11 @@ function WatchlistTable({ items }: { items: WatchlistItem[] }) {
 
 function AnalysisSection({ marketData }: { marketData: MarketData }) {
   const analysis = marketData.analysis;
+  const isDashboardRefreshNotice =
+    analysis?.is_stale === true &&
+    analysis.warning?.endsWith(
+      "Esta generación del dashboard no ejecutó Gemini.",
+    ) === true;
   return (
     <section className="analysis-grid" aria-labelledby="analysis-title">
       <div className="dashboard-panel analysis-main">
@@ -191,7 +196,7 @@ function AnalysisSection({ marketData }: { marketData: MarketData }) {
               </small>
             )}
           </div>
-          {analysis?.is_stale && (
+          {analysis?.is_stale && !isDashboardRefreshNotice && (
             <span className="analysis-stale-badge" role="status">
               Análisis desactualizado
             </span>
@@ -199,7 +204,16 @@ function AnalysisSection({ marketData }: { marketData: MarketData }) {
           <span className="ai-badge">IA · orientativo</span>
         </div>
         {analysis?.warning && (
-          <p className="analysis-warning" role="status">{analysis.warning}</p>
+          <p
+            className={
+              isDashboardRefreshNotice
+                ? "analysis-stale-note"
+                : "analysis-warning"
+            }
+            role="status"
+          >
+            {analysis.warning}
+          </p>
         )}
         {analysis ? (
           <div className="analysis-copy">

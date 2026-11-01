@@ -46,6 +46,7 @@ from ai_providers import (
 
 
 TIMEZONE = ZoneInfo(os.getenv("REPORT_TIMEZONE", "Europe/Madrid"))
+DASHBOARD_REFRESH_WARNING = "Esta generación del dashboard no ejecutó Gemini."
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 GEMINI_CACHE_FILE = Path("gemini_cache.json")
@@ -5518,6 +5519,22 @@ def _analysis_section(
         risks_html = "".join(
             f"<li>{_analysis_paragraph(risk)}</li>" for risk in analysis.risks
         ) or "<li>No se señalaron riesgos adicionales.</li>"
+        warning_html = ""
+        if analysis.warning:
+            is_dashboard_refresh_notice = (
+                analysis.is_stale
+                and analysis.warning.endswith(DASHBOARD_REFRESH_WARNING)
+            )
+            warning_class = (
+                "analysis-stale-note"
+                if is_dashboard_refresh_notice
+                else "analysis-warning"
+            )
+            warning_tag = "p" if is_dashboard_refresh_notice else "div"
+            warning_html = (
+                f'<{warning_tag} class="{warning_class}" role="status">'
+                f"{_esc(analysis.warning)}</{warning_tag}>"
+            )
         position_items = "".join(
             "<article>"
             f"<h4>{_esc(item['ticker'])} · {_esc(item['name'])} "
@@ -5532,12 +5549,7 @@ def _analysis_section(
             else ""
         )
         content = (
-            (
-                '<div class="analysis-warning" role="status">'
-                f"{_esc(analysis.warning)}</div>"
-                if analysis.warning
-                else ""
-            )
+            warning_html
             + '<div class="analysis-grid">'
             f'<article><h3>Evaluación de la cartera</h3><p>{_analysis_paragraph(analysis.portfolio_assessment)}</p></article>'
             f'<article><h3>Diversificación</h3><p>{_analysis_paragraph(analysis.diversification)}</p></article>'
@@ -5619,7 +5631,7 @@ def _last_good_analysis_for_dashboard(
         )
     return _stale_analysis_from_cache(
         {"last_good_analysis": last_good},
-        "Esta generación del dashboard no ejecutó Gemini.",
+        DASHBOARD_REFRESH_WARNING,
     )
 
 
@@ -7353,6 +7365,7 @@ def render_dashboard(
     .portfolio-history-card {{ margin-top: 12px; }}
     .analysis-panel {{ min-width: 0; border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; overflow-wrap: anywhere; }}
     .analysis-warning {{ border: 1px solid #fb923c66; border-radius: 10px; background: #fb923c12; color: #fdba74; padding: 12px; }}
+    .analysis-stale-note {{ margin: 0 0 12px; color: var(--muted); font-size: 12px; }}
     .analysis-provider {{ display: block; color: var(--muted); font-size: 11px; }}
     .analysis-narrative {{ margin-top: 16px; }}
     .analysis-unavailable {{ border-left: 2px solid var(--muted); padding-left: 10px; }}

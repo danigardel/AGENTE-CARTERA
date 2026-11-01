@@ -410,6 +410,12 @@ select {
   color: #e6bf71;
 }
 
+.analysis-stale-note {
+  margin: 0 0 12px;
+  color: #9cabb7;
+  font-size: 11px;
+}
+
 .analysis-stale-badge {
   border: 1px solid #d5a84f66;
   border-radius: 999px;

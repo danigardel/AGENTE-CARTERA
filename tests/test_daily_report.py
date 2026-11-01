@@ -41,6 +41,7 @@ from daily_report import (
     RiskZones,
     StockReport,
     TIMEZONE,
+    _last_good_analysis_for_dashboard,
     _model_pool_allows_fallback,
     _market_session_series,
     _read_gemini_cache,
@@ -3314,6 +3315,41 @@ class SentimentTests(unittest.TestCase):
         rendered = _analysis_section(stale)
         self.assertIn("Evaluación anterior.", rendered)
         self.assertIn("Análisis desactualizado", rendered)
+        self.assertIn('class="analysis-warning"', rendered)
+
+    def test_dashboard_stale_notice_is_plain_text_when_cached_analysis_is_rendered(self):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        successful = PortfolioAnalysis(
+            portfolio_assessment="Evaluación anterior.",
+            diversification="Diversificación anterior.",
+            recommended_changes="Mantener.",
+            market_context="Contexto anterior.",
+            last_updated_utc=now.isoformat(),
+            provider_used="gemini",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            _write_gemini_cache(cache_path, successful, now, "fingerprint", 1)
+            stale = _last_good_analysis_for_dashboard(cache_path)
+
+        self.assertIsNotNone(stale)
+        rendered = _analysis_section(stale)
+        self.assertIn('class="analysis-stale-note"', rendered)
+        self.assertNotIn('class="analysis-warning"', rendered)
+
+    def test_analysis_failure_without_narrative_keeps_highlighted_warning(self):
+        analysis = PortfolioAnalysis(
+            warning="Narrativa IA no disponible: Gemini no respondió."
+        )
+
+        rendered = _analysis_section(analysis)
+
+        self.assertIn('class="analysis-warning"', rendered)
+        self.assertIn("Narrativa IA no disponible", rendered)
+        self.assertIn(
+            "Narrativa IA no disponible; mostrando datos verificados.",
+            rendered,
+        )
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_returns_fresh_cache_without_calling_gemini(self, post_mock):
