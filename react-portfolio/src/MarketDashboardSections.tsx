@@ -178,13 +178,24 @@ function AnalysisSection({ marketData }: { marketData: MarketData }) {
       <div className="dashboard-panel analysis-main">
         <div className="dashboard-section-heading">
           <div>
-            <h2 id="analysis-title">Análisis de Gemini</h2>
+            <h2 id="analysis-title">Análisis de cartera</h2>
             <p>
               {analysis?.last_updated_utc
                 ? `Actualizado ${new Date(analysis.last_updated_utc).toLocaleString("es-ES")}`
                 : "Análisis generado por el job de Python"}
             </p>
+            {(analysis?.provider_used || analysis?.model_used) && (
+              <small className="analysis-provider">
+                {analysis.provider_used ?? "Proveedor IA"}
+                {analysis.model_used ? ` · ${analysis.model_used}` : ""}
+              </small>
+            )}
           </div>
+          {analysis?.is_stale && (
+            <span className="analysis-stale-badge" role="status">
+              Análisis desactualizado
+            </span>
+          )}
           <span className="ai-badge">IA · orientativo</span>
         </div>
         {analysis?.warning && (
@@ -239,6 +250,38 @@ function AnalysisSection({ marketData }: { marketData: MarketData }) {
           <p className="muted-copy">Sin ideas disponibles.</p>
         )}
       </div>
+    </section>
+  );
+}
+
+function AlertsToday({
+  alerts,
+}: {
+  alerts: NonNullable<MarketData["alerts_today"]>;
+}) {
+  if (alerts.length === 0) return null;
+  return (
+    <section className="dashboard-panel alerts-today" aria-labelledby="alerts-today-title">
+      <div className="dashboard-section-heading">
+        <div>
+          <h2 id="alerts-today-title">Alertas de cartera de hoy</h2>
+          <p>Avisos deterministas por caídas diarias; no son órdenes de venta.</p>
+        </div>
+      </div>
+      <ul>
+        {alerts.map((alert) => (
+          <li key={`${alert.ticker}-${alert.last_alerted_at}`}>
+            <strong>{alert.name} ({alert.ticker})</strong>
+            <span>{formatPercent(alert.daily_change_pct)}</span>
+            <small>
+              {alert.current_price_eur === null
+                ? "Precio no disponible"
+                : formatMoney(alert.current_price_eur)}
+              {" · "}Enviado {new Date(alert.last_alerted_at).toLocaleTimeString("es-ES")}
+            </small>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
@@ -358,6 +401,8 @@ export function MarketDashboardSections({ marketData }: { marketData: MarketData
       )}
 
       <WatchlistTable items={marketData.watchlist} />
+
+      <AlertsToday alerts={marketData.alerts_today ?? []} />
 
       <MarketEvents marketData={marketData} />
 

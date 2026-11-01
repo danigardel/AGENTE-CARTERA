@@ -1,9 +1,36 @@
 # Radar bursátil diario
 
-El backend Python obtiene cotizaciones, titulares y fundamentales de Yahoo Finance, calcula métricas de cartera y puede generar un análisis con Gemini. La vista publicada conserva el dashboard original generado por `daily_report.py`: empieza con el mapa de calor del mercado, incluye el mapa de las posiciones y mantiene debajo el screener con tarjetas, sentimiento, noticias y sparklines. El mismo proceso exporta `market_data.json` para consumidores de datos. La cotización y las noticias no requieren claves; el análisis IA es opcional y necesita una clave Gemini.
+El backend Python obtiene cotizaciones, titulares y fundamentales de Yahoo Finance, calcula métricas de cartera y genera el dashboard original sin depender de IA. Un agente independiente analiza la cartera y gestiona alertas; React sigue siendo un prototipo opcional. La página publicada conserva los mapas de calor, el screener, las noticias y los sparklines, y exporta `market_data.json`. La cotización y las noticias no requieren claves.
 
-El reporte también solicita un análisis estructurado a Gemini 3.8 Flash (`gemini-3.8-flash`) usando la API estándar `generateContent` (no Batch), con `gemini-3.7-flash` como alternativa. Envía a Google las posiciones de `PORTFOLIO`, los datos de `COMPANIES`, hasta 200 titulares/resúmenes de Yahoo Finance por empresa (máximo 8 por ticker) y hasta 400 titulares macro únicos de Yahoo Finance, CNBC, MarketWatch, Seeking Alpha, WSJ, Bloomberg e Investing.com España. El radar de Yahoo intenta el índice general `finance.yahoo.com/news/rssindex` y también usa el feed de mercado ticker-scoped de Yahoo como respaldo. Los títulos del radar se deduplican sin distinguir mayúsculas, puntuación o espacios repetidos. El radar global conserva titulares y resúmenes tal como se publican, incluye fuente/fecha/enlace y se inyecta en `global_market_radar` para que Gemini evalúe oportunidades externas. Es contexto RSS recuperado, no grounding de Google ni verificación independiente de las fuentes. La API de Gemini 3.8 Flash documenta un límite de entrada de 1.048.576 tokens; los límites actuales de feeds quedan por debajo en condiciones normales, aunque los tokens y las cuotas reales dependen del tamaño de los datos y del proyecto. Si se omite un feed, el informe continúa; si no se obtiene ninguna noticia de hoy, el prompt pide un análisis técnico basado en los datos disponibles. La petición usa un presupuesto de razonamiento de 2048 tokens. No se envían claves de API dentro del prompt.
-El análisis se guarda en `gemini_cache.json` con un timestamp UTC y se reutiliza hasta el siguiente hito horario de análisis. `GEMINI_API_KEY` admite varias claves separadas por comas. Cada consulta empieza con la clave siguiente a la que resolvió el análisis anterior; los fallos rotan secuencialmente el pool. Si todas las claves fallan en el modelo principal con HTTP 429 o 503, se repite la rotación desde el mismo índice con `gemini-3.7-flash`; también se prueba ese modelo si el principal no existe. Solo tras agotar también el modelo alternativo se conserva el aviso: hasta el siguiente hito (`TARGET_HOURS`) si el error final identifica explícitamente una cuota diaria, o cinco minutos para 503, límites por minuto/tokens y errores 429 sin detalle diario claro. Importante: las cuotas de Gemini se aplican por proyecto, no por clave API; rotar varias claves asociadas al mismo proyecto no suma cuota. Google puede responder 429 por RPM, TPM o RPD (solicitudes/minuto, tokens/minuto o solicitudes/día). El aviso de cuota recomienda comprobar en AI Studio el proyecto realmente asociado a cada clave y los límites del modelo. La caché negativa guarda únicamente la huella SHA-256 y el índice del conjunto ordenado de claves (nunca las claves); al cambiar el conjunto se reinicia la rotación. Los archivos de caché se excluyen de Git. GitHub Actions conserva únicamente la caché de Gemini.
+El análisis usa la cadena configurable Gemini principal → Gemini alternativo → Gemini Flash Lite → Groq → OpenRouter Free. Cerebras y Mistral están definidos, pero deshabilitados. El agente envía al proveedor activo los datos de cartera, watchlist y noticias necesarios; no incluye claves en el prompt. Los proveedores OpenAI-compatibles usan `POST /chat/completions`, validación estricta del JSON y un perfil `reduced` (máximo inicial de 25 noticias totales, 40 titulares macro, 15 empresas de watchlist y resúmenes de 200 caracteres). Gemini usa `full`. Si un prompt se rechaza por tamaño, se reduce una vez y luego se prueba el siguiente proveedor. El último análisis válido se cachea; fallos no reemplazan esa respuesta. Las RSS macro son contexto recuperado, no grounding ni verificación independiente.
+
+`collect_market_radar()` deduplica títulos normalizados y admite hasta 400 titulares únicos; `MAX_GEMINI_NEWS_ITEMS` permite hasta 200 noticias de empresa y `MAX_HEADLINES` hasta 8 titulares por empresa. Las fuentes macro incluyen Yahoo Finance, CNBC, MarketWatch, Seeking Alpha, WSJ, Bloomberg e Investing.com España. Los límites reales de prompt, cuotas y disponibilidad dependen del proveedor y del plan.
+
+### Proveedores IA y cuotas consultadas
+
+Valores consultados el **01/11/2026** en documentación oficial. Los límites de una cuenta pueden variar; los valores `max_prompt_chars` del proyecto son topes conservadores de caracteres, no cuotas oficiales.
+
+| Proveedor | Modelo configurado | Contexto documentado | Límites / estado |
+|---|---|---:|---|
+| Gemini | IDs en `ai_config.json` | 1.048.576 tokens de entrada para Gemini 3.8 Flash | Proveedor principal. Cuotas del proyecto y modelos sujetos a disponibilidad. |
+| Groq | `openai/gpt-oss-20b` | 131.072 tokens | La tabla oficial publica para Developer base 30 RPM, 8K TPM y 1K RPD; no son límites garantizados del nivel gratuito. Límites Free exactos: **sin verificar**, varían por organización. |
+| OpenRouter | `openrouter/free` | Variable según el modelo que el router elija | Sin contexto ni cuota universal. Selección aleatoria, disponibilidad y límites variables; `model_used` registra el modelo real de la respuesta. |
+| Cerebras | `qwen-3.8-27b` | 64K tokens en Free Trial | Free Trial: 5 RPM, 30K tokens no cacheados/min, 90K tokens totales/min, 1M tokens/hora y 1M/día. Requiere método de pago verificado y créditos promocionales; no es un nivel gratuito permanente. Deshabilitado. |
+| Mistral | `mistral-small-2603` (candidato) | **Sin verificar** | ID, acceso gratuito y límites RPM/TPM/RPD: **sin verificar** en la documentación oficial consultada. Deshabilitado hasta verificar. |
+
+Fuentes oficiales: [Groq modelos](https://console.groq.com/docs/models), [Groq límites](https://console.groq.com/docs/rate-limits), [Cerebras catálogo](https://inference-docs.cerebras.ai/models/overview), [Cerebras Qwen 3.8 27B](https://inference-docs.cerebras.ai/models/qwen-3.8-27b.md), [Cerebras límites](https://inference-docs.cerebras.ai/support/rate-limits.md), [OpenRouter Free Models Router](https://openrouter.ai/docs/guides/routing/routers/free-models-router) y [Mistral modelos](https://docs.mistral.ai/models/). GitHub Models fue retirado el 30/07/2026; no es una opción.
+
+### Configuración y privacidad
+
+`ai_config.json` contiene el orden de proveedores, endpoints, modelos predeterminados, topes de caracteres, perfiles `full`/`reduced`, límites publicados y notas de verificación. No guardes secretos allí. `AI_CONFIG_PATH` selecciona otro archivo y `AI_PROVIDERS` permite ordenar o limitar la cadena con una lista CSV (por ejemplo, `gemini,groq,openrouter`). Para desactivar un proveedor, establece `"enabled": false` en su entrada de `providers`; Cerebras y Mistral están así por defecto. Los modelos y límites pueden sustituirse mediante las variables de entorno indicadas en el archivo. Los topes de 18.000–20.000 caracteres para respaldos equivalen a unos 4.500–5.000 tokens con la estimación conservadora caracteres/4; se aplican además de los límites de contexto y cuotas del proveedor.
+
+En Actions, crea los secretos `GEMINI_API_KEY`, `GROQ_API_KEY` y `OPENROUTER_API_KEY`; `CEREBRAS_API_KEY`, `MISTRAL_API_KEY` y las credenciales de Telegram son opcionales. Usa las variables `AI_PROVIDERS`, `OPENROUTER_MODEL` y `ALERT_DROP_PCT` para configuración no secreta. Las claves admiten listas CSV cuando el proveedor las soporta. Un proveedor sin clave se omite. No definas `OPENROUTER_ALLOW_PAID` en Actions.
+
+`openrouter/free` elige aleatoriamente un modelo gratuito disponible compatible con la petición; el modelo elegido puede variar entre reintentos y tener un contexto menor que el router. Para evitar costes, OpenRouter rechaza cualquier modelo salvo `openrouter/free` o un ID que termine en `:free`, excepto cuando se habilita explícitamente `OPENROUTER_ALLOW_PAID=true` en un entorno local controlado. Los proveedores de respaldo reciben datos de la cartera y noticias. Revisa sus condiciones de uso y la configuración de privacidad de OpenRouter para modelos gratuitos antes de activarlos; no incluyas datos personales en `INVESTOR_PROFILE`.
+
+El dashboard se genera cada cinco minutos con `--no-ai` y `AI_ENABLED=false`; no llama a proveedores IA. El workflow independiente `portfolio_agent.yml` se ejecuta cada 30 minutos, hace el triaje de eventos, genera análisis en los hitos configurados y envía alertas deterministas de caídas y subidas de cartera, además de subidas de la watchlist, aunque falle la cadena IA. El análisis incluye siempre un resumen cuantitativo determinista; si no hay narrativa válida, muestra «Narrativa IA no disponible; mostrando datos verificados». El último análisis válido y el estado del agente se guardan en la rama `data`, que es pública: no contiene claves, pero sí análisis y metadatos de tickers/alertas. El dashboard lee ese estado y marca visualmente si la narrativa está desactualizada.
+
+`ai_providers.py` clasifica errores, aplica backoff exponencial con jitter y respeta `Retry-After`. Un cortacircuitos por proveedor/modelo conserva solo fallos y hora de reapertura, nunca claves ni prompts; para OpenRouter usa la clave estable `openrouter/free`. La caché de Gemini almacena solo la huella SHA-256 del pool de claves, nunca las claves. `previous_analysis_memory` conserva contexto temporal validado. Si el prompt supera el límite, se recortan primero titulares macro, luego noticias y watchlist, sin eliminar cartera ni memoria.
 
 ## Ejecución local
 
@@ -14,7 +41,14 @@ python -m pip install -r requirements.txt
 python daily_report.py
 ```
 
-El archivo se crea en `dashboard.html`. Se puede elegir otra ruta:
+El archivo se crea en `dashboard.html`. Para generar sin consultar IA:
+
+```powershell
+python daily_report.py --no-ai
+```
+
+El agente autónomo puede ejecutarse manualmente con `python agent.py`. Se puede
+elegir otra ruta de salida del dashboard:
 
 ```powershell
 python daily_report.py --output public\index.html
@@ -31,7 +65,7 @@ Para trabajar con el prototipo opcional de React, genera el JSON en su carpeta:
 
 ```powershell
 New-Item -ItemType Directory -Force react-portfolio\public | Out-Null
-python daily_report.py --no-html --data-output react-portfolio\public\market_data.json
+python daily_report.py --no-ai --no-html --data-output react-portfolio\public\market_data.json
 ```
 
 Para probar la aplicación React localmente, genera primero el JSON anterior y
@@ -92,19 +126,21 @@ del sitio. Incluye las posiciones y el historial de inversión que ya se
 mostraban en el dashboard; no contiene claves de API ni el extracto bancario
 original.
 
-Para activar el análisis IA, crea una o varias claves Gemini en Google AI Studio y guárdalas en un único secreto de repositorio **Settings → Secrets and variables → Actions → New repository secret → `GEMINI_API_KEY`**, separadas por comas y sin espacios obligatorios (por ejemplo `clave1,clave2,clave3`). Localmente, configura `GEMINI_API_KEY` con el mismo formato antes de ejecutar el informe. Si falta una clave o Gemini no responde, el informe se genera igualmente y muestra un aviso en la sección de análisis. El modelo predeterminado es `gemini-3.8-flash`; puede cambiarse con `GEMINI_MODEL`, y cuando el modelo elegido devuelve un error de modelo inexistente se prueba `gemini-3.7-flash`. El presupuesto de razonamiento está fijado en 2048 tokens. `INVESTOR_PROFILE` permite personalizar el perfil; este valor se envía a Gemini, así que no incluyas información sensible. En GitHub Actions, los ajustes opcionales se leen de **Actions variables**. Con respuestas válidas, el análisis se renueva en los hitos de las 00:00, 09:00, 12:00, 15:00, 18:00 y 21:00 en `Europe/Madrid`, no en cada generación del dashboard. La clave inicial rota de una consulta a la siguiente, y los fallos prueban secuencialmente el resto del pool; solo cuando todas fallan se publica el aviso hasta el próximo hito. Los feeds macro RSS son públicos y no requieren claves; las peticiones a Gemini siguen sujetas a cuotas y posibles costes del proyecto.
+Consulta «Configuración y privacidad» para crear los secretos y elegir proveedores. El agente usa el perfil de `INVESTOR_PROFILE` y, con respuestas válidas, actualiza el análisis en los hitos de las 00:00, 09:00, 12:00, 15:00, 18:00 y 21:00 de `Europe/Madrid`, no en cada generación del dashboard. Los feeds macro RSS son públicos y no requieren claves.
 
-Además, cada ejecución del workflow comprueba anomalías de cartera. Si una
-posición activa cruza su nivel secundario desde máximos o varía al menos un 4 %
-en el día, se fuerza un análisis aunque la caché siga dentro de su hito horario.
-Cada ticker activa como máximo un análisis de anomalía por fecha local; la
-lista se guarda en `gemini_cache.json`. Un aviso/fallo almacenado desactiva esos
-triggers hasta que se pueda volver a analizar. Para recibir alertas de análisis
-recién generado, configura los secretos opcionales `TELEGRAM_BOT_TOKEN` y
-`TELEGRAM_CHAT_ID` en **Settings → Secrets and variables → Actions**. Telegram
-solo recibe `telegram_summary` (máximo 60 palabras) cuando la señal no es HOLD,
-hay candidatas de venta o se detecta una anomalía; un análisis reutilizado de
-caché nunca genera una alerta.
+El agente, cada 30 minutos, fuerza un análisis fuera de horario cuando una
+posición activa cruza el nivel secundario desde máximos o varía al menos un 4 %
+en el día. Cada ticker activa como máximo un análisis de anomalía por fecha
+local. Por separado, una caída diaria igual o superior al 2 % genera un aviso
+determinista de Telegram ante movimientos de al menos `ALERT_DROP_PCT`: caídas
+y subidas de posiciones de cartera, y solo subidas para acciones de la lista
+de seguimiento que no estén en cartera. Ignora cotizaciones stale, agrupa los
+avisos por categoría, deduplica por ticker/fecha y reavisa cuando el movimiento
+se intensifica al menos 1 punto porcentual en la misma dirección. El estado se
+conserva en `agent_state.json` dentro de la rama
+`data`. Configura `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` como secretos de
+Actions; los valores no se escriben en la caché ni en `market_data.json`.
+`agent.py` desactiva las alertas narrativas de Gemini para evitar duplicados.
 
 En el repositorio, activa GitHub Pages con **GitHub Actions** como fuente de despliegue. El workflow necesita los permisos de Pages y OIDC que declara en el YAML. Tras una ejecución correcta, el dashboard se publica como `index.html`.
 
@@ -115,7 +151,7 @@ El dashboard incluye mapas de calor, curvas intradía y sparklines por activo. L
 - Google News RSS proporciona titulares del dashboard y Yahoo Finance RSS aporta titulares/resúmenes para el análisis por empresa (hasta 8 por ticker y 200 en total); el radar macro agrega hasta 400 titulares únicos de hoy de Yahoo Finance, CNBC, MarketWatch, Seeking Alpha, WSJ, Bloomberg e Investing.com España, sin traducirlos. El índice general RSS de Yahoo se acompaña con un feed ticker-scoped de mercados por si el índice no está disponible. En todos los casos solo se conservan los publicados en la fecha local del informe. Google Translate traduce secuencialmente los titulares al español en las tarjetas, con una pausa de 0,2 segundos entre solicitudes para reducir respuestas HTTP 429.
 - VADER puntúa el tono del titular original. La señal alcista/neutral/bajista es una heurística de sentimiento, no una predicción ni asesoramiento.
 - Yahoo Finance vía `yfinance` aporta precio actual, variación diaria, ratios PEG y PER (TTM), consenso, precio objetivo, sector, capitalización, beta, rentabilidad por dividendo, distancia al máximo de 52 semanas, fecha de resultados y fecha ex-dividendo cuando están disponibles. El screener filtra localmente por texto de nombre/ticker, sector, PEG, PER, capitalización, dividendo, beta, variación diaria, consenso y retroceso desde máximos; el contador se actualiza al instante y los datos stale permanecen separados al final. No efectúa consultas adicionales al cambiar filtros. La agenda muestra fechas futuras disponibles en una ventana de 45 días. El PEG se muestra en verde (< 1,0), naranja (1,0–1,5) y rojo (> 1,5), y sin color si falta o es negativo; los ratios son referencias informativas, no recomendaciones de inversión. Los datos pueden faltar o tener retraso.
-- Gemini Flash recibe la cartera, las empresas de `COMPANIES` y el nodo `global_market_radar`; el contexto sectorial solo se incluye para empresas con sector devuelto por Yahoo Finance. La respuesta se valida y se descartan recomendaciones con tickers que no están en la lista de seguimiento o en la cartera correspondiente. El análisis puede equivocarse, no conoce el horizonte ni la tolerancia al riesgo del usuario y no es asesoramiento financiero personalizado.
+- El proveedor de IA activo recibe la cartera, las empresas de `COMPANIES` y el nodo `global_market_radar`; el contexto sectorial solo se incluye para empresas con sector devuelto por Yahoo Finance. La respuesta se valida y se descartan recomendaciones con tickers que no están en la lista de seguimiento o en la cartera correspondiente. El análisis puede equivocarse, no conoce el horizonte ni la tolerancia al riesgo del usuario y no es asesoramiento financiero personalizado.
 - Se resume el consenso por empresa. La cartera usa `PORTFOLIO` o, si se indica, un CSV local de operaciones del usuario; no se consulta la cuenta del broker ni se infieren las tenencias internas de fondos.
 - El screener permite filtrar por búsqueda instantánea de nombre/ticker, sector, PEG, PER, capitalización, dividendo, beta, variación diaria, consenso y retroceso de 52 semanas; también puede ordenar por rendimiento diario, PEG, PER, capitalización, dividendo, beta, consenso o sentimiento. Se ejecuta en el navegador sobre los datos ya incluidos en el informe.
 - La interfaz publica `window.DashboardMarketData.applySnapshot([...])` y `window.DashboardMarketData.applyDelta([...])` para integrar en el futuro un proveedor autorizado del lado cliente. Cada actualización acepta `ticker`, `priceEur`, `previousCloseEur`, `marketDate` (`AAAA-MM-DD`), `marketTimezone` y, opcionalmente, `timestamp` ISO 8601. El controlador calcula el cambio porcentual, actualiza tarjetas, tabla, heatmaps, sparklines y curvas 1D, y vuelve a aplicar la separación stale/fresh. Es solo una interfaz de integración: no abre conexiones, no consulta Trade Republic y no convierte por sí sola el HTML estático en streaming en tiempo real.
@@ -123,4 +159,5 @@ El dashboard incluye mapas de calor, curvas intradía y sparklines por activo. L
 - En la tabla de cartera, los selectores cambian entre rendimientos 1D, 1W, 1M, 6M y 1Y, precios de cierre históricos en euros, o ganancia/rendimiento MAX. Activo, posición, inversión base, precio actual y valor actual permanecen siempre visibles. El gráfico comparativo de cartera sincroniza su periodo con el selector, junto con S&P 500 y MSCI World.
 - En la celda de cada activo de «Mi cartera», el botón de escudo abre un panel accesible con el precio actual y medio, dos niveles ATR, volatilidad y explicación personalizada. Se reutiliza el histórico diario que ya carga la cartera, sin llamadas adicionales a Yahoo Finance. El ATR(14) es la media simple de 14 rangos verdaderos. El campo `atr_pct` guarda el ATR dividido por el último cierre y expresado en puntos porcentuales (por ejemplo, `2` representa `2 %`). Los niveles principales parten siempre del precio actual en euros: revisión = `precio_eur × (1 − 2.5 × atr_pct / 100)` y toma de beneficios = `precio_eur × (1 + 2 × 2.5 × atr_pct / 100)`, con variaciones respectivas de −2.5 × `atr_pct` y +5 × `atr_pct`. El ATR porcentual se calcula en la divisa nativa y luego se aplica al precio en euros, por lo que la conversión de divisa no altera la volatilidad relativa. Como referencia secundaria se conserva el nivel desde máximos: `(máximo de las últimas 22 sesiones / último cierre − 2.5 × atr_pct / 100) × precio_eur`. El bloque secundario y su mensaje se resaltan cuando el precio actual está en o por debajo de ese nivel; el escudo permanece neutro salvo cuando faltan datos, y el nivel puede bajar cuando un máximo antiguo sale de la ventana móvil. Con menos de 15 sesiones válidas, el panel marca «Sin datos» y no inventa niveles. La confianza es una etiqueta según las sesiones válidas del histórico usadas: «high» desde 100, «medium» desde 30 y «low» por debajo de 30; no es una probabilidad estadística. Son distancias basadas en volatilidad, no predicciones, stops automáticos ni órdenes de compra/venta; no alteran precios, rentabilidades ni totales. El campo opcional `risk_zones` de `market_data.json` es aditivo para mantener la compatibilidad con datos previos.
 - Cada tarjeta de seguimiento incluye un sparkline SVG sin ejes ni etiquetas, usando los cierres intradía de 5 minutos limitados a la fecha local de la sesión bursátil; no representa una ventana móvil de 24 horas y se oculta cuando la cotización no pertenece a la sesión actual.
-- La sección de análisis IA indica la fecha/hora local de su último resultado válido, que puede ser anterior a la actualización de cotizaciones por el periodo de caché de Gemini.
+- La sección de análisis IA indica la fecha/hora local de su último resultado válido, que puede ser anterior a la actualización de cotizaciones por el periodo de caché.
+- `market_data.json` añade de forma opcional `analysis.provider_used`, `analysis.is_stale` y `alerts_today`; React valida los datos antiguos y nuevos, muestra una insignia de análisis desactualizado y resume las alertas deterministas del día.

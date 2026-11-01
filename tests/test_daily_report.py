@@ -10,6 +10,7 @@ import pandas as pd
 import requests
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+from ai_providers import AIProviderConfig
 from daily_report import (
     ATR_MULTIPLIER,
     ATR_WINDOW,
@@ -42,8 +43,16 @@ from daily_report import (
     _model_pool_allows_fallback,
     _market_session_series,
     _read_gemini_cache,
+    _write_gemini_cache,
+    _write_gemini_failure_cache,
+    _analysis_section,
+    _apply_payload_profile,
     _risk_no_data_reason,
+    _alerts_today_for_market_data,
+    _previous_analysis_memory,
     _analysis_inputs,
+    _reduce_analysis_context,
+    _triage_portfolio_events,
     _has_urgent_portfolio_trigger,
     _gemini_request_warning,
     analyze_portfolio,
@@ -83,6 +92,20 @@ from daily_report import (
 
 class SentimentTests(unittest.TestCase):
     def setUp(self):
+        provider_config_patcher = patch(
+            "daily_report.AI_PROVIDER_CONFIG",
+            AIProviderConfig(
+                provider_order=(
+                    "gemini",
+                    "gemini_fallback",
+                    "gemini_flash_lite",
+                ),
+                max_retries=0,
+                circuit_failure_threshold=50,
+            ),
+        )
+        provider_config_patcher.start()
+        self.addCleanup(provider_config_patcher.stop)
         news_patcher = patch("daily_report.collect_financial_news", return_value=[])
         self.collect_news_mock = news_patcher.start()
         self.addCleanup(news_patcher.stop)
@@ -412,7 +435,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("+2.50%", html)
         self.assertIn("Próximos eventos", html)
         self.assertIn("Quarterly results improve", html)
-        self.assertIn("Análisis de cartera con Gemini Flash", html)
+        self.assertIn("Análisis de cartera", html)
         self.assertLess(
             html.index('id="watchlist-heatmap"'),
             html.index('aria-label="Resumen ejecutivo del mercado"'),
@@ -2240,7 +2263,7 @@ class SentimentTests(unittest.TestCase):
         self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
         html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
-        self.assertIn("Análisis de cartera con Gemini Flash", html)
+        self.assertIn("Análisis de cartera", html)
         self.assertIn("Posición pequeña y positiva.", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertNotIn("<script>alert(1)</script>", html)
@@ -2423,7 +2446,7 @@ class SentimentTests(unittest.TestCase):
         post_mock.assert_not_called()
 
         html = render_dashboard([], analysis=analysis)
-        self.assertIn("configura el secreto GEMINI_API_KEY", html)
+        self.assertIn("configura GEMINI_API_KEY", html)
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_shows_gemini_http_error_without_exposing_api_key(self, post_mock):
@@ -2518,7 +2541,7 @@ class SentimentTests(unittest.TestCase):
             )
             self.assertIn("se agotaron los intentos", service_failure.warning)
             self.assertIn("HTTP 503", service_failure.warning)
-            self.assertEqual(post_mock.call_count, 4)
+            self.assertEqual(post_mock.call_count, 6)
 
             quota_response = SimpleNamespace(
                 status_code=429,
@@ -2558,7 +2581,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("no por clave API", all_quota.warning)
         self.assertIn("límite por minuto o por tokens", all_quota.warning)
         self.assertIn("Reintento breve pendiente", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 8)
+        self.assertEqual(post_mock.call_count, 12)
         self.assertIn("HTTP 429", retried.warning)
         self.assertEqual(cached["next_api_key_index"], 1)
         self.assertEqual(cached["failure_policy"], "short_retry")
@@ -2572,6 +2595,10 @@ class SentimentTests(unittest.TestCase):
                 "backup",
                 "primary",
                 "backup",
+                "primary",
+                "backup",
+                "backup",
+                "primary",
                 "backup",
                 "primary",
                 "backup",
@@ -2726,9 +2753,11 @@ class SentimentTests(unittest.TestCase):
                 cache_path=Path(temp_dir) / "gemini_cache.json",
             )
 
-        self.assertIn("en los modelos gemini-3.8-flash.", analysis.warning)
-        self.assertNotIn("gemini-3.8-flash y gemini-3.8-flash", analysis.warning)
-        self.assertEqual(post_mock.call_count, 1)
+        self.assertIn("Gemini (gemini-3.8-flash)", analysis.warning)
+        self.assertIn("Gemini (gemini-3.7-flash)", analysis.warning)
+        self.assertIn("Gemini (gemini-3.8-flash-lite)", analysis.warning)
+        self.assertNotIn("groq", analysis.warning)
+        self.assertEqual(post_mock.call_count, 3)
 
     @patch("daily_report.requests.post")
     def test_gemini_successful_requests_rotate_starting_key_across_milestones(
@@ -2848,7 +2877,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("10h49m15.795500506s", cache_data["failure_warning"])
         self.assertIn("retry_after_utc", cache_data)
         self.assertIn("Reintento breve pendiente", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 4)
+        self.assertEqual(post_mock.call_count, 6)
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
@@ -2896,6 +2925,8 @@ class SentimentTests(unittest.TestCase):
             failed_response(429, daily_quota_payload),
             failed_response(503, {"error": {"message": "Server overloaded"}}),
             failed_response(429, daily_quota_payload),
+            failed_response(503, {"error": {"message": "Server overloaded"}}),
+            failed_response(429, daily_quota_payload),
         ]
         post_mock.side_effect = mixed_failures + mixed_failures
 
@@ -2925,11 +2956,11 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertIn("HTTP 429", failed.warning)
-        self.assertEqual(cache_data["warning"], failed.warning)
+        self.assertIn(cache_data["warning"], failed.warning)
         self.assertNotIn("retry_after_utc", cache_data)
         self.assertEqual(cache_data["failure_policy"], "daily")
         self.assertIn("siguiente hito de análisis: 07/10/2026 15:00", suppressed.warning)
-        self.assertEqual(post_mock.call_count, 8)
+        self.assertEqual(post_mock.call_count, 12)
         self.assertIn("HTTP 429", retried.warning)
 
     @patch("daily_report.requests.post")
@@ -2974,7 +3005,7 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(cache_data["failure_policy"], "short_retry")
         self.assertIn("Reintento breve pendiente", before_retry.warning)
         self.assertIn("HTTP 503", retried.warning)
-        self.assertEqual(post_mock.call_count, 8)
+        self.assertEqual(post_mock.call_count, 12)
 
     @patch("daily_report.requests.post")
     def test_new_api_key_bypasses_failure_cooldown(self, post_mock):
@@ -3026,7 +3057,7 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertEqual(result.portfolio_assessment, "Evaluación")
-        self.assertEqual(post_mock.call_count, 3)
+        self.assertEqual(post_mock.call_count, 4)
 
     def test_legacy_failure_cache_is_not_allowed_to_block_new_key(self):
         now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -3073,6 +3104,47 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn("Reintento breve pendiente", waiting.warning)
         self.assertIsNone(retry_allowed)
+
+    def test_failure_cache_preserves_and_displays_last_good_analysis(self):
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        successful = PortfolioAnalysis(
+            portfolio_assessment="Evaluación anterior.",
+            diversification="Diversificación anterior.",
+            recommended_changes="Mantener.",
+            top_buys=[],
+            external_ideas=[],
+            sell_candidates=[],
+            market_context="Contexto anterior.",
+            risks=["Riesgo anterior."],
+            last_updated_utc=now.isoformat(),
+            provider_used="gemini",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            _write_gemini_cache(cache_path, successful, now, "fingerprint", 1)
+            _write_gemini_failure_cache(
+                cache_path,
+                "Gemini no está disponible.",
+                now + timedelta(minutes=1),
+                "fingerprint",
+                1,
+                retry_after_utc=now + timedelta(minutes=6),
+            )
+            stored = json.loads(cache_path.read_text(encoding="utf-8"))
+            stale = _read_gemini_cache(
+                cache_path,
+                now + timedelta(minutes=2),
+                api_key_fingerprint="fingerprint",
+            )
+
+        self.assertIn("last_good_analysis", stored)
+        self.assertEqual(stale.portfolio_assessment, "Evaluación anterior.")
+        self.assertEqual(stale.provider_used, "gemini")
+        self.assertTrue(stale.is_stale)
+        self.assertIn("Análisis desactualizado", stale.warning)
+        rendered = _analysis_section(stale)
+        self.assertIn("Evaluación anterior.", rendered)
+        self.assertIn("Análisis desactualizado", rendered)
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_returns_fresh_cache_without_calling_gemini(self, post_mock):
@@ -3307,6 +3379,541 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('"portfolio_assessment": "La cartera estaba equilibrada."', prompt)
         self.assertIn('"recommended_changes": "Mantener DCA."', prompt)
         self.assertIn('"ticker": "EX"', prompt)
+
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_analysis_falls_back_from_gemini_to_groq_then_openrouter(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+    ):
+        provider_config = AIProviderConfig(
+            provider_order=("gemini", "groq", "openrouter"),
+            max_retries=0,
+            circuit_failure_threshold=20,
+            providers={
+                "gemini": {
+                    "kind": "gemini",
+                    "default_model": "gemini-test",
+                    "max_prompt_chars": 150_000,
+                },
+                "groq": {
+                    "kind": "openai_compatible",
+                    "base_url": "https://api.groq.test/v1",
+                    "api_key_env": "GROQ_API_KEY",
+                    "model_env": "GROQ_MODEL",
+                    "default_model": "groq-test-model",
+                    "extra_headers": {},
+                    "json_mode": True,
+                    "max_prompt_chars": 20_000,
+                    "enabled": True,
+                },
+                "openrouter": {
+                    "kind": "openai_compatible",
+                    "base_url": "https://openrouter.test/api/v1",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "model_env": "OPENROUTER_MODEL",
+                    "default_model": "openrouter/free",
+                    "extra_headers": {},
+                    "json_mode": True,
+                    "max_prompt_chars": 20_000,
+                    "enabled": True,
+                },
+            },
+            profiles={
+                "full": {"max_prompt_chars": 150_000},
+                "reduced": {
+                    "max_prompt_chars": 20_000,
+                    "company_news_items": 25,
+                    "news_per_company": 3,
+                    "macro_headlines": 40,
+                    "watchlist_items": 15,
+                    "summary_chars": 200,
+                },
+            },
+        )
+        gemini_error = requests.HTTPError(
+            response=SimpleNamespace(status_code=503, headers={})
+        )
+        groq_error = requests.HTTPError(
+            response=SimpleNamespace(status_code=429, headers={})
+        )
+        valid_result = {
+            "portfolio_assessment": "Análisis de OpenRouter.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        openrouter_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "model": "actual-router-model:free",
+                "choices": [
+                    {"message": {"content": json.dumps(valid_result)}}
+                ],
+            },
+        )
+        post_mock.side_effect = [gemini_error, groq_error, openrouter_response]
+
+        with (
+            patch("daily_report.AI_PROVIDER_CONFIG", provider_config),
+            patch.dict(
+                "os.environ",
+                {
+                    "GEMINI_API_KEY": "gemini-test-key",
+                    "GROQ_API_KEY": "groq-test-key",
+                    "OPENROUTER_API_KEY": "router-test-key",
+                },
+            ),
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            with self.assertLogs(level="WARNING") as captured_logs:
+                analysis = analyze_portfolio(
+                    [],
+                    [],
+                    cache_path=cache_path,
+                    now_utc=datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc),
+                )
+            cached_text = cache_path.read_text(encoding="utf-8")
+
+        self.assertEqual(analysis.portfolio_assessment, "Análisis de OpenRouter.")
+        self.assertEqual(analysis.provider_used, "openrouter")
+        self.assertEqual(analysis.model_used, "actual-router-model:free")
+        self.assertEqual(post_mock.call_count, 3)
+        self.assertEqual(
+            post_mock.call_args_list[1].args[0],
+            "https://api.groq.test/v1/chat/completions",
+        )
+        self.assertEqual(
+            post_mock.call_args_list[2].args[0],
+            "https://openrouter.test/api/v1/chat/completions",
+        )
+        self.assertEqual(
+            post_mock.call_args_list[1].kwargs["headers"]["Authorization"],
+            "Bearer groq-test-key",
+        )
+        for secret in ("gemini-test-key", "groq-test-key", "router-test-key"):
+            self.assertNotIn(secret, cached_text)
+            self.assertNotIn(secret, "\n".join(captured_logs.output))
+            self.assertNotIn(secret, _analysis_section(analysis))
+
+    @patch("daily_report.time.sleep")
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar")
+    @patch("daily_report.requests.post")
+    def test_provider_retries_once_with_smaller_prompt_after_413(
+        self,
+        post_mock,
+        radar_mock,
+        _news_mock,
+        _sleep_mock,
+    ):
+        provider_config = AIProviderConfig(
+            provider_order=("groq",),
+            max_retries=0,
+            circuit_failure_threshold=20,
+            providers={
+                "groq": {
+                    "kind": "openai_compatible",
+                    "base_url": "https://api.groq.test/v1",
+                    "api_key_env": "GROQ_API_KEY",
+                    "model_env": "GROQ_MODEL",
+                    "default_model": "groq-test-model",
+                    "extra_headers": {},
+                    "json_mode": True,
+                    "max_prompt_chars": 20_000,
+                    "enabled": True,
+                },
+            },
+            profiles={
+                "reduced": {
+                    "max_prompt_chars": 20_000,
+                    "company_news_items": 25,
+                    "news_per_company": 3,
+                    "macro_headlines": 40,
+                    "watchlist_items": 15,
+                    "summary_chars": 200,
+                },
+            },
+        )
+        now = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
+        radar_mock.return_value = [
+            GlobalMarketNews(
+                title=f"Titular {index} " + ("x" * 500),
+                source="Fuente",
+                published=now,
+                url=f"https://example.test/{index}",
+                summary="Resumen " + ("y" * 500),
+            )
+            for index in range(40)
+        ]
+        too_large = requests.HTTPError(
+            response=SimpleNamespace(status_code=413, headers={})
+        )
+        valid_result = {
+            "portfolio_assessment": "Análisis reducido.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.side_effect = [
+            too_large,
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "model": "groq-test-model",
+                    "choices": [
+                        {"message": {"content": json.dumps(valid_result)}}
+                    ],
+                },
+            ),
+        ]
+        with (
+            patch("daily_report.AI_PROVIDER_CONFIG", provider_config),
+            patch.dict("os.environ", {"GROQ_API_KEY": "groq-test-key"}),
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            analysis = analyze_portfolio(
+                [],
+                [],
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+                now_utc=now,
+            )
+
+        self.assertEqual(analysis.provider_used, "groq")
+        self.assertEqual(post_mock.call_count, 2)
+        first_prompt = post_mock.call_args_list[0].kwargs["json"]["messages"][0]["content"]
+        second_prompt = post_mock.call_args_list[1].kwargs["json"]["messages"][0]["content"]
+        self.assertLess(len(second_prompt), len(first_prompt))
+
+    @patch("daily_report.time.sleep")
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_openrouter_retries_invalid_json_and_records_returned_model(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+        _sleep_mock,
+    ):
+        provider_config = AIProviderConfig(
+            provider_order=("openrouter",),
+            max_retries=0,
+            circuit_failure_threshold=20,
+            providers={
+                "openrouter": {
+                    "kind": "openai_compatible",
+                    "base_url": "https://openrouter.test/api/v1",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "model_env": "OPENROUTER_MODEL",
+                    "default_model": "openrouter/free",
+                    "extra_headers": {},
+                    "json_mode": True,
+                    "max_prompt_chars": 20_000,
+                    "enabled": True,
+                },
+            },
+            profiles={
+                "reduced": {"max_prompt_chars": 20_000},
+            },
+        )
+        valid_result = {
+            "portfolio_assessment": "Análisis de OpenRouter.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.side_effect = [
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "model": "random-model-a:free",
+                    "choices": [{"message": {"content": "respuesta inválida"}}],
+                },
+            ),
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "model": "random-model-b:free",
+                    "choices": [
+                        {"message": {"content": json.dumps(valid_result)}}
+                    ],
+                },
+            ),
+        ]
+        with (
+            patch("daily_report.AI_PROVIDER_CONFIG", provider_config),
+            patch.dict(
+                "os.environ",
+                {"OPENROUTER_API_KEY": "router-test-key"},
+            ),
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            analysis = analyze_portfolio(
+                [],
+                [],
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+                now_utc=datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(analysis.provider_used, "openrouter")
+        self.assertEqual(analysis.model_used, "random-model-b:free")
+        self.assertEqual(post_mock.call_count, 2)
+
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_invalid_provider_json_skips_to_next_provider(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+    ):
+        provider_config = AIProviderConfig(
+            provider_order=("groq", "openrouter"),
+            max_retries=0,
+            circuit_failure_threshold=20,
+            providers={
+                name: {
+                    "kind": "openai_compatible",
+                    "base_url": f"https://{name}.test/api/v1",
+                    "api_key_env": f"{name.upper()}_API_KEY",
+                    "model_env": f"{name.upper()}_MODEL",
+                    "default_model": (
+                        "openrouter/free" if name == "openrouter" else "groq-model"
+                    ),
+                    "extra_headers": {},
+                    "json_mode": True,
+                    "max_prompt_chars": 20_000,
+                    "enabled": True,
+                }
+                for name in ("groq", "openrouter")
+            },
+            profiles={"reduced": {"max_prompt_chars": 20_000}},
+        )
+        valid_result = {
+            "portfolio_assessment": "Proveedor alternativo.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.side_effect = [
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "model": "groq-model",
+                    "choices": [{"message": {"content": '{"portfolio_assessment": 1}'}}],
+                },
+            ),
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "model": "router-model:free",
+                    "choices": [
+                        {"message": {"content": json.dumps(valid_result)}}
+                    ],
+                },
+            ),
+        ]
+        with (
+            patch("daily_report.AI_PROVIDER_CONFIG", provider_config),
+            patch.dict(
+                "os.environ",
+                {
+                    "GROQ_API_KEY": "groq-test-key",
+                    "OPENROUTER_API_KEY": "router-test-key",
+                },
+            ),
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            analysis = analyze_portfolio(
+                [],
+                [],
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+                now_utc=datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(analysis.provider_used, "openrouter")
+        self.assertEqual(analysis.model_used, "router-model:free")
+        self.assertEqual(post_mock.call_count, 2)
+
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_analysis_omits_openai_provider_without_configured_key(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+    ):
+        provider_config = AIProviderConfig(
+            provider_order=("groq",),
+            max_retries=0,
+            providers={
+                "groq": {
+                    "kind": "openai_compatible",
+                    "base_url": "https://api.groq.test/v1",
+                    "api_key_env": "GROQ_API_KEY",
+                    "model_env": "GROQ_MODEL",
+                    "default_model": "groq-test-model",
+                    "enabled": True,
+                },
+            },
+            profiles={"reduced": {"max_prompt_chars": 20_000}},
+        )
+        with (
+            patch("daily_report.AI_PROVIDER_CONFIG", provider_config),
+            patch.dict("os.environ", {}, clear=True),
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            analysis = analyze_portfolio(
+                [],
+                [],
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+                now_utc=datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertIsNone(analysis.provider_used)
+        self.assertIsNotNone(analysis.warning)
+        post_mock.assert_not_called()
+
+    def test_previous_analysis_memory_uses_last_good_analysis_after_failure(self):
+        generated_at = datetime(2026, 10, 6, 6, 59, tzinfo=timezone.utc)
+        cached_data = {
+            "last_updated_utc": datetime(
+                2026, 10, 6, 9, 0, tzinfo=timezone.utc
+            ).isoformat(),
+            "warning": "Fallo de la consulta más reciente.",
+            "failure_warning": "HTTP 503",
+            "last_good_analysis": {
+                "last_updated_utc": generated_at.isoformat(),
+                "portfolio_assessment": "La evaluación válida anterior.",
+                "recommended_changes": "Mantener.",
+                "top_buys": [],
+                "sell_candidates": [],
+            },
+        }
+
+        memory = _previous_analysis_memory(cached_data)
+
+        self.assertEqual(
+            memory,
+            {
+                "last_updated_utc": generated_at.isoformat(),
+                "portfolio_assessment": "La evaluación válida anterior.",
+                "recommended_changes": "Mantener.",
+                "top_buys": [],
+                "sell_candidates": [],
+            },
+        )
+
+    def test_prompt_reduction_keeps_portfolio_and_previous_analysis_memory(self):
+        now = datetime(2026, 10, 6, 12, 0, tzinfo=TIMEZONE)
+        inputs = {
+            "portfolio": [{"ticker": "KEEP", "headlines": []}],
+            "watchlist": [],
+            "global_market_radar": [
+                {"title": "Reciente " + "x" * 10000},
+                {"title": "Antiguo " + "y" * 10000},
+            ],
+            "previous_analysis_memory": {
+                "portfolio_assessment": "La tesis anterior.",
+            },
+        }
+        baseline = len(build_analysis_prompt({"portfolio": []}, now))
+
+        reduced, news_text = _reduce_analysis_context(
+            inputs,
+            "Noticia " * 1000,
+            now,
+            baseline + 200,
+        )
+        prompt = build_analysis_prompt(reduced, now, news_text=news_text)
+
+        self.assertLessEqual(len(prompt), baseline + 200)
+        self.assertEqual(reduced["portfolio"][0]["ticker"], "KEEP")
+        self.assertEqual(
+            reduced["previous_analysis_memory"],
+            inputs["previous_analysis_memory"],
+        )
+        self.assertEqual(len(reduced["global_market_radar"]), 0)
+        self.assertEqual(
+            len(inputs["global_market_radar"]),
+            2,
+            "La reducción no debe mutar la entrada original.",
+        )
+
+    def test_reduced_payload_profile_applies_news_watchlist_and_summary_limits(self):
+        inputs = {
+            "portfolio": [],
+            "watchlist": [
+                {
+                    "ticker": "LOW",
+                    "name": "Low",
+                    "daily_change_pct": 1,
+                    "description": "no debe incluirse",
+                    "headlines": [{"title": "Low news"}],
+                },
+                {
+                    "ticker": "HIGH",
+                    "name": "High",
+                    "daily_change_pct": 20,
+                    "description": "no debe incluirse",
+                    "headlines": [{"title": "High news"}],
+                },
+            ],
+            "global_market_radar": [
+                {"title": "Macro 1", "summary": "x" * 20},
+                {"title": "Macro 2", "summary": "y" * 20},
+            ],
+        }
+        news_text = "\n".join(
+            (
+                "- A (AAA) · 2026-10-26: titular. "
+                "Resumen: " + "a" * 20 + " Fuente: Fuente",
+                "- B (AAA) · 2026-10-26: titular. "
+                "Resumen: " + "b" * 20 + " Fuente: Fuente",
+                "- C (BBB) · 2026-10-26: titular. "
+                "Resumen: " + "c" * 20 + " Fuente: Fuente",
+            )
+        )
+
+        reduced, reduced_news = _apply_payload_profile(
+            inputs,
+            news_text,
+            {
+                "company_news_items": 3,
+                "news_per_company": 1,
+                "macro_headlines": 1,
+                "watchlist_items": 1,
+                "summary_chars": 4,
+            },
+        )
+
+        self.assertEqual(len(reduced["global_market_radar"]), 1)
+        self.assertEqual(reduced["global_market_radar"][0]["summary"], "xxxx")
+        self.assertEqual([item["ticker"] for item in reduced["watchlist"]], ["HIGH"])
+        self.assertNotIn("description", reduced["watchlist"][0])
+        self.assertEqual(len(reduced["watchlist"][0]["headlines"]), 1)
+        self.assertEqual(len(reduced_news.splitlines()), 2)
+        self.assertIn("Resumen: aaaa", reduced_news)
+        self.assertIn("Resumen: cccc", reduced_news)
 
     @patch("daily_report.requests.post")
     @patch.dict(
@@ -3638,9 +4245,59 @@ class SentimentTests(unittest.TestCase):
             payload["analysis"]["portfolio_assessment"],
             "Mantener la diversificación.",
         )
+        self.assertIsNone(payload["analysis"]["provider_used"])
+        self.assertFalse(payload["analysis"]["is_stale"])
+        self.assertIn("quant_summary", payload)
+        self.assertEqual(
+            payload["quant_summary"]["volatile_daily_moves"][0]["ticker"],
+            "EXF",
+        )
+        self.assertIsNone(
+            build_market_data(
+                [report],
+                [position],
+                generated_at=generated_at,
+            )["analysis"]
+        )
+        self.assertIn(
+            "Narrativa IA no disponible",
+            _analysis_section(None, payload["quant_summary"]),
+        )
         self.assertIsNone(payload["watchlist"][0]["fundamentals"]["market_cap"])
         self.assertIsNone(payload["charts"]["watchlist"][0]["value"])
         json.dumps(payload, ensure_ascii=False, allow_nan=False)
+
+    def test_market_data_includes_only_today_deterministic_alerts(self):
+        generated_at = datetime(2026, 10, 26, 12, 0, tzinfo=TIMEZONE)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "agent_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "date": "2026-10-26",
+                        "alerts": {
+                            "EX": {
+                                "last_drop_pct": -2.5,
+                                "sent_at": "2026-10-26T11:30:00+01:00",
+                                "name": "Example",
+                                "current_price_eur": 97.5,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            alerts = _alerts_today_for_market_data(state_path, generated_at)
+            state_path.write_text(
+                json.dumps({"date": "2026-10-25", "alerts": {}}),
+                encoding="utf-8",
+            )
+            old_alerts = _alerts_today_for_market_data(state_path, generated_at)
+
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["ticker"], "EX")
+        self.assertEqual(alerts[0]["daily_change_pct"], -2.5)
+        self.assertEqual(old_alerts, [])
 
     @patch("daily_report.collect_market_events", return_value=[])
     @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
@@ -3732,6 +4389,60 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("data-sparkline=", html)
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["watchlist"], [])
+
+    @patch("daily_report.analyze_portfolio")
+    @patch("daily_report.collect_market_events", return_value=[])
+    @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
+    @patch("daily_report.fetch_portfolio", return_value=[])
+    @patch("daily_report.collect_reports", return_value=[])
+    def test_main_no_ai_uses_cached_analysis_without_calling_gemini(
+        self,
+        _reports_mock,
+        _portfolio_mock,
+        _charts_mock,
+        _events_mock,
+        analysis_mock,
+    ):
+        now = datetime.now(timezone.utc)
+        cached_analysis = PortfolioAnalysis(
+            portfolio_assessment="Último análisis.",
+            diversification="Diversificada.",
+            recommended_changes="Mantener.",
+            market_context="Contexto.",
+            last_updated_utc=now.isoformat(),
+            provider_used="gemini",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache_path = root / "gemini_cache.json"
+            _write_gemini_cache(cache_path, cached_analysis, now, "fingerprint", 0)
+            data_path = root / "market_data.json"
+            with (
+                patch("daily_report.GEMINI_CACHE_FILE", cache_path),
+                patch("daily_report.PORTFOLIO_ACTIVITY_FILE", root / "missing.json"),
+                patch.dict("os.environ", {"AI_ENABLED": "false"}),
+                patch(
+                    "sys.argv",
+                    [
+                        "daily_report.py",
+                        "--no-html",
+                        "--data-output",
+                        str(data_path),
+                    ],
+                ),
+            ):
+                result = main()
+            payload = json.loads(data_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        analysis_mock.assert_not_called()
+        self.assertEqual(
+            payload["analysis"]["portfolio_assessment"],
+            "Último análisis.",
+        )
+        self.assertTrue(payload["analysis"]["is_stale"])
+        self.assertIn("no ejecutó Gemini", payload["analysis"]["warning"])
+        self.assertEqual(payload["alerts_today"], [])
 
 
 if __name__ == "__main__":

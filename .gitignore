@@ -3,7 +3,14 @@ __pycache__/
 .venv/
 venv/
 gemini_cache.json
+ai_provider_state.json
+.ai_provider_state.json
+agent_state.json
+.agent_state.json
 .gemini_cache.json.tmp
-GEMINI_API_KEY.txt 
+GEMINI_API_KEY.txt
+*_API_KEY.txt
+TELEGRAM_BOT_TOKEN.txt
+TELEGRAM_CHAT_ID.txt
 /public/
 /react-portfolio/public/market_data.json

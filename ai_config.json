@@ -1,0 +1,148 @@
+{
+  "provider_order": [
+    "gemini",
+    "gemini_fallback",
+    "gemini_flash_lite",
+    "groq",
+    "openrouter"
+  ],
+  "max_retries": 2,
+  "base_backoff_seconds": 1,
+  "max_backoff_seconds": 30,
+  "circuit_failure_threshold": 5,
+  "circuit_cooldown_seconds": 300,
+  "profiles": {
+    "full": {
+      "max_prompt_chars": 150000,
+      "company_news_items": 200,
+      "news_per_company": 8,
+      "macro_headlines": 400,
+      "watchlist_items": 1000,
+      "summary_chars": 2000
+    },
+    "reduced": {
+      "max_prompt_chars": 20000,
+      "company_news_items": 25,
+      "news_per_company": 3,
+      "macro_headlines": 40,
+      "watchlist_items": 15,
+      "summary_chars": 200
+    }
+  },
+  "providers": {
+    "gemini": {
+      "kind": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
+      "base_url_env": "GEMINI_API_BASE_URL",
+      "api_key_env": "GEMINI_API_KEY",
+      "model_env": "GEMINI_MODEL",
+      "default_model": "gemini-3.8-flash",
+      "max_prompt_chars": 150000,
+      "rpm": null,
+      "tpm": null,
+      "rpd": null,
+      "tpd": null,
+      "enabled": true
+    },
+    "gemini_fallback": {
+      "kind": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
+      "base_url_env": "GEMINI_FALLBACK_API_BASE_URL",
+      "api_key_env": "GEMINI_API_KEY",
+      "model_env": "GEMINI_FALLBACK_MODEL",
+      "default_model": "gemini-3.7-flash",
+      "max_prompt_chars": 150000,
+      "rpm": null,
+      "tpm": null,
+      "rpd": null,
+      "tpd": null,
+      "enabled": true
+    },
+    "gemini_flash_lite": {
+      "kind": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
+      "base_url_env": "GEMINI_FLASH_LITE_API_BASE_URL",
+      "api_key_env": "GEMINI_API_KEY",
+      "model_env": "GEMINI_FLASH_LITE_MODEL",
+      "default_model": "gemini-3.8-flash-lite",
+      "max_prompt_chars": 150000,
+      "rpm": null,
+      "tpm": null,
+      "rpd": null,
+      "tpd": null,
+      "enabled": true
+    },
+    "groq": {
+      "kind": "openai_compatible",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY",
+      "model_env": "GROQ_MODEL",
+      "default_model": "openai/gpt-oss-20b",
+      "extra_headers": {},
+      "json_mode": true,
+      "max_prompt_chars": 18000,
+      "rpm": null,
+      "tpm": null,
+      "rpd": null,
+      "tpd": null,
+      "context_window": 131072,
+      "limits_note": "Los límites publicados consultados corresponden al Developer base; Free exacto sin verificar. La documentación dice que los límites varían por organización.",
+      "enabled": true
+    },
+    "openrouter": {
+      "kind": "openai_compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "model_env": "OPENROUTER_MODEL",
+      "default_model": "openrouter/free",
+      "extra_headers": {
+        "HTTP-Referer": "https://github.com/danigardel/AGENTE-CARTERA",
+        "X-Title": "AGENTE-CARTERA"
+      },
+      "json_mode": true,
+      "max_prompt_chars": 18000,
+      "rpm": null,
+      "tpm": null,
+      "rpd": null,
+      "tpd": null,
+      "context_window": "variable; verificar modelo elegido",
+      "enabled": true
+    },
+    "cerebras": {
+      "kind": "openai_compatible",
+      "base_url": "https://api.cerebras.ai/v1",
+      "api_key_env": "CEREBRAS_API_KEY",
+      "model_env": "CEREBRAS_MODEL",
+      "default_model": "qwen-3.8-27b",
+      "extra_headers": {},
+      "json_mode": true,
+      "max_prompt_chars": 20000,
+      "rpm": 5,
+      "tpm": 30000,
+      "tpm_total": 90000,
+      "rpd": null,
+      "tpd": 1000000,
+      "tph": 1000000,
+      "context_window": 65536,
+      "limits_note": "Free Trial promocional sujeto a verificación de pago; la página de gpt-oss-120b discrepa de la tabla consolidada.",
+      "enabled": false
+    },
+    "mistral": {
+      "kind": "openai_compatible",
+      "base_url": "https://api.mistral.ai/v1",
+      "api_key_env": "MISTRAL_API_KEY",
+      "model_env": "MISTRAL_MODEL",
+      "default_model": "mistral-small-2603",
+      "extra_headers": {},
+      "json_mode": true,
+      "max_prompt_chars": 20000,
+      "rpm": null,
+      "tpm": null,
+      "rpd": null,
+      "tpd": null,
+      "context_window": "sin verificar",
+      "limits_note": "ID de modelo predeterminado, ventana de contexto, disponibilidad de un nivel gratuito y límites RPM/TPM/RPD sin verificar en la documentación oficial consultada; proveedor deshabilitado hasta verificarlos.",
+      "enabled": false
+    }
+  }
+}

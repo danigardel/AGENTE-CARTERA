@@ -1,15 +1,15 @@
 ESTADO Y ARQUITECTURA DEL PROYECTO
 
-Fecha del informe: 29 de octubre de 2026
+Fecha del informe: 1 de noviembre de 2026
 Repositorio: danigardel/AGENTE-CARTERA
 Directorio de trabajo: C:\Users\danig\Desktop\agente
 Rama: main
-Último commit publicado observado: bd92700 - mejora de lectura de zonas de riesgo y alias del mapa.
+Último commit publicado observado: 26daa9d - Amplío el radar macro y deduplico titulares.
 
 
 1. PROPÓSITO GENERAL
 
-Este proyecto genera un radar bursátil como página web estática y ofrece dos superficies de agente: un análisis de cartera programado/reactivo y un agente interactivo en consola. Combina cotizaciones públicas, titulares, indicadores de sentimiento y análisis de una cartera configurada por el usuario. El dashboard se puede consultar localmente o publicar en GitHub Pages mediante GitHub Actions.
+Este proyecto genera un radar bursátil como página web estática y ofrece dos superficies de agente: un análisis de cartera programado/reactivo y un agente interactivo en consola. El dashboard se genera cada cinco minutos sin IA; un workflow independiente ejecuta el agente cada 30 minutos y persiste sus datos operativos en la rama `data`.
 
 La página reúne:
 
@@ -17,8 +17,9 @@ La página reúne:
 - Una sección de cartera con posiciones, inversión base, precios y valor actual, rendimientos históricos y métricas MAX.
 - Mapas de calor, minigráficos intradía y curvas de rendimiento comparativas.
 - Un screener que filtra y ordena los datos ya cargados en la página.
-- Un análisis opcional de cartera generado por Gemini.
+- Un análisis opcional de cartera con una cadena Gemini → Groq → OpenRouter y proveedores adicionales deshabilitados.
 - Alertas de anomalías intradía con niveles ATR y variación diaria.
+- Alertas deterministas de Telegram para caídas/subidas de cartera y subidas de watchlist, sin cotizaciones stale.
 - Una consola interactiva Gemini con contexto y memoria de cartera.
 - Una agenda de eventos corporativos y un radar de noticias macroeconómicas.
 
@@ -40,7 +41,7 @@ Declaradas en requirements.txt:
 
 Paquete             Versión local observada    Uso
 feedparser          6.0.14                     Lectura de feeds RSS.
-requests            2.34.2                     Solicitudes HTTP, traducción y API Gemini.
+requests            2.34.2                     Solicitudes HTTP, traducción y APIs IA compatibles con OpenAI.
 vaderSentiment      3.3.2                      Heurística de sentimiento de titulares.
 yfinance            1.7.0                      Cotizaciones, datos históricos y fundamentales públicos de Yahoo Finance.
 pandas              3.0.6                      Manipulación de series y datos financieros; dependencia utilizada por yfinance.
@@ -49,32 +50,60 @@ En el navegador se carga D3.js 7.9.0 desde CDN para dibujar los SVG. Por tanto, 
 
 Configuración y credenciales
 
-- Gemini es opcional. La variable GEMINI_API_KEY puede contener un pool de claves separados por comas; GEMINI_MODEL permite elegir el modelo y INVESTOR_PROFILE personalizar el perfil enviado al análisis.
-- El flujo de Gemini usa gemini-3.8-flash y conserva gemini-3.7-flash como fallback.
+- La cadena predeterminada es Gemini principal → Gemini fallback → Gemini Flash Lite → Groq → OpenRouter (`openrouter/free`); Cerebras y Mistral están definidos y deshabilitados. `AI_PROVIDERS` permite ordenarla o reducirla.
+- `GEMINI_API_KEY`, `GROQ_API_KEY` y `OPENROUTER_API_KEY` son secretos opcionales; los proveedores sin clave se omiten. Las variables `GROQ_MODEL`, `OPENROUTER_MODEL`, `CEREBRAS_MODEL`, `MISTRAL_MODEL` y `INVESTOR_PROFILE` personalizan modelos y perfil.
+- `ai_providers.py` implementa la API OpenAI-compatible con `requests`, JSON estricto, backoff con jitter, `Retry-After`, circuit breaker persistente y salvaguarda gratuita de OpenRouter. GitHub Models fue retirado el 30/07/2026; no es una opción.
+- `ai_config.json` o `AI_CONFIG_PATH` configuran endpoints, modelos, límites, perfiles `full`/`reduced` y el orden de proveedores; nunca guardar secretos allí. Los límites Free exactos de Groq y el nivel gratuito/modelo de Mistral figuran como sin verificar.
+- El perfil reducido limita inicialmente noticias a 25, titulares macro a 40, watchlist a 15 empresas y resúmenes a 200 caracteres; ante HTTP 413 se reduce una vez más. Los topes de 18.000–20.000 caracteres para respaldos se estiman en 4.500–5.000 tokens (caracteres/4) y no exceden los máximos configurados.
+- OpenRouter Free puede escoger modelos distintos y no tiene contexto o cuota universal. Solo se admiten `openrouter/free` y modelos `:free`, salvo `OPENROUTER_ALLOW_PAID=true` local explícito; no se habilita esa variable en Actions.
+- Los proveedores de respaldo reciben datos de cartera. Revisar términos y privacidad de cada proveedor, en especial la configuración de OpenRouter para modelos gratuitos.
 - La consola puede leer `GEMINI_API_KEY.txt` si `GEMINI_API_KEY` no está definida; el archivo está excluido de Git.
 - `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` son secretos opcionales y no se escriben en la caché ni en el dashboard.
 - REPORT_TIMEZONE permite cambiar la zona horaria y PORTFOLIO_TRANSACTIONS_CSV indicar un CSV de operaciones.
-- .gitignore excluye cachés, bytecode y el archivo local de credenciales. No copiar valores de claves ni archivos de credenciales al contexto del siguiente agente; en CI deben permanecer como GitHub Secrets.
+- `.gitignore` excluye cachés, estado del agente, bytecode y archivos locales de credenciales. La rama pública `data` contiene la última narrativa IA y estado de alertas/cortacircuitos; nunca claves.
 - Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.
 
+Límites de proveedores consultados en documentación oficial el 01/11/2026:
+
+Proveedor   Modelo en ai_config.json       Contexto            Cuotas / verificación
+Gemini      IDs configurables              1.048.576 tokens*   Principal; cuotas variables por proyecto.
+Groq        openai/gpt-oss-20b             131.072 tokens      Developer base: 30 RPM, 8K TPM, 1K RPD; límites Free exactos sin verificar.
+OpenRouter  openrouter/free                Variable            Modelo elegido y límites variables; sin cuota/contexto universal.
+Cerebras    qwen-3.8-27b                  Free Trial: 64K     5 RPM, 30K uncached TPM, 90K total TPM, 1M TPH/TPD; prueba promocional, no nivel permanente.
+Mistral     mistral-small-2603 (candidato) Sin verificar       ID, contexto, API gratis y RPM/TPM/RPD sin verificar; deshabilitado.
+
+*El límite de Gemini 3.8 Flash se consulta en la documentación oficial. Groq
+publica las cuotas Developer base y advierte que las cuotas exactas dependen de
+la organización. Cerebras Free Trial requiere método de pago verificado. Fuentes:
+https://console.groq.com/docs/models
+https://console.groq.com/docs/rate-limits
+https://inference-docs.cerebras.ai/models/overview
+https://inference-docs.cerebras.ai/models/qwen-3.8-27b.md
+https://inference-docs.cerebras.ai/support/rate-limits.md
+https://openrouter.ai/docs/guides/routing/routers/free-models-router
+https://docs.mistral.ai/models/
 
 3. ARCHIVOS PRINCIPALES Y RESPONSABILIDADES
 
 daily_report.py
 
-Archivo central, aproximadamente 4.220 líneas. Contiene configuración, modelos de datos, obtención de datos, cálculos, análisis IA, HTML, CSS y JavaScript.
+Archivo central. Contiene configuración, modelos de datos, obtención de datos, cálculos, análisis IA, HTML, CSS y JavaScript.
 
 Flujo de ejecución de alto nivel:
 
-1. main() lee los argumentos CLI, carga la cartera fija o un CSV, recopila reportes, genera el análisis y construye el HTML.
+1. `main()` lee los argumentos CLI, carga la cartera fija o un CSV, recopila reportes y construye HTML/JSON. Con `--no-ai` no consulta Gemini y muestra el último análisis válido con aviso de antigüedad.
 2. collect_reports() ejecuta en paralelo la descarga de titulares y cotizaciones; luego traduce los titulares secuencialmente con una pausa de 0,2 s entre peticiones reales.
 3. fetch_portfolio() obtiene precios actuales e históricos, calcula cierres y rendimientos por periodo y los valores de la cartera.
-4. analyze_portfolio() reúne contexto, consulta Gemini si está configurado, valida su respuesta y usa caché y rotación del pool de claves.
-5. Antes de reutilizar la caché, analiza triggers urgentes nuevos (soporte ATR cruzado o variación diaria >= 4 %) y fuerza una consulta solo una vez por ticker y fecha local. La memoria del análisis previo se añade al prompt; Telegram solo recibe alertas de un análisis recién generado y accionable.
+4. analyze_portfolio() reúne contexto, prueba la cadena configurada, valida la respuesta estructurada y conserva el último análisis correcto en caché.
+5. El agente reactivo analiza triggers urgentes nuevos (soporte ATR cruzado o variación diaria >= 4 %) y fuerza una consulta una vez por ticker y fecha local. La memoria temporal y el triaje de eventos se añaden al prompt; su tamaño puede reducirse sin quitar posiciones ni memoria.
 6. collect_chart_data() reúne las series intradía e históricas para heatmaps, sparklines y gráficos de cartera y referencias.
 7. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
 
 `agente_interactivo.py` carga claves desde el entorno o el archivo local ignorado `GEMINI_API_KEY.txt`, usa la actividad/cache existentes y permite consultar la cartera, refrescar precios ATR, actualizar el radar y conversar con Gemini conservando hasta 20 turnos.
+
+`agent.py` ejecuta la automatización reactiva: carga cartera y watchlist, consulta precios y envía un único mensaje con caídas/subidas de cartera y subidas de watchlist cuando superan `ALERT_DROP_PCT`. Ignora datos stale, excluye tickers ya presentes en cartera de la categoría de seguimiento, deduplica por ticker/fecha y reavisa si el movimiento se intensifica en la misma dirección al menos 1 punto porcentual.
+
+`ai_providers.py` implementa proveedores Gemini y OpenAI-compatible con `requests`, clasificación de errores, reintentos con backoff exponencial y jitter, `Retry-After`, circuit breaker persistente y protección anti-coste para OpenRouter. GitHub Models fue retirado el 30/07/2026; no es una opción.
 
 Responsabilidades representativas dentro del archivo:
 
@@ -82,7 +111,9 @@ Responsabilidades representativas dentro del archivo:
 - fetch_headlines(), fetch_financial_news(), collect_market_radar() y translate_headline(): noticias, RSS y traducción.
 - fetch_quote(), fetch_portfolio() y extra_quote_fields(): cotizaciones, cartera y métricas financieras.
 - load_portfolio_transactions(), portfolio_assets_from_transactions() y portfolio_history_from_transactions(): importación y reconstrucción estimada de operaciones CSV.
-- build_analysis_prompt(), post_gemini(), analyze_portfolio() y funciones auxiliares: generación IA, memoria temporal validada, triggers intradía, fallback, rotación, caché y Telegram.
+- build_analysis_prompt(), post_gemini(), analyze_portfolio() y funciones auxiliares: generación IA, memoria temporal validada, triggers intradía, fallback multi-proveedor, rotación, caché y Telegram.
+- `_build_quant_summary()` calcula siempre niveles ATR, variación diaria, caídas, resultados próximos y distancia a máximos, incluso con la cadena IA desactivada o fallida.
+- `_reduce_analysis_context()` prioriza cartera y memoria, y descarta primero titulares antiguos cuando el prompt supera `max_prompt_chars`.
 - collect_chart_data() y _market_session_series(): preparación de series intradía e históricas.
 - SORT_SCRIPT, PORTFOLIO_SCRIPT y CHARTS_SCRIPT: filtros del screener, controles de la cartera, heatmaps y gráficos D3 del cliente.
 - render_dashboard(): serialización segura de datos e integración del HTML, CSS y JavaScript.
@@ -93,7 +124,11 @@ Agente de consola basado en `cmd.Cmd`, separado del generador del dashboard. Com
 
 tests\test_daily_report.py
 
-Suite unittest para noticias, cartera, Gemini, caché, triggers, Telegram, gráficas, generación HTML, screener y comportamiento de cotizaciones stale.
+Suite unittest para noticias, cartera, Gemini, caché, triggers, Telegram, gráficas, generación HTML, screener, estado stale y datos de alertas.
+
+tests\test_ai_providers.py y tests\test_agent.py
+
+Prueban reintentos, Retry-After, circuit breaker, salvaguarda gratuita de OpenRouter, fallback multi-proveedor, JSON inválido, tamaño de prompt, filtrado stale, reavisos y agrupación de Telegram.
 
 README.md
 
@@ -105,7 +140,11 @@ Lista las dependencias Python directas. No se observa un lockfile en la raíz in
 
 .github\workflows\daily_report.yml
 
-Instala dependencias, restaura y guarda exclusivamente gemini_cache.json, ejecuta el generador y publica public\index.html mediante GitHub Pages. Tiene ejecución programada cada cinco minutos y permite ejecución manual. El step de generación mapea los secretos opcionales de Telegram.
+Instala dependencias, restaura el último análisis y estado de alertas desde `data`, genera el dashboard con `--no-ai` y publica `public\index.html` en GitHub Pages cada cinco minutos.
+
+.github\workflows\portfolio_agent.yml
+
+Ejecuta `agent.py` cada 30 minutos. Restaura y persiste `agent_state.json`, `gemini_cache.json` y `ai_provider_state.json` en la rama `data`, usando concurrencia para evitar escrituras simultáneas. Sus fallos no bloquean la publicación de Pages.
 
 HTML generado
 
@@ -131,13 +170,15 @@ Noticias y análisis IA
 - Google Translate se llama de forma secuencial con una pausa de 0,2 s para evitar ráfagas paralelas contra el servicio gratuito.
 - El radar macro puede incluir Yahoo Finance, CNBC, WSJ, Bloomberg e Investing.com España; sus titulares se envían tal como se publican.
 - VADER analiza el texto original. El sentimiento es una señal heurística, no una predicción ni asesoramiento.
-- Gemini recibe información de empresas, cartera y noticias disponibles. No se usa Google Search Grounding.
+- El proveedor de la cadena recibe la cartera, empresas y noticias necesarias; los proveedores de respaldo reciben datos financieros. No se usa Google Search Grounding.
 - La rotación de claves, caché positiva/negativa y fallback de modelo deben conservarse: son funcionalidades centrales y existen pruebas de regresión.
 - La rotación de varias claves del mismo proyecto no aumenta la cuota del proyecto.
 - La memoria temporal del prompt solo usa campos estructurados y validados de la caché anterior; no desplaza los datos actuales.
-- Los triggers ignoran posiciones ya alertadas ese día y no se ejecutan mientras la caché contiene un warning/failure_warning. Los tickers se guardan junto a la fecha local en la misma caché de Gemini.
-- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT; los valores omitidos o no válidos se resuelven de forma segura a HOLD. Telegram se intenta solo para análisis recién generado, nunca para un resultado reutilizado.
-- `market_data.json` expone `action_signal` y `telegram_summary` de forma aditiva; el validador React acepta ambos campos opcionales y sigue aceptando análisis antiguos.
+- Los triggers de análisis ignoran posiciones ya alertadas ese día y no se ejecutan mientras la caché contiene un warning/failure_warning. Los tickers se guardan junto a la fecha local en la caché de Gemini.
+- Las alertas deterministas usan el umbral configurable `ALERT_DROP_PCT`: caídas y subidas de cartera, y solo subidas de watchlist fuera de cartera. Ignoran precios stale, agrupan por categoría y reavisan tras un movimiento adicional de 1 punto porcentual en la misma dirección. `agent_state.json` usa `last_alerted_pct` y migra los registros heredados `last_drop_pct`.
+- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT; la consola/directo puede enviar Telegram para un análisis nuevo, mientras que `agent.py` desactiva esos avisos narrativos para evitar duplicados.
+- `market_data.json` mantiene compatibilidad con datos antiguos y añade opcionalmente `analysis.provider_used`, `analysis.is_stale` y `alerts_today`; React valida esos campos y muestra avisos de análisis desactualizado.
+- El prompt incluye `previous_analysis_memory` validada, `portfolio_events` y un límite configurable de caracteres; se eliminan primero titulares y noticias antiguas.
 
 Interfaz y frescura de mercado
 
@@ -152,17 +193,18 @@ Interfaz y frescura de mercado
 Límites de confianza
 
 - Yahoo Finance, RSS y Google Translate son fuentes externas y pueden retrasarse, fallar o devolver datos incompletos.
-- Gemini puede fallar por cuota o red; el reporte debe poder generarse aun sin análisis IA.
+- Cualquier proveedor puede fallar por cuota o red; el dashboard y el resumen cuantitativo deben funcionar sin narrativa IA.
 - La salida del modelo se valida contra los tickers autorizados.
 - Los datos financieros y el análisis no son asesoramiento financiero personalizado.
+- La rama pública `data` contiene la última respuesta válida de la cadena IA y metadatos de tickers/alertas; no contiene claves de API ni tokens de Telegram.
 - No basar nuevas funciones en rutas privadas/no documentadas de Trade Republic ni en sesiones o tokens del navegador.
 
 
 5. ESTADO ACTUAL
 
-- El último trabajo de interfaz implementó etiquetas de heatmap forzadas para activos actuales, identificadores estables en las tarjetas y navegación desde las celdas del mapa.
-- Git se inspeccionó antes de editar: rama `main`, commit publicado `bd92700`; `portfolio_analysis.json` estaba sin seguimiento y se conserva fuera de alcance.
-- Se añadieron `action_signal`, resumen Telegram, memoria del análisis previo, triggers urgentes limitados por ticker/fecha local y el agente interactivo `agente_interactivo.py`.
+- El dashboard original generado por Python y sus mapas de calor se mantienen como salida publicada; React continúa como prototipo opcional.
+- El último commit observado antes de estos cambios es `26daa9d`, en `main` y sincronizado con `origin/main`.
+- Se añadieron `ai_providers.py`, `agent.py`, workflows separados de dashboard/agente, alertas deterministas y campos aditivos para datos recientes; cambios locales previos de consola y credenciales siguen fuera de alcance.
 - La comprobación manual en navegador a 390 px confirmó:
   - Sin desbordamiento horizontal.
   - Las celdas de instrumentos actuales muestran texto.
@@ -173,10 +215,10 @@ Límites de confianza
 
 6. PRÓXIMO OBJETIVO O HITO RECOMENDADO
 
-Antes de habilitar alertas reales en GitHub, configurar `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` como secretos y comprobar el flujo con respuestas mockeadas. Para la consola:
+Antes de habilitar alertas reales en GitHub, configurar los secretos necesarios y comprobar el flujo con respuestas mockeadas:
 
-1. Ejecutar `python agente_interactivo.py` localmente con las claves almacenadas fuera de Git.
-2. Comprobar `/cartera`, `/vivo` y `/radar` con fuentes disponibles.
+1. Crear claves de Groq y OpenRouter y guardarlas como secretos `GROQ_API_KEY` y `OPENROUTER_API_KEY`; añadir `GEMINI_API_KEY` y los secretos de Telegram si se van a usar. Nunca incluirlos en el repositorio.
+2. Verificar que el workflow `portfolio_agent.yml` tiene permiso efectivo de escritura en la rama `data` (el YAML declara `contents: write`; comprobar también reglas de protección) y que la rama contiene solo los tres ficheros de estado documentados.
 3. Seguir conservando el dashboard original como la salida publicada; React continúa siendo solo un prototipo opcional.
 
 
@@ -186,6 +228,7 @@ Desde C:\Users\danig\Desktop\agente:
 
     python -m pip install -r requirements.txt
     python -m unittest tests.test_daily_report
-    python daily_report.py --output dashboard.html
+    python daily_report.py --no-ai --output dashboard.html
+    python agent.py
 
 Para generar con Gemini, suministrar GEMINI_API_KEY mediante el gestor de secretos apropiado; nunca incluir su valor en prompts, documentación o commits.

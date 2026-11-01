@@ -18,6 +18,8 @@ const legacyRiskZones = {
 function marketData(
   riskZones: Record<string, unknown> | null,
   analysis: Record<string, unknown> | null = null,
+  alertsToday?: unknown,
+  quantSummary?: unknown,
 ) {
   return {
     schema_version: 1,
@@ -80,6 +82,8 @@ function marketData(
       },
     },
     analysis,
+    ...(alertsToday === undefined ? {} : { alerts_today: alertsToday }),
+    ...(quantSummary === undefined ? {} : { quant_summary: quantSummary }),
     market_events: [],
     portfolio_activity: [],
     charts: {
@@ -125,6 +129,85 @@ test("accepts optional action signals and summaries while preserving old analyse
         ...legacyAnalysis,
         action_signal: "SELL_NOW",
       }),
+    ),
+    false,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(
+        null,
+        {
+          ...legacyAnalysis,
+          provider_used: "gemini",
+          model_used: "gemini-3.8-flash",
+          is_stale: true,
+        },
+        [
+          {
+            ticker: "TEST",
+            name: "Example",
+            daily_change_pct: -2.4,
+            current_price_eur: 97.6,
+            last_alerted_at: "2026-10-26T12:00:00+01:00",
+          },
+        ],
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, { ...legacyAnalysis, is_stale: "true" }),
+    ),
+    false,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, { ...legacyAnalysis, provider_used: 7 }),
+    ),
+    false,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, { ...legacyAnalysis, model_used: "openrouter/free" }),
+    ),
+    true,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, { ...legacyAnalysis, model_used: 7 }),
+    ),
+    false,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, legacyAnalysis, [{ ticker: "TEST" }]),
+    ),
+    false,
+  );
+});
+
+test("accepts optional deterministic quant summary and rejects malformed entries", () => {
+  const quantSummary = {
+    generated_at: "2026-10-26T12:00:00+01:00",
+    alert_drop_pct: 2,
+    atr_crossed: [],
+    volatile_daily_moves: [
+      { ticker: "TEST", name: "Example", daily_change_pct: -4 },
+    ],
+    daily_drop_alerts: [],
+    earnings_next_7_days: [],
+    distance_from_52w_high: [],
+  };
+  assert.equal(isMarketData(marketData(null, null, undefined, quantSummary)), true);
+  assert.equal(
+    isMarketData(
+      marketData(
+        null,
+        null,
+        undefined,
+        { ...quantSummary, atr_crossed: [{ ticker: 12, name: "Bad" }] },
+      ),
     ),
     false,
   );

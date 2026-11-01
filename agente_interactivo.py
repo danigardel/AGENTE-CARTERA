@@ -21,7 +21,7 @@ API_KEY_FILE = Path(__file__).resolve().with_name("GEMINI_API_KEY.txt")
 
 class PortfolioConsole(cmd.Cmd):
     intro = (
-        "Agente interactivo de cartera. Usa /cartera, /vivo, /radar o /salir."
+        "Agente interactivo de cartera. Usa /cartera, /vivo, /radar, /telegram o /salir."
     )
     prompt = "cartera> "
 
@@ -204,6 +204,15 @@ class PortfolioConsole(cmd.Cmd):
         ]
         print(f"Radar actualizado: {len(self.radar)} titulares.")
 
+    def do_telegram(self, _: str) -> None:
+        from daily_report import send_telegram_alert, PortfolioAnalysis
+        dummy_analysis = PortfolioAnalysis(
+            action_signal="RISK_ALERT",
+            telegram_summary="Prueba manual desde terminal interactiva local."
+        )
+        send_telegram_alert(dummy_analysis, triggered_by_anomaly=True)
+        print("Alerta forzada enviada a Telegram.")
+
     def do_salir(self, _: str) -> bool:
         print("Hasta luego.")
         return True
@@ -215,7 +224,7 @@ class PortfolioConsole(cmd.Cmd):
     def onecmd(self, line: str) -> bool | None:
         if line.startswith("/"):
             command, *arguments = line[1:].split(maxsplit=1)
-            if command in {"cartera", "vivo", "radar", "salir"}:
+            if command in {"cartera", "vivo", "radar", "telegram", "salir"}:
                 line = " ".join((command, *arguments))
         return super().onecmd(line)
 

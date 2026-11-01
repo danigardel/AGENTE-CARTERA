@@ -110,6 +110,30 @@ export interface BenchmarkChart {
   series: ChartPoint[];
 }
 
+export interface PortfolioAlertData {
+  ticker: string;
+  name: string;
+  daily_change_pct: number;
+  current_price_eur: number | null;
+  last_alerted_at: string;
+}
+
+export interface QuantSummaryItem {
+  ticker: string;
+  name: string;
+  [key: string]: string | number | null;
+}
+
+export interface QuantSummaryData {
+  generated_at: string;
+  alert_drop_pct: number;
+  atr_crossed: QuantSummaryItem[];
+  volatile_daily_moves: QuantSummaryItem[];
+  daily_drop_alerts: QuantSummaryItem[];
+  earnings_next_7_days: QuantSummaryItem[];
+  distance_from_52w_high: QuantSummaryItem[];
+}
+
 export interface MarketData {
   schema_version: 1;
   generated_at: string;
@@ -146,7 +170,12 @@ export interface MarketData {
     last_updated_utc: string | null;
     action_signal?: "HOLD" | "WATCH" | "REBALANCE" | "RISK_ALERT";
     telegram_summary?: string;
+    provider_used?: string | null;
+    model_used?: string | null;
+    is_stale?: boolean;
   } | null;
+  quant_summary?: QuantSummaryData;
+  alerts_today?: PortfolioAlertData[];
   market_events: {
     event_date: string;
     ticker: string;
@@ -416,6 +445,17 @@ function isMarketEvent(value: unknown): boolean {
   );
 }
 
+function isPortfolioAlert(value: unknown): value is PortfolioAlertData {
+  return (
+    isRecord(value) &&
+    typeof value.ticker === "string" &&
+    typeof value.name === "string" &&
+    isFiniteNumber(value.daily_change_pct) &&
+    isNullableNumber(value.current_price_eur) &&
+    typeof value.last_alerted_at === "string"
+  );
+}
+
 function isPortfolioActivity(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -467,6 +507,39 @@ function isBenchmarkChartRecord(
     isRecord(value) &&
     Object.values(value).every(
       (series) => Array.isArray(series) && series.every(isBenchmarkChart),
+    )
+  );
+}
+
+function isQuantSummaryItem(value: unknown): value is QuantSummaryItem {
+  return (
+    isRecord(value) &&
+    typeof value.ticker === "string" &&
+    typeof value.name === "string" &&
+    Object.values(value).every(
+      (item) =>
+        typeof item === "string" ||
+        item === null ||
+        isFiniteNumber(item),
+    )
+  );
+}
+
+function isQuantSummary(value: unknown): value is QuantSummaryData {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.generated_at === "string" &&
+    isFiniteNumber(value.alert_drop_pct) &&
+    [
+      "atr_crossed",
+      "volatile_daily_moves",
+      "daily_drop_alerts",
+      "earnings_next_7_days",
+      "distance_from_52w_high",
+    ].every(
+      (key) =>
+        Array.isArray(value[key]) &&
+        value[key].every(isQuantSummaryItem),
     )
   );
 }
@@ -538,7 +611,18 @@ export function isMarketData(value: unknown): value is MarketData {
         (analysis.action_signal === undefined ||
           isActionSignal(analysis.action_signal)) &&
         (analysis.telegram_summary === undefined ||
-          typeof analysis.telegram_summary === "string"))) &&
+          typeof analysis.telegram_summary === "string") &&
+        (analysis.provider_used === undefined ||
+          isNullableString(analysis.provider_used)) &&
+        (analysis.model_used === undefined ||
+          isNullableString(analysis.model_used)) &&
+        (analysis.is_stale === undefined ||
+          typeof analysis.is_stale === "boolean"))) &&
+    (value.quant_summary === undefined ||
+      isQuantSummary(value.quant_summary)) &&
+    (value.alerts_today === undefined ||
+      (Array.isArray(value.alerts_today) &&
+        value.alerts_today.every(isPortfolioAlert))) &&
     Array.isArray(value.market_events) &&
     value.market_events.every(isMarketEvent) &&
     Array.isArray(value.portfolio_activity) &&

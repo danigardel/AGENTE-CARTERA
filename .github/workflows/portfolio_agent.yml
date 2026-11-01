@@ -1,0 +1,99 @@
+name: Portfolio event agent
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: portfolio-agent-data
+  cancel-in-progress: false
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore persisted agent state
+        shell: bash
+        run: |
+          data_ref="$(git ls-remote --heads origin refs/heads/data)"
+          if [ -n "$data_ref" ]; then
+            git fetch --no-tags origin refs/heads/data:refs/remotes/origin/data
+            for file in agent_state.json gemini_cache.json ai_provider_state.json; do
+              if git cat-file -e "refs/remotes/origin/data:$file" 2>/dev/null; then
+                git show "refs/remotes/origin/data:$file" > "$file"
+              fi
+            done
+          else
+            echo "::notice::La rama data se creará al guardar el primer estado."
+          fi
+
+      - name: Run event agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          AI_PROVIDERS: ${{ vars.AI_PROVIDERS }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+          ALERT_DROP_PCT: ${{ vars.ALERT_DROP_PCT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          INVESTOR_PROFILE: ${{ vars.INVESTOR_PROFILE }}
+          AI_PROVIDER_STATE_PATH: ai_provider_state.json
+          AGENT_STATE_PATH: agent_state.json
+        run: python agent.py
+
+      - name: Persist agent state on data branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh auth setup-git
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          data_ref="$(git ls-remote --heads "$remote" refs/heads/data)"
+          state_repo="$RUNNER_TEMP/agent-data"
+          if [ -n "$data_ref" ]; then
+            git clone --single-branch --branch data "$remote" "$state_repo"
+          else
+            mkdir -p "$state_repo"
+            git -C "$state_repo" init -b data
+            git -C "$state_repo" remote add origin "$remote"
+          fi
+
+          for file in agent_state.json gemini_cache.json ai_provider_state.json; do
+            if [ -f "$file" ]; then
+              cp "$file" "$state_repo/$file"
+              git -C "$state_repo" add -f -- "$file"
+            fi
+          done
+
+          if ! git -C "$state_repo" diff --cached --quiet; then
+            git -C "$state_repo" config user.name "github-actions[bot]"
+            git -C "$state_repo" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C "$state_repo" commit \
+              -m "Actualiza estado del agente de cartera" \
+              -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+            git -C "$state_repo" push origin data
+          else
+            echo "El estado del agente no ha cambiado."
+          fi
