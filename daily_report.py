@@ -862,6 +862,33 @@ def _finite_float(value: Any, multiplier: float = 1.0) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def fetch_vix_data() -> dict[str, float | None]:
+    try:
+        closes = (
+            yf.Ticker("^VIX")
+            .history(
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+                timeout=20,
+            )["Close"]
+            .dropna()
+        )
+        if closes.empty:
+            return {"price": None, "change_pct": None}
+
+        price = _finite_float(closes.iloc[-1])
+        previous_close = _finite_float(closes.iloc[-2]) if len(closes) > 1 else None
+        change_pct = (
+            _finite_float((price / previous_close - 1) * 100)
+            if price is not None and previous_close not in (None, 0)
+            else None
+        )
+        return {"price": price, "change_pct": change_pct}
+    except Exception:
+        return {"price": None, "change_pct": None}
+
+
 def _positive_int(value: Any) -> int | None:
     try:
         number = int(value)
@@ -4605,6 +4632,7 @@ def build_market_data(
     portfolio_activity: list[PortfolioActivity] | None = None,
     generated_at: datetime | None = None,
     alerts_today: list[dict[str, Any]] | None = None,
+    vix: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     generated_at = generated_at or datetime.now(TIMEZONE)
     chart_data = chart_data or DashboardCharts()
@@ -4921,6 +4949,12 @@ def build_market_data(
         "market_summary": market_summary,
         "watchlist": watchlist,
         "portfolio": portfolio_data,
+        "macro_indicators": {
+            "vix": {
+                "price": _finite_float((vix or {}).get("price")),
+                "change_pct": _finite_float((vix or {}).get("change_pct")),
+            }
+        },
         "analysis": asdict(analysis) if analysis is not None else None,
         "quant_summary": _build_quant_summary(
             reports,
@@ -5300,10 +5334,45 @@ def _market_events_section(events: list[MarketEvent]) -> str:
     )
     return (
         '<section aria-labelledby="market-events-title">'
-        '<div class="section-heading"><h2 id="market-events-title">Próximos eventos</h2>'
-        '<span>Hasta 45 días · Yahoo Finance</span></div>'
-        f'<ul class="market-events">{rows}</ul></section>'
+        '<details class="market-events-details">'
+        '<summary><span><strong id="market-events-title">Próximos eventos</strong>'
+        f'<small>{len(events)} eventos · hasta 45 días · Yahoo Finance</small></span>'
+        '<span class="events-toggle" aria-hidden="true">Ver eventos</span></summary>'
+        f'<ul class="market-events">{rows}</ul></details></section>'
     )
+
+
+SECTION_NAV_SCRIPT = """<script>
+(() => {
+  const links = Array.from(document.querySelectorAll('.section-nav a'));
+  const pages = links
+    .map((link) => document.getElementById(link.hash.slice(1)))
+    .filter(Boolean);
+  if (!links.length || pages.length !== links.length) return;
+
+  const activatePage = (hash, scrollToTop) => {
+    const activeId = hash.slice(1);
+    const activePage = pages.find((page) => page.id === activeId) || pages[0];
+    links.forEach((link) => {
+      if (link.hash === `#${activePage.id}`) {
+        link.setAttribute('aria-current', 'page');
+      } else {
+        link.removeAttribute('aria-current');
+      }
+    });
+    pages.forEach((page) => {
+      page.hidden = page !== activePage;
+    });
+    if (scrollToTop) window.scrollTo({top: 0, behavior: 'auto'});
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  };
+
+  window.addEventListener('hashchange', () => {
+    activatePage(window.location.hash, true);
+  });
+  activatePage(window.location.hash, false);
+})();
+</script>"""
 
 
 SORT_SCRIPT = """<script>
@@ -6225,6 +6294,7 @@ def render_dashboard(
     chart_data: DashboardCharts | None = None,
     market_events: list[MarketEvent] | None = None,
     portfolio_activity: list[PortfolioActivity] | None = None,
+    vix: dict[str, float | None] | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     portfolio = portfolio or []
@@ -6255,6 +6325,26 @@ def render_dashboard(
     signal = summary["sentiment_signal"]
     score = summary["sentiment_score"]
     score_text = f"{score:+.2f}" if score is not None else "sin señal"
+    vix_price = _finite_float((vix or {}).get("price"))
+    vix_change_pct = _finite_float((vix or {}).get("change_pct"))
+    if vix_price is None:
+        vix_level = "unavailable"
+        vix_mood = "Datos no disponibles"
+    elif vix_price < 15:
+        vix_level = "low"
+        vix_mood = "Optimismo / complacencia"
+    elif vix_price <= 25:
+        vix_level = "normal"
+        vix_mood = "Normalidad / cautela"
+    else:
+        vix_level = "high"
+        vix_mood = "Nerviosismo / pánico"
+    vix_price_text = _format_number(vix_price)
+    vix_change_text = (
+        f"{vix_change_pct:+.2f}%"
+        if vix_change_pct is not None
+        else "—"
+    )
     sectors = sorted(
         {
             report.quote.sector.strip()
@@ -6793,6 +6883,37 @@ def render_dashboard(
     h1 {{ font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; line-height: 1.1; margin: 7px 0; }}
     .subtitle, .muted {{ color: var(--muted); }}
     .updated {{ color: var(--muted); font-size: 13px; text-align: right; }}
+    .vix-indicator {{ display: grid; gap: 1px; border: 1px solid currentColor; border-radius: 12px;
+      padding: 8px 12px; color: var(--muted); line-height: 1.35; min-width: 130px; }}
+    .vix-indicator span, .vix-indicator small {{ font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }}
+    .vix-indicator strong {{ font-size: 17px; font-variant-numeric: tabular-nums; }}
+    .vix-indicator small {{ letter-spacing: 0; text-transform: none; }}
+    .vix-low {{ color: var(--green); }} .vix-normal {{ color: var(--orange); }} .vix-high {{ color: var(--red); }}
+    .section-nav {{ position: sticky; top: 0; z-index: 20; display: flex; gap: 6px; margin: 0 0 20px;
+      padding: 7px; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--line); border-radius: 13px; background: rgba(10, 14, 23, .94);
+      backdrop-filter: blur(14px); scrollbar-width: none; }}
+    .section-nav::-webkit-scrollbar {{ display: none; }}
+    .section-nav a {{ display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
+      min-height: 42px; padding: 8px 16px; border-radius: 9px; color: var(--muted);
+      font-size: 13px; font-weight: 700; white-space: nowrap; }}
+    .section-nav a[aria-current="page"] {{ background: var(--panel-2); color: var(--text); }}
+    .section-nav a:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+    .dashboard-view[hidden] {{ display: none !important; }}
+    .dashboard-view > section + section {{ margin-top: 24px; }}
+    .market-events-details {{ border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }}
+    .market-events-details > summary {{ display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; min-height: 54px; padding: 11px 14px; cursor: pointer; list-style: none; }}
+    .market-events-details > summary::-webkit-details-marker {{ display: none; }}
+    .market-events-details > summary > span:first-child {{ display: grid; gap: 2px; }}
+    .market-events-details > summary strong {{ font-size: 16px; }}
+    .market-events-details > summary small {{ color: var(--muted); font-size: 11px; }}
+    .events-toggle {{ flex: 0 0 auto; color: var(--blue); font-size: 12px; font-weight: 650; }}
+    .events-toggle::before {{ content: "+"; margin-right: 6px; font-size: 16px; }}
+    .market-events-details[open] .events-toggle {{ font-size: 0; }}
+    .market-events-details[open] .events-toggle::before {{ content: "−"; font-size: 16px; }}
+    .market-events-details[open] .events-toggle::after {{ content: "Ocultar"; font-size: 12px; }}
+    .market-events-details .market-events {{ padding: 0 12px 12px; }}
     .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 10px; margin-bottom: 12px; }}
     .summary-card {{ background: linear-gradient(140deg, #172238, #111827); border: 1px solid var(--line);
       border-radius: 16px; padding: 20px; min-height: 130px; }}
@@ -6984,7 +7105,9 @@ def render_dashboard(
     .private-note {{ color: #fbbf24; font-size: 11px; margin: 10px 0 0; }}
     footer {{ border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; margin-top: 34px; padding-top: 16px; }}
     @media (max-width: 720px) {{ .shell {{ padding: 25px 15px 40px; }} header {{ display: block; }}
-      .updated {{ text-align: left; margin-top: 12px; }} .summary {{ grid-template-columns: 1fr; gap: 9px; }}
+      .updated {{ text-align: left; margin-top: 12px; }} .vix-indicator {{ width: fit-content; margin-top: 12px; }}
+      .section-nav {{ margin: 0 -3px 16px; }}
+      .summary {{ grid-template-columns: 1fr; gap: 9px; }}
       .summary-card {{ min-height: 0; }} .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }}
       .metrics div {{ padding: 8px; }} .sort-select {{ width: 100%; }}
       .portfolio-controls .sort-select {{ width: auto; }}
@@ -7003,6 +7126,8 @@ def render_dashboard(
       .summary-card, .analysis-panel {{ padding: 12px; }}
       .market-chart-card {{ padding: 9px; }}
       .portfolio-panel {{ padding: 10px; }}
+      .section-nav {{ margin-right: -2px; margin-left: -2px; padding: 5px; }}
+      .section-nav a {{ min-height: 44px; padding: 8px 13px; }}
       .portfolio-controls {{ align-items: stretch; }}
       .portfolio-controls .sort-select {{ flex: 1 1 125px; min-width: 0; }}
       .card-top {{ gap: 7px; }}
@@ -7018,8 +7143,19 @@ def render_dashboard(
       <div><div class="eyebrow">Mercados · seguimiento diario</div>
         <h1>Radar bursátil</h1>
         <div class="subtitle">Noticias y sentimiento para {len(reports)} empresas</div></div>
+      <div class="vix-indicator vix-{vix_level}" role="status" aria-label="VIX: {vix_price_text}, variación diaria {vix_change_text}. {vix_mood}">
+        <span>VIX · índice del miedo</span>
+        <strong>{vix_price_text} <small>{vix_change_text}</small></strong>
+        <small>{vix_mood}</small>
+      </div>
       <div class="updated">Actualizado<br><strong>{_esc(generated_at.strftime("%d/%m/%Y · %H:%M %Z"))}</strong></div>
     </header>
+    <nav class="section-nav" aria-label="Navegación principal">
+      <a href="#market" aria-current="page">Mercado</a>
+      <a href="#portfolio">Cartera</a>
+      <a href="#watchlist">Seguimiento</a>
+    </nav>
+    <section id="market" class="dashboard-view" aria-label="Resumen del mercado">
     <section class="market-charts" aria-label="Visualizaciones del mercado">
       <div class="section-heading"><h2>Mercado de un vistazo</h2>
         <span>{len(reports)} instrumentos seguidos</span></div>
@@ -7064,6 +7200,8 @@ def render_dashboard(
       el PEG es una referencia informativa, no una recomendación de inversión.
       La cartera usa movimientos filtrados del extracto de inversión cuando están disponibles; no se conecta al broker ni se consultan las tenencias internas de fondos.
       Los feeds y datos pueden faltar o retrasarse.</p>
+    </section>
+    <section id="portfolio" class="dashboard-view" aria-label="Mi cartera" hidden>
     <section aria-labelledby="portfolio-title">
       <div class="section-heading"><h2 id="portfolio-title">Mi cartera</h2>
         <div class="portfolio-controls">
@@ -7111,12 +7249,14 @@ def render_dashboard(
         {portfolio_warning_html}
       </div>
     </section>
+    {_analysis_section(analysis, _build_quant_summary(reports, portfolio, market_events, generated_at))}
+    </section>
+    <section id="watchlist" class="dashboard-view" aria-label="Seguimiento de mercado" hidden>
     {_market_events_section(market_events)}
     <section aria-labelledby="key-title">
       <div class="section-heading"><h2 id="key-title">Titulares clave</h2><span>Los de mayor polaridad detectados hoy</span></div>
       <ul class="key-headlines">{key_headlines_html}</ul>
     </section>
-    {_analysis_section(analysis, _build_quant_summary(reports, portfolio, market_events, generated_at))}
     <section aria-labelledby="stocks-title">
       <div class="section-heading"><h2 id="stocks-title">Lista de seguimiento</h2>
         <select id="sort-select" class="sort-select" aria-label="Ordenar la lista de seguimiento" aria-controls="stock-grid">
@@ -7178,10 +7318,12 @@ def render_dashboard(
       </div>
       <div class="grid" id="stock-grid">{stale_divider_html}{"".join(cards)}</div>
     </section>
+    </section>
     <footer>Fuentes: Google News RSS, Google Translate, Yahoo Finance (vía yfinance) y Gemini API. Datos informativos, no asesoramiento financiero.</footer>
   </main>
 <script type="application/json" id="dashboard-chart-data">{chart_payload}</script>
 {SORT_SCRIPT}
+{SECTION_NAV_SCRIPT}
 {PORTFOLIO_SCRIPT}
 {CHARTS_SCRIPT}
 </body>
@@ -7276,6 +7418,7 @@ def main() -> int:
     chart_data = collect_chart_data(reports, portfolio, transactions, portfolio_activity)
     market_events = collect_market_events(reports)
     generated_at = datetime.now(TIMEZONE)
+    vix = fetch_vix_data()
     if not args.no_html:
         report_html = render_dashboard(
             reports,
@@ -7285,6 +7428,7 @@ def main() -> int:
             chart_data=chart_data,
             market_events=market_events,
             portfolio_activity=portfolio_activity,
+            vix=vix,
         )
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7305,6 +7449,7 @@ def main() -> int:
                 AGENT_STATE_FILE,
                 generated_at,
             ),
+            vix=vix,
         )
         data_path = Path(args.data_output)
         data_path.parent.mkdir(parents=True, exist_ok=True)

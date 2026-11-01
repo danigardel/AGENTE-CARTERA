@@ -134,6 +134,13 @@ export interface QuantSummaryData {
   distance_from_52w_high: QuantSummaryItem[];
 }
 
+export interface MacroIndicatorsData {
+  vix: {
+    price: number | null;
+    change_pct: number | null;
+  };
+}
+
 export interface MarketData {
   schema_version: 1;
   generated_at: string;
@@ -157,6 +164,7 @@ export interface MarketData {
   };
   watchlist: WatchlistItem[];
   portfolio: PortfolioData;
+  macro_indicators?: MacroIndicatorsData;
   analysis: {
     portfolio_assessment: string | null;
     diversification: string | null;
@@ -544,6 +552,15 @@ function isQuantSummary(value: unknown): value is QuantSummaryData {
   );
 }
 
+function isMacroIndicators(value: unknown): value is MacroIndicatorsData {
+  return (
+    isRecord(value) &&
+    isRecord(value.vix) &&
+    isNullableNumber(value.vix.price) &&
+    isNullableNumber(value.vix.change_pct)
+  );
+}
+
 export function isMarketData(value: unknown): value is MarketData {
   if (!isRecord(value) || value.schema_version !== 1) return false;
   const summary = value.market_summary;
@@ -551,9 +568,11 @@ export function isMarketData(value: unknown): value is MarketData {
   if (!isRecord(summary) || !isRecord(portfolio)) return false;
   const totals = portfolio.totals;
   const analysis = value.analysis;
+  const macroIndicators = value.macro_indicators;
 
   return (
     typeof value.generated_at === "string" &&
+    (macroIndicators === undefined || isMacroIndicators(macroIndicators)) &&
     typeof summary.sentiment_label === "string" &&
     (summary.sentiment_signal === "bullish" ||
       summary.sentiment_signal === "bearish" ||

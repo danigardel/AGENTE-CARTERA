@@ -77,6 +77,7 @@ from daily_report import (
     fetch_financial_news,
     _fetch_macro_feed,
     fetch_quote,
+    fetch_vix_data,
     load_portfolio_transactions,
     load_portfolio_activity,
     portfolio_assets_from_transactions,
@@ -364,6 +365,32 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('id="watchlist-heatmap"', html)
         self.assertIn('id="portfolio-heatmap"', html)
 
+    def test_dashboard_navigation_groups_content_into_three_views(self):
+        html = render_dashboard(
+            [],
+            market_events=[
+                MarketEvent(date(2026, 11, 5), "EX", "Example", "Resultados")
+            ],
+        )
+
+        self.assertIn('<nav class="section-nav" aria-label="Navegación principal">', html)
+        self.assertIn('<a href="#market" aria-current="page">Mercado</a>', html)
+        self.assertIn('<a href="#portfolio">Cartera</a>', html)
+        self.assertIn('<a href="#watchlist">Seguimiento</a>', html)
+        self.assertIn('<section id="market" class="dashboard-view"', html)
+        self.assertIn(
+            '<section id="portfolio" class="dashboard-view" aria-label="Mi cartera" hidden>',
+            html,
+        )
+        self.assertIn(
+            '<section id="watchlist" class="dashboard-view" aria-label="Seguimiento de mercado" hidden>',
+            html,
+        )
+        self.assertLess(html.index('id="portfolio-title"'), html.index('id="ai-analysis-title"'))
+        self.assertLess(html.index('id="ai-analysis-title"'), html.index('id="market-events-title"'))
+        self.assertIn("window.addEventListener('hashchange'", html)
+        self.assertIn("window.scrollTo({top: 0, behavior: 'auto'})", html)
+
     def test_dashboard_styles_high_peg_as_bearish_and_missing_peg_as_unavailable(self):
         reports = [
             StockReport(Company("High PEG Co", "HIGH"), quote=Quote(peg_ratio=2.1)),
@@ -453,11 +480,11 @@ class SentimentTests(unittest.TestCase):
             html.index('id="key-title"'),
         )
         self.assertLess(
-            html.index('id="key-title"'),
             html.index('id="ai-analysis-title"'),
+            html.index('id="market-events-title"'),
         )
         self.assertLess(
-            html.index('id="ai-analysis-title"'),
+            html.index('id="key-title"'),
             html.index('id="stocks-title"'),
         )
 
@@ -1253,6 +1280,9 @@ class SentimentTests(unittest.TestCase):
         )
         self.assertIn("Próximos eventos", dashboard)
         self.assertIn("Yahoo Finance", dashboard)
+        self.assertIn('<details class="market-events-details">', dashboard)
+        self.assertIn('id="market-events-title">Próximos eventos</strong>', dashboard)
+        self.assertNotIn('<details class="market-events-details" open>', dashboard)
 
     def test_dashboard_renders_portfolio_price_history_and_max_returns(self):
         asset = PortfolioAsset("Example ETF", "ETF.DE", 1.5, 100, "EUR")
@@ -4194,9 +4224,14 @@ class SentimentTests(unittest.TestCase):
             analysis=analysis,
             chart_data=DashboardCharts(watchlist=[{"value": float("inf")}]),
             generated_at=generated_at,
+            vix={"price": 18.5, "change_pct": 2.1},
         )
 
         self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(
+            payload["macro_indicators"]["vix"],
+            {"price": 18.5, "change_pct": 2.1},
+        )
         self.assertEqual(payload["watchlist"][0]["ticker"], "EXF")
         self.assertEqual(
             payload["watchlist"][0]["headlines"][0]["display_title"],
@@ -4250,6 +4285,14 @@ class SentimentTests(unittest.TestCase):
                 generated_at=generated_at,
             )["analysis"]
         )
+        self.assertEqual(
+            build_market_data(
+                [report],
+                [position],
+                generated_at=generated_at,
+            )["macro_indicators"]["vix"],
+            {"price": None, "change_pct": None},
+        )
         self.assertIn(
             "Narrativa IA no disponible",
             _analysis_section(None, payload["quant_summary"]),
@@ -4290,6 +4333,10 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(alerts[0]["daily_change_pct"], -2.5)
         self.assertEqual(old_alerts, [])
 
+    @patch(
+        "daily_report.fetch_vix_data",
+        return_value={"price": None, "change_pct": None},
+    )
     @patch("daily_report.collect_market_events", return_value=[])
     @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
     @patch("daily_report.analyze_portfolio", return_value=PortfolioAnalysis())
@@ -4302,6 +4349,7 @@ class SentimentTests(unittest.TestCase):
         _analysis_mock,
         _charts_mock,
         _events_mock,
+        _vix_mock,
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4331,6 +4379,10 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(payload["watchlist"], [])
         self.assertEqual(payload["portfolio"]["positions"], [])
 
+    @patch(
+        "daily_report.fetch_vix_data",
+        return_value={"price": 18.5, "change_pct": 2.1},
+    )
     @patch("daily_report.collect_market_events", return_value=[])
     @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
     @patch("daily_report.analyze_portfolio", return_value=PortfolioAnalysis())
@@ -4343,6 +4395,7 @@ class SentimentTests(unittest.TestCase):
         _analysis_mock,
         _charts_mock,
         _events_mock,
+        _vix_mock,
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4378,9 +4431,54 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('id="portfolio-heatmap"', html)
         self.assertIn('id="stock-grid"', html)
         self.assertIn("data-sparkline=", html)
+        self.assertIn('class="vix-indicator vix-normal"', html)
+        self.assertIn("18.50", html)
+        self.assertIn("+2.10%", html)
         self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(
+            payload["macro_indicators"]["vix"],
+            {"price": 18.5, "change_pct": 2.1},
+        )
         self.assertEqual(payload["watchlist"], [])
 
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_vix_uses_latest_close_and_daily_change(self, ticker_mock):
+        ticker_mock.return_value.history.return_value = pd.DataFrame(
+            {"Close": [17.0, 18.5]},
+            index=pd.to_datetime(["2026-10-30", "2026-10-31"]),
+        )
+
+        self.assertEqual(
+            fetch_vix_data(),
+            {"price": 18.5, "change_pct": (18.5 / 17.0 - 1) * 100},
+        )
+        ticker_mock.assert_called_once_with("^VIX")
+
+    @patch("daily_report.yf.Ticker", side_effect=RuntimeError("Yahoo unavailable"))
+    def test_fetch_vix_returns_null_values_when_yahoo_fails(self, _ticker_mock):
+        self.assertEqual(
+            fetch_vix_data(),
+            {"price": None, "change_pct": None},
+        )
+
+    def test_dashboard_vix_indicator_uses_sentiment_thresholds(self):
+        for price, css_class in (
+            (14.99, "vix-low"),
+            (15.0, "vix-normal"),
+            (25.0, "vix-normal"),
+            (25.01, "vix-high"),
+        ):
+            with self.subTest(price=price):
+                html = render_dashboard([], vix={"price": price, "change_pct": 0.5})
+                self.assertIn(f'class="vix-indicator {css_class}"', html)
+        unavailable_html = render_dashboard([])
+        self.assertIn('class="vix-indicator vix-unavailable"', unavailable_html)
+        self.assertIn("Datos no disponibles", unavailable_html)
+
+    @patch(
+        "daily_report.fetch_vix_data",
+        return_value={"price": None, "change_pct": None},
+    )
     @patch("daily_report.analyze_portfolio")
     @patch("daily_report.collect_market_events", return_value=[])
     @patch("daily_report.collect_chart_data", return_value=DashboardCharts())
@@ -4393,6 +4491,7 @@ class SentimentTests(unittest.TestCase):
         _charts_mock,
         _events_mock,
         analysis_mock,
+        _vix_mock,
     ):
         now = datetime.now(timezone.utc)
         cached_analysis = PortfolioAnalysis(

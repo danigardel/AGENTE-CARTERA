@@ -20,6 +20,7 @@ function marketData(
   analysis: Record<string, unknown> | null = null,
   alertsToday?: unknown,
   quantSummary?: unknown,
+  macroIndicators?: unknown,
 ) {
   return {
     schema_version: 1,
@@ -84,6 +85,9 @@ function marketData(
     analysis,
     ...(alertsToday === undefined ? {} : { alerts_today: alertsToday }),
     ...(quantSummary === undefined ? {} : { quant_summary: quantSummary }),
+    ...(macroIndicators === undefined
+      ? {}
+      : { macro_indicators: macroIndicators }),
     market_events: [],
     portfolio_activity: [],
     charts: {
@@ -97,6 +101,33 @@ function marketData(
 test("accepts legacy market data without risk zones and legacy risk-zone fields", () => {
   assert.equal(isMarketData(marketData(null)), true);
   assert.equal(isMarketData(marketData(legacyRiskZones)), true);
+});
+
+test("accepts optional VIX macro data and rejects malformed values", () => {
+  assert.equal(
+    isMarketData(
+      marketData(null, null, undefined, undefined, {
+        vix: { price: 18.5, change_pct: 2.1 },
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, null, undefined, undefined, {
+        vix: { price: null, change_pct: null },
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, null, undefined, undefined, {
+        vix: { price: "18.5", change_pct: 2.1 },
+      }),
+    ),
+    false,
+  );
 });
 
 test("accepts optional action signals and summaries while preserving old analyses", () => {
