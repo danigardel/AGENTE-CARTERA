@@ -12,6 +12,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from ai_providers import AIProviderConfig
 from daily_report import (
+    AI_ANALYSIS_PROMPT_VERSION,
     ATR_MULTIPLIER,
     ATR_WINDOW,
     CONFIDENCE_HIGH_SESSIONS,
@@ -55,6 +56,7 @@ from daily_report import (
     _triage_portfolio_events,
     _has_urgent_portfolio_trigger,
     _gemini_request_warning,
+    _telegram_message_chunks,
     analyze_portfolio,
     build_analysis_prompt,
     build_market_data,
@@ -113,6 +115,12 @@ class SentimentTests(unittest.TestCase):
         radar_patcher = patch("daily_report.collect_market_radar", return_value=[])
         self.collect_radar_mock = radar_patcher.start()
         self.addCleanup(radar_patcher.stop)
+        vix_patcher = patch(
+            "daily_report.fetch_vix_data",
+            return_value={"price": None, "change_pct": None},
+        )
+        self.fetch_vix_mock = vix_patcher.start()
+        self.addCleanup(vix_patcher.stop)
 
     def test_sentiment_thresholds_and_missing_data(self):
         self.assertEqual(classify_sentiment(0.2), ("Alcista", "bullish"))
@@ -2193,6 +2201,14 @@ class SentimentTests(unittest.TestCase):
             "portfolio_assessment": "Posición pequeña y positiva.",
             "diversification": "Falta diversificación.",
             "recommended_changes": "Evitar concentrar más en tecnología.",
+            "position_analysis": [
+                {
+                    "ticker": "EX",
+                    "name": "Example Inc.",
+                    "action": "MANTENER",
+                    "reason": "La variación diaria es del 1,2%; no hay catalizador confirmado.",
+                }
+            ],
             "top_buys": [
                 {"ticker": "EX", "name": "Example Inc.", "reason": "Datos favorables."},
                 {"ticker": "FAKE", "name": "Invented Co.", "reason": "No está en lista."},
@@ -2286,9 +2302,130 @@ class SentimentTests(unittest.TestCase):
         html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
         self.assertIn("Análisis de cartera", html)
         self.assertIn("Posición pequeña y positiva.", html)
+        self.assertIn("Análisis por posición", html)
+        self.assertIn("La variación diaria es del 1,2%", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertNotIn("Invented Co.", html)
+
+    @patch("daily_report.requests.post")
+    def test_analysis_excludes_selected_positions_and_includes_vix(self, post_mock):
+        reports = [
+            StockReport(Company("NVIDIA", "NVDA")),
+            StockReport(Company("MercadoLibre", "MELI")),
+            StockReport(Company("World Information Tech", "XDWT.DE")),
+        ]
+        portfolio = [
+            PortfolioPosition(
+                asset=PortfolioAsset("NVIDIA", "NVDA", 1, 100, "EUR"),
+                prices_eur={"Hoy": 100},
+                current_value_eur=100,
+            ),
+            PortfolioPosition(
+                asset=PortfolioAsset("MercadoLibre", "MELI", 1, 100, "EUR"),
+                prices_eur={"Hoy": 100},
+                current_value_eur=100,
+            ),
+            PortfolioPosition(
+                asset=PortfolioAsset("World Information Tech", "XDWT.DE", 1, 100, "EUR"),
+                prices_eur={"Hoy": 100},
+                current_value_eur=100,
+            ),
+        ]
+        self.collect_news_mock.return_value = [
+            FinancialNewsItem(
+                ticker="NVDA",
+                company="NVIDIA",
+                title="NVIDIA reports results",
+                summary="Revenue increased.",
+                url="https://example.com/nvda",
+                published=datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc),
+            ),
+            FinancialNewsItem(
+                ticker="MELI",
+                company="MercadoLibre",
+                title="MercadoLibre reports results",
+                summary="Revenue increased.",
+                url="https://example.com/meli",
+                published=datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc),
+            ),
+        ]
+        self.fetch_vix_mock.return_value = {"price": 17.5, "change_pct": 1.2}
+        result = {
+            "portfolio_assessment": "Cartera concentrada en tecnología.",
+            "diversification": "Una posición elegible.",
+            "recommended_changes": "Mantener NVDA.",
+            "position_analysis": [
+                {
+                    "ticker": "NVDA",
+                    "name": "NVIDIA",
+                    "action": "MANTENER",
+                    "reason": "Sin catalizador confirmado.",
+                }
+            ],
+            "top_buys": [],
+            "external_ideas": [],
+            "sell_candidates": [],
+            "market_context": "VIX en 17,5.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analyze_portfolio(
+                reports,
+                portfolio,
+                api_key="analysis-test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+                send_telegram=False,
+            )
+
+        prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        prompt_data = json.loads(prompt.split("DATOS (JSON):\n", 1)[1])
+        self.assertEqual(
+            [item["ticker"] for item in prompt_data["portfolio"]],
+            ["NVDA"],
+        )
+        self.assertEqual(
+            [item["ticker"] for item in prompt_data["watchlist"]],
+            ["NVDA"],
+        )
+        self.assertEqual(
+            prompt_data["macro_indicators"]["vix"],
+            {"price": 17.5, "change_pct": 1.2},
+        )
+        self.assertIn("NVIDIA reports results", prompt)
+        self.assertNotIn("MercadoLibre reports results", prompt)
+
+    @patch("daily_report.send_telegram_alert")
+    @patch("daily_report.requests.post")
+    def test_analysis_failure_never_sends_telegram(self, post_mock, telegram_mock):
+        error_response = SimpleNamespace(
+            status_code=503,
+            json=lambda: {"error": {"message": "temporarily unavailable"}},
+        )
+
+        def raise_unavailable():
+            raise requests.HTTPError(response=error_response)
+
+        post_mock.return_value = SimpleNamespace(raise_for_status=raise_unavailable)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="analysis-failure-test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
+
+        self.assertIsNotNone(analysis.warning)
+        telegram_mock.assert_not_called()
 
     @patch("daily_report.requests.post")
     def test_gemini_model_not_found_retries_with_fallback_model(self, post_mock):
@@ -2386,8 +2523,19 @@ class SentimentTests(unittest.TestCase):
             "examples": "<img src=x>",
             "reason": "Un hueco diversificador.",
         }
+        excluded_idea = {
+            "category": "Fintech",
+            "examples": "MELI · MercadoLibre",
+            "reason": "No debe aparecer en recomendaciones.",
+        }
         ideas = parse_external_ideas(
-            {"external_ideas": [valid, {"category": "inválida"}]}
+            {
+                "external_ideas": [
+                    valid,
+                    excluded_idea,
+                    {"category": "inválida"},
+                ]
+            }
         )
         self.assertEqual(len(ideas), 1)
         safe_html = external_ideas_html(ideas)
@@ -3174,9 +3322,11 @@ class SentimentTests(unittest.TestCase):
         )
         cached_data = {
             "timestamp": datetime(2026, 10, 6, 9, 1, tzinfo=TIMEZONE).isoformat(),
+            "prompt_version": AI_ANALYSIS_PROMPT_VERSION,
             "portfolio_assessment": "Análisis desde caché.",
             "diversification": "Diversificación desde caché.",
             "recommended_changes": "Sin cambios.",
+            "position_analysis": [],
             "top_buys": [
                 {"ticker": "EX", "name": "Example", "reason": "Razón almacenada."}
             ],
@@ -3312,6 +3462,14 @@ class SentimentTests(unittest.TestCase):
             "portfolio_assessment": "Análisis actualizado.",
             "diversification": "Diversificada.",
             "recommended_changes": "Revisar la volatilidad.",
+            "position_analysis": [
+                {
+                    "ticker": "VOL",
+                    "name": "Volatile",
+                    "action": "MANTENER",
+                    "reason": "Movimiento diario del -4%; sin catalizador confirmado.",
+                }
+            ],
             "top_buys": [],
             "sell_candidates": [],
             "market_context": "Contexto.",
@@ -3356,6 +3514,7 @@ class SentimentTests(unittest.TestCase):
         now = datetime(2026, 10, 6, 9, 5, tzinfo=TIMEZONE).astimezone(timezone.utc)
         cached_data = {
             "timestamp": datetime(2026, 10, 6, 8, 59, tzinfo=TIMEZONE).isoformat(),
+            "prompt_version": AI_ANALYSIS_PROMPT_VERSION,
             "last_updated_utc": datetime(
                 2026, 10, 6, 6, 59, tzinfo=timezone.utc
             ).isoformat(),
@@ -3817,12 +3976,14 @@ class SentimentTests(unittest.TestCase):
     def test_previous_analysis_memory_uses_last_good_analysis_after_failure(self):
         generated_at = datetime(2026, 10, 6, 6, 59, tzinfo=timezone.utc)
         cached_data = {
+            "prompt_version": AI_ANALYSIS_PROMPT_VERSION,
             "last_updated_utc": datetime(
                 2026, 10, 6, 9, 0, tzinfo=timezone.utc
             ).isoformat(),
             "warning": "Fallo de la consulta más reciente.",
             "failure_warning": "HTTP 503",
             "last_good_analysis": {
+                "prompt_version": AI_ANALYSIS_PROMPT_VERSION,
                 "last_updated_utc": generated_at.isoformat(),
                 "portfolio_assessment": "La evaluación válida anterior.",
                 "recommended_changes": "Mantener.",
@@ -3839,10 +4000,20 @@ class SentimentTests(unittest.TestCase):
                 "last_updated_utc": generated_at.isoformat(),
                 "portfolio_assessment": "La evaluación válida anterior.",
                 "recommended_changes": "Mantener.",
+                "position_analysis": [],
                 "top_buys": [],
                 "sell_candidates": [],
             },
         )
+        cached_data["last_good_analysis"]["position_analysis"] = [
+            {
+                "ticker": "MELI",
+                "name": "MercadoLibre",
+                "action": "MANTENER",
+                "reason": "Análisis histórico.",
+            }
+        ]
+        self.assertIsNone(_previous_analysis_memory(cached_data))
 
     def test_prompt_reduction_keeps_portfolio_and_previous_analysis_memory(self):
         now = datetime(2026, 10, 6, 12, 0, tzinfo=TIMEZONE)
@@ -3941,7 +4112,7 @@ class SentimentTests(unittest.TestCase):
         "os.environ",
         {"TELEGRAM_BOT_TOKEN": "test-bot-token", "TELEGRAM_CHAT_ID": "12345"},
     )
-    def test_send_telegram_alert_posts_only_for_actionable_analysis(self, post_mock):
+    def test_send_telegram_alert_posts_full_report_and_splits_long_messages(self, post_mock):
         post_mock.return_value.raise_for_status.return_value = None
         analysis = PortfolioAnalysis(
             action_signal="RISK_ALERT",
@@ -3953,22 +4124,32 @@ class SentimentTests(unittest.TestCase):
         post_mock.assert_called_once()
         endpoint = post_mock.call_args.args[0]
         self.assertIn("/bottest-bot-token/sendMessage", endpoint)
-        self.assertEqual(
-            post_mock.call_args.kwargs["json"],
-            {
-                "chat_id": "12345",
-                "text": "Revisar el soporte de la cartera.",
-            },
-        )
+        report_text = post_mock.call_args.kwargs["json"]["text"]
+        self.assertIn("RESUMEN\nRevisar el soporte de la cartera.", report_text)
+        self.assertIn("SEÑAL: RISK_ALERT", report_text)
         post_mock.reset_mock()
         send_telegram_alert(PortfolioAnalysis(), triggered_by_anomaly=False)
         post_mock.assert_not_called()
         long_summary = PortfolioAnalysis(
             action_signal="WATCH",
-            telegram_summary="palabra " * 61,
+            telegram_summary="palabra " * 1200,
         )
         send_telegram_alert(long_summary, triggered_by_anomaly=False)
-        self.assertEqual(len(post_mock.call_args.kwargs["json"]["text"].split()), 60)
+        self.assertGreater(post_mock.call_count, 1)
+        sent_messages = [
+            call.kwargs["json"]["text"] for call in post_mock.call_args_list
+        ]
+        self.assertEqual(sum(message.count("palabra") for message in sent_messages), 1200)
+        self.assertTrue(
+            all(
+                len(message.encode("utf-16-le")) // 2 <= 4096
+                for message in sent_messages
+            )
+        )
+        self.assertEqual(
+            _telegram_message_chunks("😀" * 5000, max_units=3900)[0],
+            "😀" * 1950,
+        )
         post_mock.reset_mock()
         post_mock.side_effect = requests.ConnectionError("offline")
         with self.assertLogs(level="WARNING"):
