@@ -1,1 +1,1 @@
-{"date": "2026-11-02", "alerts": {}}
+{"date": "2026-11-02", "alerts": {"AMP.MC": {"last_alerted_pct": 2.4625218, "sent_at": "2026-11-02T11:31:00.653600+01:00", "name": "Amper", "current_price_eur": 4.785, "category": "watchlist_rise"}}}
