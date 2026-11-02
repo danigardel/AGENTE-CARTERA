@@ -6354,9 +6354,25 @@ SECTION_NAV_SCRIPT = """<script>
     requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
   };
 
+  let pendingPageCallback = null;
   window.addEventListener('hashchange', () => {
-    activatePage(window.location.hash, true);
+    const callback = pendingPageCallback;
+    pendingPageCallback = null;
+    activatePage(window.location.hash, !callback);
+    if (callback) requestAnimationFrame(callback);
   });
+  window.DashboardOpenPage = (id, callback) => {
+    const page = pages.find((item) => item.id === id);
+    if (!page) return;
+    const hash = `#${id}`;
+    if (window.location.hash === hash) {
+      activatePage(hash, false);
+      if (callback) requestAnimationFrame(callback);
+      return;
+    }
+    pendingPageCallback = callback || null;
+    window.location.hash = hash;
+  };
   activatePage(window.location.hash, false);
 })();
 </script>"""
@@ -6481,6 +6497,25 @@ SORT_SCRIPT = """<script>
     grid.appendChild(frag);
     if (count) count.textContent = `${visible.length} de ${cards.length} activos`;
   }
+
+  window.DashboardShowStockCard = (ticker) => {
+    const card = cards.find((item) => item.dataset.ticker === ticker);
+    if (!card) return;
+    if (search) search.value = '';
+    Object.values(filters).forEach((filter) => {
+      if (filter) filter.value = '';
+    });
+    sortCards(select.value);
+    const focusCard = () => {
+      card.scrollIntoView({behavior: 'smooth', block: 'start'});
+      card.focus({preventScroll: true});
+    };
+    if (window.DashboardOpenPage) {
+      window.DashboardOpenPage('watchlist', focusCard);
+    } else {
+      focusCard();
+    }
+  };
 
   select.addEventListener('change', () => sortCards(select.value));
   Object.values(filters).filter(Boolean).forEach((filter) => {
@@ -6635,20 +6670,12 @@ CHARTS_SCRIPT = """<script>
       .attr('aria-label', (item) => `Ir a la tarjeta de ${item.data.name}`)
       .style('cursor', 'pointer')
       .on('click', (event, item) => {
-        const card = document.getElementById(`card-${item.data.ticker}`);
-        if (card) {
-          card.scrollIntoView({behavior: 'smooth', block: 'start'});
-          card.focus({preventScroll: true});
-        }
+        window.DashboardShowStockCard?.(item.data.ticker);
       })
       .on('keydown', (event, item) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
-        const card = document.getElementById(`card-${item.data.ticker}`);
-        if (card) {
-          card.scrollIntoView({behavior: 'smooth', block: 'start'});
-          card.focus({preventScroll: true});
-        }
+        window.DashboardShowStockCard?.(item.data.ticker);
       });
     groups.append('rect')
       .attr('width', (item) => Math.max(0, item.x1 - item.x0))
