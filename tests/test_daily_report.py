@@ -15,6 +15,7 @@ from daily_report import (
     AI_ANALYSIS_PROMPT_VERSION,
     ATR_MULTIPLIER,
     ATR_WINDOW,
+    BUY_THE_DIP_SCORE_THRESHOLD,
     CONFIDENCE_HIGH_SESSIONS,
     CONFIDENCE_MEDIUM_SESSIONS,
     PEAK_WINDOW,
@@ -47,6 +48,13 @@ from daily_report import (
     _read_gemini_cache,
     _write_gemini_cache,
     _write_gemini_failure_cache,
+    build_contribution_plan,
+    calculate_portfolio_risk_metrics,
+    calculate_rsi14,
+    buy_the_dip_candidates,
+    collect_fund_lookthrough,
+    extra_quote_fields,
+    next_savings_plan_date,
     _analysis_section,
     _apply_payload_profile,
     _risk_no_data_reason,
@@ -69,7 +77,6 @@ from daily_report import (
     collect_financial_news,
     collect_chart_data,
     calculate_risk_zones,
-    extra_quote_fields,
     external_ideas_html,
     executive_summary,
     parse_external_ideas,
@@ -87,6 +94,7 @@ from daily_report import (
     portfolio_transactions_from_activity,
     portfolio_history_from_transactions,
     _portfolio_transaction_chart_data,
+    _portfolio_risk_section_html,
     collect_reports,
     render_dashboard,
     translate_headline,
@@ -217,6 +225,240 @@ class SentimentTests(unittest.TestCase):
 
         self.assertIn("JSONDecodeError", quote.warning)
         self.assertIn("Yahoo Finance", quote.warning)
+
+    def test_extra_quote_fields_calculates_analyst_target_upside(self):
+        extra = extra_quote_fields(
+            {
+                "currentPrice": 80,
+                "targetMeanPrice": 100,
+                "fiftyTwoWeekHigh": 120,
+            },
+            datetime(2026, 11, 2, tzinfo=TIMEZONE),
+        )
+
+        self.assertEqual(extra["analyst_upside_pct"], 25)
+        self.assertEqual(extra["pct_from_52w_high"], -33.3)
+
+    def test_rsi14_calculates_and_handles_insufficient_history(self):
+        increasing = pd.Series(range(1, 21), dtype="float64")
+
+        self.assertEqual(calculate_rsi14(increasing), 100.0)
+        self.assertIsNone(calculate_rsi14(pd.Series([1.0] * 14)))
+
+    def test_buy_the_dip_score_applies_earnings_penalty_and_held_filter(self):
+        report = StockReport(
+            Company("Dip candidate", "DIP"),
+            quote=Quote(
+                market_date=date(2026, 11, 2),
+                market_timezone=TIMEZONE.key,
+                peg_ratio=1.2,
+                extra={
+                    "pct_from_52w_high": -25,
+                    "rsi14": 30,
+                    "pct_vs_sma200": -8,
+                    "analyst_upside_pct": 20,
+                    "days_to_earnings": 2,
+                },
+            ),
+        )
+        held_position = PortfolioPosition(
+            PortfolioAsset("Dip candidate", "DIP", 1, 10, "EUR"),
+        )
+
+        candidates = buy_the_dip_candidates(
+            [report],
+            [],
+            datetime(2026, 11, 2, 12, 0, tzinfo=TIMEZONE),
+        )
+        self.assertEqual(candidates[0]["score"], 3)
+        self.assertEqual(candidates[0]["threshold"], BUY_THE_DIP_SCORE_THRESHOLD)
+        self.assertTrue(candidates[0]["details"]["earnings_risk"])
+        self.assertEqual(
+            buy_the_dip_candidates(
+                [report],
+                [held_position],
+                datetime(2026, 11, 2, 12, 0, tzinfo=TIMEZONE),
+            ),
+            [],
+        )
+
+    def test_contribution_plan_allocates_full_amount_to_underweight_core(self):
+        positions = [
+            PortfolioPosition(
+                PortfolioAsset("MSCI World", "EUNL.DE", 1, 300, "EUR"),
+                current_value_eur=300,
+            ),
+            PortfolioPosition(
+                PortfolioAsset("Satellite A", "AAA", 1, 200, "USD"),
+                current_value_eur=200,
+            ),
+            PortfolioPosition(
+                PortfolioAsset("Satellite B", "BBB", 1, 500, "USD"),
+                current_value_eur=500,
+            ),
+        ]
+
+        plan = build_contribution_plan(
+            positions,
+            datetime(2026, 11, 2, 12, 0, tzinfo=TIMEZONE),
+        )
+
+        allocations = {
+            item["ticker"]: item["planned_contribution_eur"]
+            for item in plan["allocations"]
+        }
+        self.assertTrue(plan["enabled"])
+        self.assertEqual(plan["next_contribution_date"], date(2026, 11, 2))
+        self.assertEqual(sum(allocations.values()), 150)
+        self.assertEqual(allocations["EUNL.DE"], 150)
+
+    def test_next_contribution_schedule_advances_after_savings_days(self):
+        self.assertEqual(
+            next_savings_plan_date(date(2026, 11, 3)),
+            date(2026, 11, 16),
+        )
+        self.assertEqual(
+            next_savings_plan_date(date(2026, 11, 17)),
+            date(2026, 12, 2),
+        )
+
+    def test_portfolio_risk_metrics_use_euro_returns_and_yahoo_beta(self):
+        sessions = pd.bdate_range("2026-01-01", periods=30)
+        dates = [session.date() for session in sessions]
+        world_prices = [100.0]
+        for index in range(1, len(dates)):
+            world_prices.append(
+                world_prices[-1] * (1.01 if index % 2 else 0.99)
+            )
+        stock_prices = [100 * (price / 100) ** 2 for price in world_prices]
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("World", "EUNL.DE", 1, 600, "EUR"),
+                current_value_eur=600,
+            ),
+            PortfolioPosition(
+                PortfolioAsset("Chipmaker", "NVDA", 1, 400, "USD"),
+                current_value_eur=400,
+            ),
+        ]
+        reports = [
+            StockReport(
+                Company("World", "EUNL.DE"),
+                quote=Quote(extra={"quote_type": "ETF"}),
+            ),
+            StockReport(
+                Company("Chipmaker", "NVDA"),
+                quote=Quote(
+                    sector="Technology",
+                    currency="USD",
+                    extra={"beta": 2, "industry": "Semiconductors"},
+                ),
+            ),
+        ]
+        histories = {
+            "EUNL.DE": list(zip(dates, world_prices)),
+            "NVDA": list(zip(dates, stock_prices)),
+            "USDEUR=X": list(zip(dates, [0.9] * len(dates))),
+        }
+
+        metrics = calculate_portfolio_risk_metrics(
+            portfolio,
+            histories,
+            reports,
+            lookthrough={},
+        )
+
+        self.assertEqual(metrics["sample_days"], 29)
+        self.assertAlmostEqual(metrics["beta_vs_eunl"], 1.4, places=2)
+        self.assertEqual(metrics["usd_exposure"]["direct_pct"], 40)
+        stress = {
+            item["scenario"]: item for item in metrics["stress_tests"]
+        }
+        self.assertEqual(
+            stress["Semiconductores -30%"]["estimated_impact_pct"],
+            -12,
+        )
+        self.assertIsNotNone(metrics["annualized_volatility_pct"])
+        self.assertEqual(len(metrics["correlation_matrix"]), 2)
+
+    def test_portfolio_risk_metrics_handle_missing_history(self):
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("World", "EUNL.DE", 1, 100, "EUR"),
+                current_value_eur=100,
+            ),
+        ]
+
+        metrics = calculate_portfolio_risk_metrics(
+            portfolio,
+            {},
+            [],
+            lookthrough={},
+        )
+
+        self.assertEqual(metrics["sample_days"], 0)
+        self.assertEqual(metrics["historical_coverage_pct"], 0)
+        self.assertIsNone(metrics["annualized_volatility_pct"])
+        self.assertIn("Histórico común insuficiente", metrics["warning"])
+
+    @patch("daily_report.yf.Ticker")
+    def test_etf_lookthrough_extracts_holdings_and_sector_weights(self, ticker_mock):
+        ticker_mock.return_value.funds_data = SimpleNamespace(
+            top_holdings=pd.DataFrame(
+                {
+                    "Name": ["NVIDIA Corporation"],
+                    "Holding Percent": [0.08],
+                },
+                index=["NVDA"],
+            ),
+            sector_weightings={"technology": 0.42},
+        )
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("ETF", "FUND.DE", 1, 100, "EUR"),
+                current_value_eur=100,
+            )
+        ]
+        reports = [
+            StockReport(
+                Company("ETF", "FUND.DE"),
+                quote=Quote(extra={"quote_type": "ETF"}),
+            )
+        ]
+
+        result = collect_fund_lookthrough(portfolio, reports)
+
+        self.assertEqual(result["FUND.DE"]["holdings"][0]["ticker"], "NVDA")
+        self.assertEqual(result["FUND.DE"]["holdings_coverage_pct"], 8)
+        self.assertEqual(result["FUND.DE"]["sector_weights_pct"]["technology"], 42)
+
+    def test_portfolio_risk_html_shows_sector_and_fund_lookthrough(self):
+        html = _portfolio_risk_section_html(
+            {
+                "sector_exposure_pct": {"Technology": 40},
+                "sector_coverage_pct": 80,
+                "lookthrough": {
+                    "EUNL.DE": {
+                        "holdings": [
+                            {
+                                "ticker": "NVDA",
+                                "name": "NVIDIA <script>",
+                                "weight_pct": 5,
+                            }
+                        ],
+                        "holdings_coverage_pct": 75,
+                        "sector_weights_pct": {"Technology": 30},
+                        "sector_coverage_pct": 90,
+                    }
+                },
+            }
+        )
+
+        self.assertIn("Exposición sectorial", html)
+        self.assertIn("Look-through de fondos", html)
+        self.assertIn("NVDA", html)
+        self.assertIn("NVIDIA &lt;script&gt;", html)
+        self.assertNotIn("<script>", html)
 
     @patch("daily_report.requests.get")
     def test_translate_headline_requests_spanish_and_joins_translation_parts(self, get_mock):
@@ -4550,6 +4792,7 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(alerts[0]["daily_change_pct"], -2.5)
         self.assertEqual(old_alerts, [])
 
+    @patch("daily_report.enrich_reports_with_rsi14")
     @patch(
         "daily_report.fetch_vix_data",
         return_value={"price": None, "change_pct": None},
@@ -4567,6 +4810,7 @@ class SentimentTests(unittest.TestCase):
         _charts_mock,
         _events_mock,
         _vix_mock,
+        _rsi_mock,
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4596,6 +4840,7 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(payload["watchlist"], [])
         self.assertEqual(payload["portfolio"]["positions"], [])
 
+    @patch("daily_report.enrich_reports_with_rsi14")
     @patch(
         "daily_report.fetch_vix_data",
         return_value={"price": 18.5, "change_pct": 2.1},
@@ -4613,6 +4858,7 @@ class SentimentTests(unittest.TestCase):
         _charts_mock,
         _events_mock,
         _vix_mock,
+        _rsi_mock,
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4692,6 +4938,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('class="vix-indicator vix-unavailable"', unavailable_html)
         self.assertIn("Datos no disponibles", unavailable_html)
 
+    @patch("daily_report.enrich_reports_with_rsi14")
     @patch(
         "daily_report.fetch_vix_data",
         return_value={"price": None, "change_pct": None},
@@ -4709,6 +4956,7 @@ class SentimentTests(unittest.TestCase):
         _events_mock,
         analysis_mock,
         _vix_mock,
+        _rsi_mock,
     ):
         now = datetime.now(timezone.utc)
         cached_analysis = PortfolioAnalysis(

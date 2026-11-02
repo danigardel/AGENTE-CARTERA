@@ -416,6 +416,85 @@ select {
   font-size: 11px;
 }
 
+.portfolio-insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.portfolio-insight-panel {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #293742;
+  border-radius: 12px;
+  background: rgba(23, 35, 45, 0.92);
+}
+
+.portfolio-insight-panel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.portfolio-insight-panel p,
+.stress-test-list {
+  margin: 0;
+  color: #9cabb7;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.portfolio-risk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.portfolio-risk-grid .portfolio-metric {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #293742;
+  border-radius: 8px;
+}
+
+.stress-test-list {
+  padding-left: 18px;
+}
+
+.portfolio-insight-panel h3 {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.fund-lookthrough {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #293742;
+  border-radius: 8px;
+  color: #b8c8d0;
+  font-size: 11px;
+}
+
+.fund-lookthrough summary {
+  cursor: pointer;
+}
+
+.dip-candidate-list {
+  display: grid;
+  gap: 9px;
+  padding-left: 20px;
+}
+
+.dip-candidate-list li span {
+  display: block;
+  color: #9cabb7;
+  font-size: 11px;
+}
+
 .analysis-stale-badge {
   border: 1px solid #d5a84f66;
   border-radius: 999px;

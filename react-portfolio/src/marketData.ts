@@ -134,6 +134,83 @@ export interface QuantSummaryData {
   distance_from_52w_high: QuantSummaryItem[];
 }
 
+export interface BuyTheDipCandidateData {
+  ticker: string;
+  name: string;
+  score: number;
+  threshold: number;
+  reasons: string[];
+  signals: Record<string, boolean>;
+  market_date: string | null;
+}
+
+export interface ContributionPlanData {
+  enabled: boolean;
+  amount_eur: number;
+  next_contribution_date: string;
+  commission_eur: number;
+  target_core_ticker: string;
+  target_core_weight_pct: number;
+  target_satellite_weight_pct: number;
+  allocations: {
+    ticker: string;
+    name: string;
+    current_value_eur: number;
+    current_weight_pct: number;
+    target_weight_pct: number;
+    target_value_after_eur: number;
+    deviation_eur: number;
+    planned_contribution_eur: number;
+  }[];
+  warning: string | null;
+}
+
+export interface FundLookthroughData {
+  holdings: {
+    ticker: string;
+    name: string;
+    weight_pct: number;
+  }[];
+  holdings_coverage_pct: number;
+  sector_weights_pct: Record<string, number>;
+  sector_coverage_pct: number;
+}
+
+export interface PortfolioRiskMetricsData {
+  methodology?: string;
+  benchmark_ticker?: string;
+  sample_days?: number;
+  historical_coverage_pct?: number;
+  annualized_volatility_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  sharpe_ratio?: number | null;
+  sortino_ratio?: number | null;
+  beta_vs_eunl?: number | null;
+  correlation_vs_eunl?: { ticker: string; correlation: number | null }[];
+  correlation_matrix?: {
+    ticker: string;
+    values: Record<string, number | null>;
+  }[];
+  usd_exposure?: {
+    direct_pct: number | null;
+    etf_top_holdings_pct: number | null;
+    known_pct: number | null;
+    etf_lookthrough_coverage_pct: number | null;
+    note?: string;
+  };
+  sector_exposure_pct?: Record<string, number>;
+  sector_coverage_pct?: number;
+  lookthrough?: Record<string, FundLookthroughData>;
+  stress_tests?: {
+    scenario: string;
+    estimated_impact_pct: number;
+    estimated_impact_eur: number;
+    coverage_pct: number;
+    assumption: string;
+  }[];
+  warning?: string | null;
+}
+
 export interface MacroIndicatorsData {
   vix: {
     price: number | null;
@@ -164,6 +241,9 @@ export interface MarketData {
   };
   watchlist: WatchlistItem[];
   portfolio: PortfolioData;
+  buy_the_dip_candidates?: BuyTheDipCandidateData[];
+  contribution_plan?: ContributionPlanData;
+  risk_metrics?: PortfolioRiskMetricsData;
   macro_indicators?: MacroIndicatorsData;
   analysis: {
     portfolio_assessment: string | null;
@@ -561,6 +641,148 @@ function isMacroIndicators(value: unknown): value is MacroIndicatorsData {
   );
 }
 
+function isBuyTheDipCandidate(value: unknown): value is BuyTheDipCandidateData {
+  return (
+    isRecord(value) &&
+    typeof value.ticker === "string" &&
+    typeof value.name === "string" &&
+    isFiniteNumber(value.score) &&
+    isFiniteNumber(value.threshold) &&
+    Array.isArray(value.reasons) &&
+    value.reasons.every((reason) => typeof reason === "string") &&
+    isRecord(value.signals) &&
+    Object.values(value.signals).every(
+      (signal) => typeof signal === "boolean",
+    ) &&
+    isNullableString(value.market_date)
+  );
+}
+
+function isContributionPlan(value: unknown): value is ContributionPlanData {
+  return (
+    isRecord(value) &&
+    typeof value.enabled === "boolean" &&
+    isFiniteNumber(value.amount_eur) &&
+    typeof value.next_contribution_date === "string" &&
+    isFiniteNumber(value.commission_eur) &&
+    typeof value.target_core_ticker === "string" &&
+    isFiniteNumber(value.target_core_weight_pct) &&
+    isFiniteNumber(value.target_satellite_weight_pct) &&
+    Array.isArray(value.allocations) &&
+    value.allocations.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.ticker === "string" &&
+        typeof item.name === "string" &&
+        isFiniteNumber(item.current_value_eur) &&
+        isFiniteNumber(item.current_weight_pct) &&
+        isFiniteNumber(item.target_weight_pct) &&
+        isFiniteNumber(item.target_value_after_eur) &&
+        isFiniteNumber(item.deviation_eur) &&
+        isFiniteNumber(item.planned_contribution_eur),
+    ) &&
+    isNullableString(value.warning)
+  );
+}
+
+function isFundLookthrough(value: unknown): value is FundLookthroughData {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.holdings) &&
+    value.holdings.every(
+      (holding) =>
+        isRecord(holding) &&
+        typeof holding.ticker === "string" &&
+        typeof holding.name === "string" &&
+        isFiniteNumber(holding.weight_pct),
+    ) &&
+    isFiniteNumber(value.holdings_coverage_pct) &&
+    isRecord(value.sector_weights_pct) &&
+    Object.values(value.sector_weights_pct).every(isFiniteNumber) &&
+    isFiniteNumber(value.sector_coverage_pct)
+  );
+}
+
+function isUsdExposure(
+  value: unknown,
+): value is NonNullable<PortfolioRiskMetricsData["usd_exposure"]> {
+  if (!isRecord(value)) return false;
+  return (
+    [
+      "direct_pct",
+      "etf_top_holdings_pct",
+      "known_pct",
+      "etf_lookthrough_coverage_pct",
+    ].every(
+      (key) => value[key] === undefined || isNullableNumber(value[key]),
+    ) &&
+    (value.note === undefined || typeof value.note === "string")
+  );
+}
+
+function isPortfolioRiskMetrics(
+  value: unknown,
+): value is PortfolioRiskMetricsData {
+  if (!isRecord(value)) return false;
+  const nullableNumbers = [
+    "annualized_volatility_pct",
+    "max_drawdown_pct",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "beta_vs_eunl",
+  ];
+  return (
+    (value.methodology === undefined ||
+      typeof value.methodology === "string") &&
+    (value.sample_days === undefined || isFiniteNumber(value.sample_days)) &&
+    (value.historical_coverage_pct === undefined ||
+      isFiniteNumber(value.historical_coverage_pct)) &&
+    nullableNumbers.every(
+      (key) =>
+        value[key] === undefined || isNullableNumber(value[key]),
+    ) &&
+    (value.correlation_vs_eunl === undefined ||
+      (Array.isArray(value.correlation_vs_eunl) &&
+        value.correlation_vs_eunl.every(
+          (item) =>
+            isRecord(item) &&
+            typeof item.ticker === "string" &&
+            isNullableNumber(item.correlation),
+        ))) &&
+    (value.correlation_matrix === undefined ||
+      (Array.isArray(value.correlation_matrix) &&
+        value.correlation_matrix.every(
+          (item) =>
+            isRecord(item) &&
+            typeof item.ticker === "string" &&
+            isRecord(item.values) &&
+            Object.values(item.values).every(isNullableNumber),
+        ))) &&
+    (value.sector_exposure_pct === undefined ||
+      (isRecord(value.sector_exposure_pct) &&
+        Object.values(value.sector_exposure_pct).every(isFiniteNumber))) &&
+    (value.sector_coverage_pct === undefined ||
+      isFiniteNumber(value.sector_coverage_pct)) &&
+    (value.usd_exposure === undefined ||
+      isUsdExposure(value.usd_exposure)) &&
+    (value.lookthrough === undefined ||
+      (isRecord(value.lookthrough) &&
+        Object.values(value.lookthrough).every(isFundLookthrough))) &&
+    (value.stress_tests === undefined ||
+      (Array.isArray(value.stress_tests) &&
+        value.stress_tests.every(
+          (item) =>
+            isRecord(item) &&
+            typeof item.scenario === "string" &&
+            isFiniteNumber(item.estimated_impact_pct) &&
+            isFiniteNumber(item.estimated_impact_eur) &&
+            isFiniteNumber(item.coverage_pct) &&
+            typeof item.assumption === "string",
+        ))) &&
+    (value.warning === undefined || isNullableString(value.warning))
+  );
+}
+
 export function isMarketData(value: unknown): value is MarketData {
   if (!isRecord(value) || value.schema_version !== 1) return false;
   const summary = value.market_summary;
@@ -602,6 +824,13 @@ export function isMarketData(value: unknown): value is MarketData {
     value.watchlist.every(isWatchlistItem) &&
     Array.isArray(portfolio.positions) &&
     portfolio.positions.every(isPortfolioPosition) &&
+    (value.buy_the_dip_candidates === undefined ||
+      (Array.isArray(value.buy_the_dip_candidates) &&
+        value.buy_the_dip_candidates.every(isBuyTheDipCandidate))) &&
+    (value.contribution_plan === undefined ||
+      isContributionPlan(value.contribution_plan)) &&
+    (value.risk_metrics === undefined ||
+      isPortfolioRiskMetrics(value.risk_metrics)) &&
     isRecord(totals) &&
     isFiniteNumber(totals.investment_base_eur) &&
     isFiniteNumber(totals.open_cost_basis_eur) &&

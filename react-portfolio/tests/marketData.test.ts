@@ -21,6 +21,7 @@ function marketData(
   alertsToday?: unknown,
   quantSummary?: unknown,
   macroIndicators?: unknown,
+  riskMetrics?: unknown,
 ) {
   return {
     schema_version: 1,
@@ -88,6 +89,7 @@ function marketData(
     ...(macroIndicators === undefined
       ? {}
       : { macro_indicators: macroIndicators }),
+    ...(riskMetrics === undefined ? {} : { risk_metrics: riskMetrics }),
     market_events: [],
     portfolio_activity: [],
     charts: {
@@ -124,6 +126,61 @@ test("accepts optional VIX macro data and rejects malformed values", () => {
     isMarketData(
       marketData(null, null, undefined, undefined, {
         vix: { price: "18.5", change_pct: 2.1 },
+      }),
+    ),
+    false,
+  );
+});
+
+test("validates optional risk metrics and ETF look-through data", () => {
+  const riskMetrics = {
+    annualized_volatility_pct: 18.4,
+    max_drawdown_pct: -12.1,
+    sharpe_ratio: 0.9,
+    sortino_ratio: 1.2,
+    beta_vs_eunl: 1.1,
+    historical_coverage_pct: 95,
+    sample_days: 252,
+    usd_exposure: {
+      direct_pct: 30,
+      etf_top_holdings_pct: 12,
+      known_pct: 42,
+      etf_lookthrough_coverage_pct: 75,
+      note: "Cobertura parcial",
+    },
+    sector_exposure_pct: { Technology: 40 },
+    sector_coverage_pct: 85,
+    lookthrough: {
+      EUNL: {
+        holdings: [{ ticker: "NVDA", name: "NVIDIA", weight_pct: 4 }],
+        holdings_coverage_pct: 80,
+        sector_weights_pct: { Technology: 25 },
+        sector_coverage_pct: 90,
+      },
+    },
+    stress_tests: [{
+      scenario: "Nasdaq -15%",
+      estimated_impact_pct: -10,
+      estimated_impact_eur: -100,
+      coverage_pct: 80,
+      assumption: "Beta",
+    }],
+  };
+
+  assert.equal(
+    isMarketData(marketData(null, null, undefined, undefined, undefined, riskMetrics)),
+    true,
+  );
+  assert.equal(
+    isMarketData(
+      marketData(null, null, undefined, undefined, undefined, {
+        ...riskMetrics,
+        lookthrough: {
+          EUNL: {
+            ...riskMetrics.lookthrough.EUNL,
+            holdings: [{ ticker: "NVDA", name: "NVIDIA", weight_pct: "4" }],
+          },
+        },
       }),
     ),
     false,

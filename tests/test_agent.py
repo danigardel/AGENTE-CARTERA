@@ -5,7 +5,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agent import find_price_alerts, load_agent_state, run_agent, send_price_alerts
+from agent import (
+    find_dip_candidate_alerts,
+    find_price_alerts,
+    load_agent_state,
+    run_agent,
+    send_price_alerts,
+)
 from daily_report import (
     Company,
     PortfolioAsset,
@@ -175,14 +181,76 @@ class AutonomousAgentTests(unittest.TestCase):
         self.assertIn("Delta (DDD): +2.50% | 10.00 €", text)
         self.assertEqual(text.count("\n- "), 4)
 
+    def test_dip_alert_is_deduplicated_until_score_increases(self):
+        report = self._report("DIP", self.now.date(), -1.0)
+        report.quote.peg_ratio = 1.2
+        report.quote.extra.update(
+            {
+                "pct_from_52w_high": -25,
+                "rsi14": 30,
+                "pct_vs_sma200": -5,
+                "analyst_upside_pct": 20,
+                "days_to_earnings": 10,
+            }
+        )
+        state = {"alerts": {}, "dip_candidates": {}}
+
+        initial = find_dip_candidate_alerts([], [report], state, self.now)
+        score = initial[0]["score"]
+        state["dip_candidates"]["DIP"] = {"last_score": score}
+        repeated = find_dip_candidate_alerts([], [report], state, self.now)
+
+        self.assertEqual([item["category"] for item in initial], ["dip_candidate"])
+        self.assertEqual(repeated, [])
+        self.assertEqual(state["dip_candidates"]["DIP"]["last_score"], score)
+
+    def test_dip_alert_ignores_stale_quotes_and_removes_inactive_score(self):
+        report = self._report("DIP", date(2026, 10, 23), -1.0)
+        state = {
+            "alerts": {},
+            "dip_candidates": {"DIP": {"last_score": 4}},
+        }
+
+        alerts = find_dip_candidate_alerts([], [report], state, self.now)
+
+        self.assertEqual(alerts, [])
+        self.assertIn("DIP", state["dip_candidates"])
+
+    @patch("agent.requests.post")
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"},
+    )
+    def test_dip_candidate_telegram_message_includes_score_and_factors(
+        self,
+        post_mock,
+    ):
+        post_mock.return_value.raise_for_status.return_value = None
+        alert = {
+            "ticker": "DIP",
+            "name": "Dip Corp",
+            "score": 3,
+            "reasons": ["RSI(14) 30.0", "PEG 1.20"],
+            "category": "dip_candidate",
+        }
+
+        self.assertTrue(send_price_alerts([alert]))
+
+        text = post_mock.call_args.kwargs["json"]["text"]
+        self.assertIn("CANDIDATAS BUY THE DIP", text)
+        self.assertIn("score 3/5", text)
+        self.assertIn("RSI(14) 30.0; PEG 1.20", text)
+
     @patch("agent.analyze_portfolio", return_value=PortfolioAnalysis(
         warning="Narrativa IA no disponible."
     ))
     @patch("agent.send_price_alerts", return_value=True)
     @patch("agent.fetch_portfolio")
     @patch("agent.collect_reports")
+    @patch("agent.enrich_reports_with_rsi14")
     def test_deterministic_alert_is_sent_when_ai_chain_is_unavailable(
         self,
+        rsi_mock,
         reports_mock,
         portfolio_mock,
         alert_mock,

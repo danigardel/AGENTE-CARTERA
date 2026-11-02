@@ -12,6 +12,8 @@ import requests
 
 from daily_report import (
     ALERT_DROP_PCT,
+    BUY_THE_DIP_SCORE_THRESHOLD,
+    SAVINGS_PLAN_CONTRIBUTION_EUR,
     TIMEZONE,
     PORTFOLIO,
     PORTFOLIO_ACTIVITY_FILE,
@@ -20,7 +22,10 @@ from daily_report import (
     _http_status,
     _market_data_is_current,
     analyze_portfolio,
+    build_contribution_plan,
+    buy_the_dip_candidates,
     collect_reports,
+    enrich_reports_with_rsi14,
     fetch_portfolio,
     load_portfolio_activity,
     load_portfolio_transactions,
@@ -34,7 +39,7 @@ STATE_FILE = Path(os.getenv("AGENT_STATE_PATH", "agent_state.json"))
 
 
 def _empty_state(local_date: str) -> dict[str, Any]:
-    return {"date": local_date, "alerts": {}}
+    return {"date": local_date, "alerts": {}, "dip_candidates": {}}
 
 
 def load_agent_state(path: Path, local_date: str) -> dict[str, Any]:
@@ -77,7 +82,87 @@ def load_agent_state(path: Path, local_date: str) -> dict[str, Any]:
         normalized_alert.pop("last_drop_pct", None)
         normalized_alert["last_alerted_pct"] = float(last_alerted_pct)
         normalized_alerts[ticker] = normalized_alert
-    return {"date": local_date, "alerts": normalized_alerts}
+    dip_candidates = value.get("dip_candidates", {})
+    if not isinstance(dip_candidates, dict):
+        logging.warning(
+            "Las alertas buy-the-dip guardadas no son válidas; se reinician."
+        )
+        dip_candidates = {}
+    normalized_dip_candidates: dict[str, dict[str, Any]] = {}
+    for ticker, item in dip_candidates.items():
+        if (
+            not isinstance(ticker, str)
+            or not isinstance(item, dict)
+            or not isinstance(item.get("last_score"), int)
+            or isinstance(item.get("last_score"), bool)
+        ):
+            logging.warning(
+                "Las alertas buy-the-dip guardadas no son válidas; se reinician."
+            )
+            normalized_dip_candidates = {}
+            break
+        normalized_dip_candidates[ticker] = {
+            "last_score": item["last_score"],
+            "sent_at": item.get("sent_at"),
+        }
+    return {
+        "date": local_date,
+        "alerts": normalized_alerts,
+        "dip_candidates": normalized_dip_candidates,
+    }
+
+
+def find_dip_candidate_alerts(
+    portfolio: list[PortfolioPosition],
+    reports: list[StockReport],
+    state: dict[str, Any],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    held_tickers = {position.asset.ticker for position in portfolio}
+    active_reports = [
+        report
+        for report in reports
+        if report.company.ticker
+        and report.company.ticker not in held_tickers
+        and _market_data_is_current(
+            report.quote.market_date,
+            report.quote.market_timezone,
+            now,
+        )
+    ]
+    candidates = buy_the_dip_candidates(
+        active_reports,
+        portfolio,
+        now,
+        BUY_THE_DIP_SCORE_THRESHOLD,
+    )
+    candidates_by_ticker = {
+        candidate["ticker"]: candidate for candidate in candidates
+    }
+    tracked = state.setdefault("dip_candidates", {})
+    active_tickers = {
+        report.company.ticker for report in active_reports if report.company.ticker
+    }
+    for ticker in list(tracked):
+        if ticker in held_tickers or (
+            ticker in active_tickers and ticker not in candidates_by_ticker
+        ):
+            tracked.pop(ticker, None)
+
+    alerts = []
+    for ticker, candidate in candidates_by_ticker.items():
+        previous = tracked.get(ticker)
+        previous_score = (
+            previous.get("last_score") if isinstance(previous, dict) else None
+        )
+        if previous_score is None or candidate["score"] > previous_score:
+            alerts.append(
+                {
+                    **candidate,
+                    "category": "dip_candidate",
+                }
+            )
+    return alerts
 
 
 def _current_daily_change(
@@ -233,6 +318,7 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
         ("portfolio_drop", "🔴 CAÍDAS EN CARTERA:"),
         ("portfolio_rise", "🟢 SUBIDAS EN CARTERA:"),
         ("watchlist_rise", "🚀 SUBIDAS EN SEGUIMIENTO:"),
+        ("dip_candidate", "🎯 CANDIDATAS BUY THE DIP:"),
     )
     lines: list[str] = []
     for category, heading in headings:
@@ -243,6 +329,14 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
             lines.append("")
         lines.append(heading)
         for alert in grouped:
+            if category == "dip_candidate":
+                score = alert["score"]
+                reasons = "; ".join(alert["reasons"]) or "señales técnicas"
+                lines.append(
+                    f"- {alert['name']} ({alert['ticker']}): "
+                    f"score {score}/5 · {reasons}"
+                )
+                continue
             daily_change = alert["daily_change_pct"]
             price = alert["current_price_eur"]
             price_text = (
@@ -326,10 +420,25 @@ def run_agent(
     else:
         assets = PORTFOLIO
     portfolio = fetch_portfolio(assets)
+    enrich_reports_with_rsi14(reports)
     state = load_agent_state(state_path, local_date)
-    alerts = find_price_alerts(portfolio, reports, state, now)
+    price_alerts = find_price_alerts(portfolio, reports, state, now)
+    dip_candidates = buy_the_dip_candidates(
+        reports,
+        portfolio,
+        now,
+        BUY_THE_DIP_SCORE_THRESHOLD,
+    )
+    dip_alerts = find_dip_candidate_alerts(portfolio, reports, state, now)
+    alerts = [*price_alerts, *dip_alerts]
     if alerts and send_price_alerts(alerts):
         for alert in alerts:
+            if alert["category"] == "dip_candidate":
+                state["dip_candidates"][alert["ticker"]] = {
+                    "last_score": alert["score"],
+                    "sent_at": now.astimezone(TIMEZONE).isoformat(),
+                }
+                continue
             state["alerts"][alert["ticker"]] = {
                 "last_alerted_pct": alert["daily_change_pct"],
                 "sent_at": now.astimezone(TIMEZONE).isoformat(),
@@ -338,11 +447,20 @@ def run_agent(
                 "category": alert["category"],
             }
     save_agent_state(state_path, state)
+    contribution_plan = build_contribution_plan(
+        portfolio,
+        now,
+        SAVINGS_PLAN_CONTRIBUTION_EUR,
+    )
     analyze_portfolio(
         reports,
         portfolio,
         now_utc=now.astimezone(timezone.utc),
         send_telegram=True,
+        deterministic_signals={
+            "dip_candidates": dip_candidates,
+            "contribution_plan": contribution_plan,
+        },
     )
 
 

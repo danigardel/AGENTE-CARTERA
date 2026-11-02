@@ -36,6 +36,11 @@ function tone(value: number | null): string {
   return value > 0 ? "tone-positive" : "tone-negative";
 }
 
+function fundamentalNumber(item: WatchlistItem, key: string): number | null {
+  const value = item.fundamentals[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function HeadlineLink({ headline }: { headline: MarketHeadline }) {
   const href = safeExternalUrl(headline.url);
   const title = headline.display_title || headline.title;
@@ -117,6 +122,7 @@ function WatchlistTable({ items }: { items: WatchlistItem[] }) {
               <th scope="col">Sector</th>
               <th scope="col">Precio</th>
               <th scope="col">Cambio diario</th>
+              <th scope="col">RSI · potencial</th>
               <th scope="col">Sentimiento</th>
               <th scope="col">Analistas</th>
               <th scope="col">Noticias</th>
@@ -136,6 +142,13 @@ function WatchlistTable({ items }: { items: WatchlistItem[] }) {
                 <td className="numeric">{formatMoney(item.current_price_eur)}</td>
                 <td className={`numeric ${tone(item.daily_change_pct)}`}>
                   {formatPercent(item.daily_change_pct)}
+                </td>
+                <td>
+                  RSI {fundamentalNumber(item, "rsi14")?.toFixed(1) ?? "—"}
+                  {" · "}
+                  {formatPercent(
+                    fundamentalNumber(item, "analyst_upside_pct"),
+                  )}
                 </td>
                 <td>{item.news_sentiment_label ?? "Sin datos"}</td>
                 <td>
@@ -300,6 +313,37 @@ function AlertsToday({
   );
 }
 
+function BuyTheDipCandidates({ marketData }: { marketData: MarketData }) {
+  const candidates = marketData.buy_the_dip_candidates ?? [];
+  return (
+    <section className="dashboard-panel" aria-labelledby="dip-candidates-title">
+      <div className="dashboard-section-heading">
+        <div>
+          <h2 id="dip-candidates-title">Escáner buy the dip</h2>
+          <p>
+            Score determinista; mínimo 3. No es una orden de compra y los
+            resultados próximos restan puntuación.
+          </p>
+        </div>
+      </div>
+      {candidates.length > 0 ? (
+        <ul className="dip-candidate-list">
+          {candidates.map((candidate) => (
+            <li key={candidate.ticker}>
+              <strong>
+                {candidate.name} ({candidate.ticker}) · {candidate.score}/5
+              </strong>
+              <span>{candidate.reasons.join(" · ")}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted-copy">No hay candidatas actuales por encima del umbral.</p>
+      )}
+    </section>
+  );
+}
+
 function MarketEvents({ marketData }: { marketData: MarketData }) {
   if (marketData.market_events.length === 0) return null;
   return (
@@ -415,6 +459,8 @@ export function MarketDashboardSections({ marketData }: { marketData: MarketData
       )}
 
       <WatchlistTable items={marketData.watchlist} />
+
+      <BuyTheDipCandidates marketData={marketData} />
 
       <AlertsToday alerts={marketData.alerts_today ?? []} />
 

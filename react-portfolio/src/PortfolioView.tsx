@@ -131,6 +131,187 @@ function Metric({
   );
 }
 
+function PortfolioInsights({
+  marketData,
+  hidePrivate,
+}: {
+  marketData: MarketData;
+  hidePrivate: boolean;
+}) {
+  const plan = marketData.contribution_plan;
+  const risk = marketData.risk_metrics;
+  if (!plan && !risk) return null;
+
+  return (
+    <section className="portfolio-insights" aria-label="Plan de aportaciones y riesgo">
+      {plan && (
+        <article className="portfolio-insight-panel">
+          <h2>Próxima aportación</h2>
+          <p>
+            {new Date(`${plan.next_contribution_date}T12:00:00`).toLocaleDateString("es-ES")}
+            {" · "}Objetivo {plan.target_core_ticker}{" "}
+            {formatPercent(plan.target_core_weight_pct)}
+            {" · "}satélites {formatPercent(plan.target_satellite_weight_pct)}
+          </p>
+          {plan.enabled ? (
+            <div className="holdings-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Activo</th>
+                    <th>Peso actual</th>
+                    <th>Objetivo</th>
+                    <th>Aportación</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plan.allocations
+                    .filter((item) => item.planned_contribution_eur > 0)
+                    .map((item) => (
+                      <tr key={item.ticker}>
+                        <th scope="row">{item.name} ({item.ticker})</th>
+                        <td>{formatPercent(item.current_weight_pct)}</td>
+                        <td>{formatPercent(item.target_weight_pct)}</td>
+                        <td>
+                          <PrivateValue hidden={hidePrivate}>
+                            {formatMoney(item.planned_contribution_eur)}
+                          </PrivateValue>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="muted-copy">{plan.warning ?? "Plan no disponible."}</p>
+          )}
+          <p className="muted-copy">
+            Aportación de{" "}
+            <PrivateValue hidden={hidePrivate}>{formatMoney(plan.amount_eur)}</PrivateValue>
+            {" · "}comisión estimada 0 € · propuesta informativa, sin ejecución automática.
+          </p>
+        </article>
+      )}
+      {risk && (
+        <article className="portfolio-insight-panel">
+          <h2>Riesgo cuantitativo de cartera</h2>
+          <div className="portfolio-risk-grid">
+            <Metric
+              label="Volatilidad anualizada"
+              value={formatPercent(risk.annualized_volatility_pct ?? null)}
+            />
+            <Metric
+              label="Máximo drawdown"
+              value={formatPercent(risk.max_drawdown_pct ?? null)}
+            />
+            <Metric label="Sharpe (rf=0)" value={risk.sharpe_ratio?.toFixed(2) ?? "—"} />
+            <Metric label="Sortino (objetivo=0)" value={risk.sortino_ratio?.toFixed(2) ?? "—"} />
+            <Metric label="Beta vs EUNL.DE" value={risk.beta_vs_eunl?.toFixed(3) ?? "—"} />
+            <Metric
+              label="Exposición USD conocida"
+              value={formatPercent(risk.usd_exposure?.known_pct ?? null)}
+            />
+            <Metric
+              label="Cobertura histórica"
+              value={formatPercent(risk.historical_coverage_pct ?? null)}
+            />
+            <Metric
+              label="Sesiones analizadas"
+              value={risk.sample_days?.toString() ?? "—"}
+            />
+          </div>
+          {risk.correlation_vs_eunl && risk.correlation_vs_eunl.length > 0 && (
+            <div className="holdings-scroll">
+              <table>
+                <thead>
+                  <tr><th>Posición</th><th>Correlación vs EUNL.DE</th></tr>
+                </thead>
+                <tbody>
+                  {risk.correlation_vs_eunl.map((item) => (
+                    <tr key={item.ticker}>
+                      <th scope="row">{item.ticker}</th>
+                      <td>{item.correlation?.toFixed(3) ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {risk.stress_tests && (
+            <ul className="stress-test-list">
+              {risk.stress_tests.map((item) => (
+                <li key={item.scenario}>
+                  <strong>{item.scenario}: {formatPercent(item.estimated_impact_pct)}</strong>
+                  {" · "}
+                  <PrivateValue hidden={hidePrivate}>
+                    {formatMoney(item.estimated_impact_eur)}
+                  </PrivateValue>
+                  {` · cobertura ${formatPercent(item.coverage_pct)}`}
+                </li>
+              ))}
+            </ul>
+          )}
+          {risk.sector_exposure_pct &&
+            Object.keys(risk.sector_exposure_pct).length > 0 && (
+              <div>
+                <h3>Exposición sectorial</h3>
+                <p className="muted-copy">
+                  Cobertura: {formatPercent(risk.sector_coverage_pct ?? null)}
+                </p>
+                <ul className="stress-test-list">
+                  {Object.entries(risk.sector_exposure_pct)
+                    .sort((left, right) => right[1] - left[1])
+                    .map(([sector, weight]) => (
+                      <li key={sector}>{sector}: {formatPercent(weight)}</li>
+                    ))}
+                </ul>
+              </div>
+            )}
+          {risk.lookthrough &&
+            Object.entries(risk.lookthrough).map(([ticker, fund]) => (
+              <details key={ticker} className="fund-lookthrough">
+                <summary>
+                  {ticker} · principales posiciones
+                  {" · cobertura "}
+                  {formatPercent(fund.holdings_coverage_pct)}
+                </summary>
+                <ul className="stress-test-list">
+                  {fund.holdings.length > 0 ? (
+                    fund.holdings.slice(0, 10).map((holding) => (
+                      <li key={holding.ticker}>
+                        {holding.name} ({holding.ticker}): {formatPercent(holding.weight_pct)}
+                      </li>
+                    ))
+                  ) : (
+                    <li>Sin posiciones disponibles.</li>
+                  )}
+                </ul>
+                {Object.keys(fund.sector_weights_pct).length > 0 && (
+                  <>
+                    <p className="muted-copy">
+                      Sectores del fondo · cobertura{" "}
+                      {formatPercent(fund.sector_coverage_pct)}
+                    </p>
+                    <ul className="stress-test-list">
+                      {Object.entries(fund.sector_weights_pct)
+                        .sort((left, right) => right[1] - left[1])
+                        .map(([sector, weight]) => (
+                          <li key={sector}>{sector}: {formatPercent(weight)}</li>
+                        ))}
+                    </ul>
+                  </>
+                )}
+              </details>
+            ))}
+          <p className="muted-copy">{risk.methodology}</p>
+          {risk.usd_exposure?.note && <p className="muted-copy">{risk.usd_exposure.note}</p>}
+          {risk.warning && <p className="muted-copy">{risk.warning}</p>}
+        </article>
+      )}
+    </section>
+  );
+}
+
 function PerformanceChart({
   marketData,
   period,
@@ -406,6 +587,8 @@ export function PortfolioView({
           tone={toneFor(totals.total_return_pct)}
         />
       </section>
+
+      <PortfolioInsights marketData={marketData} hidePrivate={hidePrivate} />
 
       <section className="allocation" aria-label="Distribución por tipo">
         {classTotals.map(({ assetClass, value, weightPct }) => (
