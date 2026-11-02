@@ -1330,7 +1330,7 @@ class SentimentTests(unittest.TestCase):
             "tax_eur",
         }
 
-        self.assertEqual(len(activities), 54)
+        self.assertEqual(len(activities), 61)
         self.assertTrue(all(set(row) == public_fields for row in raw_activities))
         self.assertTrue(all(item.ticker in configured_tickers for item in activities))
         self.assertEqual(set(assets_by_ticker), {asset.ticker for asset in PORTFOLIO})
@@ -1339,11 +1339,36 @@ class SentimentTests(unittest.TestCase):
                 assets_by_ticker[configured.ticker].shares,
                 configured.shares,
             )
+            self.assertAlmostEqual(
+                assets_by_ticker[configured.ticker].investment_eur,
+                configured.investment_eur,
+            )
         self.assertIn("NKE", configured_tickers)
         self.assertIn("NVO", configured_tickers)
         dashboard = render_dashboard([], portfolio_activity=activities)
-        self.assertIn("Historial de inversión · 54 movimientos", dashboard)
-        self.assertEqual(dashboard.count('data-label="Movimiento"'), 54)
+        self.assertIn("Historial de inversión · 61 movimientos", dashboard)
+        self.assertEqual(dashboard.count('data-label="Movimiento"'), 61)
+        self.assertIn("AMZN", assets_by_ticker)
+        self.assertAlmostEqual(assets_by_ticker["AMZN"].shares, 0.187863)
+
+        todays_activities = [
+            item for item in activities if item.trade_date == date(2026, 11, 2)
+        ]
+        self.assertEqual(len(todays_activities), 7)
+        self.assertTrue(
+            all(item.fee_eur == 0 for item in todays_activities)
+        )
+        saveback = next(
+            item
+            for item in todays_activities
+            if item.action == "BENEFITS_SAVEBACK"
+        )
+        self.assertAlmostEqual(saveback.amount_eur, 3.07)
+        self.assertAlmostEqual(saveback.tax_eur, -0.58)
+        self.assertAlmostEqual(
+            saveback.amount_eur + saveback.tax_eur,
+            2.49,
+        )
 
     def test_dashboard_renders_filtered_portfolio_activity(self):
         activities = [
@@ -1774,16 +1799,19 @@ class SentimentTests(unittest.TestCase):
             "SPCX",
         )
 
-    def test_portfolio_positions_include_new_world_etf_and_google_purchases(self):
+    def test_portfolio_positions_match_transactions_through_today(self):
         portfolio_by_ticker = {asset.ticker: asset for asset in PORTFOLIO}
 
         world_etf = portfolio_by_ticker["EUNL.DE"]
         google = portfolio_by_ticker["GOOGL"]
+        amazon = portfolio_by_ticker["AMZN"]
 
-        self.assertEqual(world_etf.shares, 2.367719)
-        self.assertEqual(world_etf.investment_eur, 298.52)
-        self.assertEqual(google.shares, 0.201365)
-        self.assertEqual(google.investment_eur, 62.00)
+        self.assertEqual(world_etf.shares, 2.944716)
+        self.assertAlmostEqual(world_etf.investment_eur, 368.660788)
+        self.assertEqual(google.shares, 0.357767)
+        self.assertEqual(google.investment_eur, 102.00)
+        self.assertEqual(amazon.shares, 0.187863)
+        self.assertEqual(amazon.investment_eur, 42.49)
 
     @patch("daily_report.feedparser.parse")
     @patch("daily_report.requests.get")

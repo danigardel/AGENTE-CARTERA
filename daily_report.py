@@ -336,20 +336,22 @@ class DashboardCharts:
 
 
 PORTFOLIO = (
-    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 2.367719, 298.52, "EUR"),
-    PortfolioAsset("ASML", "ASML.AS", 0.046588, 61.65, "EUR"),
+    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 2.944716, 368.660788, "EUR"),
+    PortfolioAsset("ASML", "ASML.AS", 0.049265, 65.45, "EUR"),
     PortfolioAsset("Vistra", "VST", 0.407497, 50.00, "USD"),
     PortfolioAsset("GE Vernova", "GEV", 0.038649, 30.00, "USD"),
     PortfolioAsset("MSCI World Information Tech.", "XDWT.DE", 0.218023, 30.00, "EUR"),
     PortfolioAsset("Broadcom", "AVGO", 0.084104, 25.00, "USD"),
-    PortfolioAsset("NVIDIA", "NVDA", 0.098541, 17.00, "USD"),
-    PortfolioAsset("Alphabet (A)", "GOOGL", 0.201365, 62.00, "USD"),
+    PortfolioAsset("NVIDIA", "NVDA", 0.259347, 47.00, "USD"),
+    PortfolioAsset("Alphabet (A)", "GOOGL", 0.357767, 102.00, "USD"),
     PortfolioAsset("MercadoLibre", "MELI", 0.002776, 5.00, "USD"),
+    PortfolioAsset("Amazon.com", "AMZN", 0.187863, 42.49, "USD"),
 )
 
 PORTFOLIO_TICKER_CURRENCIES = {
     "NVDA": "USD",
     "GOOGL": "USD",
+    "AMZN": "USD",
     "EUNL.DE": "EUR",
     "ASML.AS": "EUR",
     "NKE": "USD",
