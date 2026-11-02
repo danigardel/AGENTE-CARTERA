@@ -16,7 +16,7 @@ import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
 from typing import Any, Literal
@@ -100,7 +100,7 @@ TARGET_HOURS = (0, 9, 12, 15, 18, 21)
 AI_ANALYSIS_PROMPT_VERSION = 4
 BUY_THE_DIP_SCORE_THRESHOLD = 3
 AI_EXCLUDED_PORTFOLIO_TICKERS = frozenset(
-    {"EUNL.DE", "XDWT.DE", "MELI", "MSCIW", "XTDE"}
+    {"EUNL.DE", "XDWT.DE", "MELI", "MLB1.SG", "MSCIW", "XTDE"}
 )
 MAX_HEADLINES = 8
 MAX_GEMINI_NEWS_ITEMS = 200
@@ -124,33 +124,106 @@ MARKET_BENCHMARKS = (("S&P 500 EUR", "SXR8.DE"), ("MSCI World EUR", "EUNL.DE"))
 
 # 1. CACHÉ PARA TIPOS DE CAMBIO
 FX_CACHE: dict[str, float] = {"EUR": 1.0}
+FX_PREVIOUS_CLOSE_CACHE: dict[tuple[str, date], float] = {}
 FX_LOCK = threading.Lock()
 
 def get_fx_rate(currency: str) -> float:
     if not currency:
         return 1.0
     currency = currency.upper()
-    
+
     with FX_LOCK:
         if currency in FX_CACHE:
             return FX_CACHE[currency]
-            
-    try:
+
         ticker = f"{currency}EUR=X"
-        rate = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
-    except Exception as e:
-        logging.warning("Error obteniendo tipo de cambio para %s: %s", currency, e)
-        rate = 1.0
-        
-    with FX_LOCK:
+        try:
+            history = yf.Ticker(ticker).history(
+                period="1d",
+                interval="1m",
+                auto_adjust=False,
+                timeout=20,
+            )
+            rate = _finite_float(history["Close"].dropna().iloc[-1])
+        except (
+            yf.exceptions.YFException,
+            requests.RequestException,
+            TimeoutError,
+            OSError,
+            ValueError,
+            KeyError,
+            IndexError,
+        ) as error:
+            logging.warning(
+                "No se pudo obtener el cambio %s/EUR en tiempo real: %s",
+                currency,
+                error,
+            )
+            raise ValueError(
+                f"No se pudo obtener el tipo de cambio {currency}/EUR"
+            ) from error
+        if rate is None or rate <= 0:
+            raise ValueError(
+                f"Yahoo Finance no devolvió un tipo de cambio {currency}/EUR válido"
+            )
         FX_CACHE[currency] = rate
-    return float(rate)
+        return rate
+
+
+def get_previous_fx_rate(currency: str, now: datetime) -> float:
+    currency = currency.upper()
+    cache_key = (currency, now.date())
+    with FX_LOCK:
+        cached_rate = FX_PREVIOUS_CLOSE_CACHE.get(cache_key)
+    if cached_rate is not None:
+        return cached_rate
+
+    ticker = f"{currency}EUR=X"
+    try:
+        history = yf.Ticker(ticker).history(
+            period="5d",
+            interval="1d",
+            auto_adjust=False,
+            timeout=20,
+        )
+        closes = _dated_closes(history)
+    except (
+        yf.exceptions.YFException,
+        requests.RequestException,
+        TimeoutError,
+        OSError,
+        ValueError,
+        KeyError,
+    ) as error:
+        logging.warning(
+            "No se pudo obtener el cierre previo del cambio %s/EUR: %s",
+            currency,
+            error,
+        )
+        raise ValueError(
+            f"No se pudo obtener el cierre previo del tipo de cambio {currency}/EUR"
+        ) from error
+
+    if not closes:
+        raise ValueError(
+            f"Yahoo Finance no devolvió cierres diarios para {currency}/EUR"
+        )
+    previous_closes = [(day, rate) for day, rate in closes if day < now.date()]
+    if not previous_closes:
+        raise ValueError(
+            f"Yahoo Finance no devolvió un cierre previo válido para {currency}/EUR"
+        )
+    rate = previous_closes[-1][1]
+    with FX_LOCK:
+        FX_PREVIOUS_CLOSE_CACHE[cache_key] = rate
+    return rate
 
 
 @dataclass(frozen=True)
 class Company:
     name: str
     ticker: str | None
+    primary_ticker: str | None = None
 
 
 @dataclass
@@ -158,6 +231,7 @@ class Quote:
     current_price_native: float | None = None
     previous_close: float | None = None
     current_price_eur: float | None = None
+    previous_close_eur: float | None = None
     daily_change_pct: float | None = None
     market_date: date | None = None
     market_timezone: str | None = None
@@ -171,6 +245,8 @@ class Quote:
     extra: dict[str, Any] = field(default_factory=dict)
     warning: str | None = None
     currency: str | None = None
+    price_ticker: str | None = None
+    fx_rate: float | None = None
 
 
 @dataclass
@@ -336,30 +412,30 @@ class DashboardCharts:
 
 
 PORTFOLIO = (
-    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 2.944716, 368.660788, "EUR"),
-    PortfolioAsset("ASML", "ASML.AS", 0.049265, 65.45, "EUR"),
+    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 2.944716, 373.52, "EUR"),
+    PortfolioAsset("ASML", "ASME.SG", 0.049265, 65.45, "EUR"),
     PortfolioAsset("Vistra", "VST", 0.407497, 50.00, "USD"),
     PortfolioAsset("GE Vernova", "GEV", 0.038649, 30.00, "USD"),
     PortfolioAsset("MSCI World Information Tech.", "XDWT.DE", 0.218023, 30.00, "EUR"),
-    PortfolioAsset("Broadcom", "AVGO", 0.084104, 25.00, "USD"),
-    PortfolioAsset("NVIDIA", "NVDA", 0.259347, 47.00, "USD"),
-    PortfolioAsset("Alphabet (A)", "GOOGL", 0.357767, 102.00, "USD"),
-    PortfolioAsset("MercadoLibre", "MELI", 0.002776, 5.00, "USD"),
-    PortfolioAsset("Amazon.com", "AMZN", 0.187863, 42.49, "USD"),
+    PortfolioAsset("Broadcom", "1YD.SG", 0.084104, 25.00, "EUR"),
+    PortfolioAsset("NVIDIA", "NVD.SG", 0.259347, 47.00, "EUR"),
+    PortfolioAsset("Alphabet (A)", "ABEA.SG", 0.357767, 102.00, "EUR"),
+    PortfolioAsset("MercadoLibre", "MLB1.SG", 0.002776, 5.00, "EUR"),
+    PortfolioAsset("Amazon.com", "AMZ.SG", 0.187863, 42.49, "EUR"),
 )
 
 PORTFOLIO_TICKER_CURRENCIES = {
-    "NVDA": "USD",
-    "GOOGL": "USD",
-    "AMZN": "USD",
+    "NVD.SG": "EUR",
+    "ABEA.SG": "EUR",
+    "AMZ.SG": "EUR",
     "EUNL.DE": "EUR",
-    "ASML.AS": "EUR",
-    "NKE": "USD",
+    "ASME.SG": "EUR",
+    "NKE.SG": "EUR",
     "NVO": "USD",
-    "MELI": "USD",
-    "CSH2.PA": "EUR",
+    "MLB1.SG": "EUR",
+    "LYXE.DE": "EUR",
     "GEV": "USD",
-    "AVGO": "USD",
+    "1YD.SG": "EUR",
     "VST": "USD",
     "XDWT.DE": "EUR",
 }
@@ -373,63 +449,78 @@ PORTFOLIO_ACTIVITY_ACTIONS = {
 
 # LISTA DE SEGUIMIENTO
 COMPANIES = (
-    Company("SoFi Technologies", "SOFI"),
+    Company("SoFi Technologies", "4S0.SG", "SOFI"),
     Company("Neo Performance Materials", "NEO.TO"),
     Company("Tempus AI", "TEM"),
-    Company("Walmart", "WMT"),
+    Company("Walmart", "WMT.SG", "WMT"),
     Company("Dollar Tree", "DLTR"),
-    Company("Moderna", "MRNA"),
-    Company("MP Materials", "MP"),
-    Company("Netflix", "NFLX"),
-    Company("Oracle", "ORCL"),
-    Company("Uber", "UBER"),
+    Company("Moderna", "0QF.SG", "MRNA"),
+    Company("MP Materials", "54M.SG", "MP"),
+    Company("Netflix", "NFC.SG", "NFLX"),
+    Company("Oracle", "ORC.SG", "ORCL"),
+    Company("Uber", "UT8.SG", "UBER"),
     Company("Amper", "AMP.MC"),
-    Company("Micron Technology", "MU"),
+    Company("Micron Technology", "MTE.SG", "MU"),
     Company("Vistra", "VST"),
-    Company("Walt Disney", "DIS"),
-    Company("Quantum Computing USD", "QTUM"),
-    Company("S&P 500 Equal Weight US", "RSP"),
+    Company("Walt Disney", "WDP.SG", "DIS"),
+    Company("Quantum Computing USD", "QUTM.DE"),
+    Company("S&P 500 Equal Weight US", "XDEW.DE"),
     Company("Rocket Lab", "RKLB"),
-    Company("MercadoLibre", "MELI"),
-    Company("Microsoft", "MSFT"),
-    Company("Goldman Sachs", "GS"),
-    Company("Nebius Group (A)", "NBIS"),
-    Company("Space Innovators USD (A)", "JEDI"),
-    Company("Smart Overnight Return ETF", "CSH2.PA"),
+    Company("MercadoLibre", "MLB1.SG", "MELI"),
+    Company("Microsoft", "MSF.SG", "MSFT"),
+    Company("Goldman Sachs", "GOS.SG", "GS"),
+    Company("Nebius Group (A)", "YDX.SG", "NBIS"),
+    Company("Space Innovators USD (A)", "JEDI.DE"),
+    Company("Smart Overnight Return ETF", "LYXE.DE"),
     Company("Core MSCI World USD (Acc)", "EUNL.DE"),
-    Company("Alphabet (A)", "GOOGL"),
-    Company("FTSE All-World USD (Acc)", "VWRP.L"),
+    Company("Alphabet (A)", "ABEA.SG", "GOOGL"),
+    Company("FTSE All-World USD (Acc)", "VWCE.DE"),
     Company("IREN", "IREN"),
-    Company("Amazon.com", "AMZN"),
+    Company("Amazon.com", "AMZ.SG", "AMZN"),
     Company("S&P 500 EUR (Acc)", "SXR8.DE"),
-    Company("ASML", "ASML.AS"),
-    Company("Palantir Technologies", "PLTR"),
+    Company("ASML", "ASME.SG", "ASML"),
+    Company("Palantir Technologies", "PTX.F", "PLTR"),
     Company("Bloom Energy", "BE"),
-    Company("EQQQ Nasdaq 100 USD (Acc)", "EQQU.L"),
+    Company("EQQQ Nasdaq 100 USD (Acc)", "EQQB.DE"),
     Company("MSCI Emerging Markets (Acc)", "IS3N.DE"),
-    Company("NASDAQ 100 USD (Acc)", "CNDX.L"),
-    Company("Apple", "AAPL"),
+    Company("NASDAQ 100 USD (Acc)", "SXRV.DE"),
+    Company("Apple", "APC.SG", "AAPL"),
     Company("MSCI World Information Tech.", "XDWT.DE"),
-    Company("Meta Platforms (A)", "META"),
+    Company("Meta Platforms (A)", "FB2A.SG", "META"),
     Company("Semiconductor USD (Acc)", "VVSM.DE"),
-    Company("Broadcom", "AVGO"),
+    Company("Broadcom", "1YD.SG", "AVGO"),
     Company("GE Vernova", "GEV"),
     Company("Marvell Technology", "MRVL"),
-    Company("Tesla", "TSLA"),
-    Company("TSMC (ADR)", "TSM"),
-    Company("AMD", "AMD"),
-    Company("Caterpillar", "CAT"),
-    Company("NVIDIA", "NVDA"),
-    Company("Super Micro Computer", "SMCI"),
-    Company("SpaceX", "SPCX"),
-    Company("Lumentum Holdings", "LITE"),
-    Company("Intel", "INTC"),
+    Company("Tesla", "TL0.SG", "TSLA"),
+    Company("TSMC (ADR)", "TSFA.SG", "TSM"),
+    Company("AMD", "AMD.SG", "AMD"),
+    Company("Caterpillar", "CAT1.SG", "CAT"),
+    Company("NVIDIA", "NVD.SG", "NVDA"),
+    Company("Super Micro Computer", "MS51.SG", "SMCI"),
+    Company("Lumentum Holdings", "2LU.SG", "LITE"),
+    Company("Intel", "INL.SG", "INTC"),
     Company("Applied Optoelectronics", "AAOI"),
-    Company("Modine Manufacturing", "MOD"),
+    Company("Modine Manufacturing", "MDF.SG", "MOD"),
     Company("Vertiv", "VRT"),
     Company("Dell Technologies", "DELL"),
-    Company("Nike (B)", "NKE"),
+    Company("Nike (B)", "NKE.SG", "NKE"),
     Company("Novo Nordisk (ADR)", "NVO"),
+)
+
+PRIMARY_TICKER_MAP = {
+    company.ticker: company.primary_ticker
+    for company in COMPANIES
+    if company.ticker and company.primary_ticker
+}
+PRIMARY_TICKER_MAP.update(
+    {
+        "1YD.SG": "AVGO",
+        "NVD.SG": "NVDA",
+        "ABEA.SG": "GOOGL",
+        "AMZ.SG": "AMZN",
+        "ASME.SG": "ASML",
+        "NKE.SG": "NKE",
+    }
 )
 
 ANALYST_LABELS = {
@@ -534,7 +625,8 @@ def fetch_financial_news(
     if not company.ticker:
         return []
 
-    url = f"{YAHOO_FINANCE_RSS}?{urlencode({'s': company.ticker})}"
+    news_ticker = company.primary_ticker or company.ticker
+    url = f"{YAHOO_FINANCE_RSS}?{urlencode({'s': news_ticker})}"
     try:
         response = requests.get(
             url,
@@ -746,58 +838,529 @@ def collect_market_radar(
 def fetch_quote(company: Company) -> Quote:
     if company.ticker is None:
         return Quote(warning="Sin ticker público configurado")
-    try:
-        info = yf.Ticker(company.ticker).get_info()
-    except Exception as error:
-        message = f"Yahoo Finance: {type(error).__name__}: {error}"
-        logging.warning("%s (%s) - %s", company.name, company.ticker, message)
-        return Quote(warning=message)
+    primary_ticker = (
+        company.primary_ticker
+        or PRIMARY_TICKER_MAP.get(company.ticker)
+        or company.ticker
+    )
+    now = datetime.now(TIMEZONE)
+    candidates = list(dict.fromkeys((company.ticker, primary_ticker)))
+    candidate_data: dict[str, tuple[dict[str, Any], Any]] = {}
+    candidate_quotes: dict[
+        str,
+        tuple[
+            float | None,
+            float | None,
+            date | None,
+            str | None,
+            pd.Timestamp | None,
+            bool,
+        ],
+    ] = {}
+    quote_errors: list[str] = []
+    selected_ticker: str | None = None
+    selected_info: dict[str, Any] = {}
+    selected_history: Any = None
+    quote_values: tuple[float | None, float | None, date | None, str | None] = (
+        None,
+        None,
+        None,
+        None,
+    )
 
-    currency = info.get("currency", "USD")
-    fx_rate = get_fx_rate(currency)
-    market_date = _market_date(info)
+    for candidate in candidates:
+        ticker = yf.Ticker(candidate)
+        try:
+            info = ticker.get_info()
+            if not isinstance(info, dict):
+                info = {}
+        except Exception as error:
+            quote_errors.append(f"{candidate} fundamentales: {type(error).__name__}: {error}")
+            logging.warning(
+                "No se pudieron obtener fundamentales de %s (%s): %s: %s",
+                company.name,
+                candidate,
+                type(error).__name__,
+                error,
+            )
+            info = {}
 
-    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-    previous_close = info.get("previousClose")
-    daily_change_abs = info.get("regularMarketChange")
-    daily_change_pct = info.get("regularMarketChangePercent")
-    target_mean = info.get("targetMeanPrice")
-    peg_ratio = info.get("pegRatio")
+        try:
+            history = ticker.history(
+                period="5d",
+                interval="5m",
+                auto_adjust=False,
+                prepost=True,
+                timeout=20,
+            )
+        except Exception as error:
+            quote_errors.append(f"{candidate} cotización: {type(error).__name__}: {error}")
+            logging.warning(
+                "No se pudo obtener cotización intradía de %s: %s: %s",
+                candidate,
+                type(error).__name__,
+                error,
+            )
+            history = pd.DataFrame()
+        candidate_data[candidate] = (info, history)
+
+        price, previous_close, market_date, market_timezone = _latest_intraday_quote(
+            history
+        )
+        latest_timestamp = _latest_intraday_timestamp(history)
+        paired_european_quote = (
+            company.ticker != primary_ticker
+            and company.ticker.rpartition(".")[2] in {"DE", "F", "SG"}
+        )
+        european_quote = candidate == company.ticker and paired_european_quote
+        primary_fallback_quote = (
+            candidate == primary_ticker and paired_european_quote
+        )
+        stale_during_session = (
+            (candidate != primary_ticker or primary_fallback_quote)
+        ) and _intraday_quote_is_stale(history, now)
+        has_today_quote = _intraday_timestamp_is_today(latest_timestamp, now)
+        if stale_during_session and not (
+            (european_quote or primary_fallback_quote) and has_today_quote
+        ):
+            price = None
+        if price is None:
+            if not stale_during_session:
+                price = _finite_float(
+                    info.get("currentPrice") or info.get("regularMarketPrice")
+                )
+        if previous_close is None:
+            previous_close = _finite_float(info.get("previousClose"))
+        if market_date is None:
+            market_date = _market_date(info)
+        if market_timezone is None and info.get("exchangeTimezoneName"):
+            market_timezone = (
+                _market_timezone(info).key if info.get("exchangeTimezoneName") else None
+            )
+        candidate_quotes[candidate] = (
+            price if price is not None and price > 0 else None,
+            previous_close,
+            market_date,
+            market_timezone,
+            latest_timestamp,
+            stale_during_session,
+        )
+        if (
+            candidate == company.ticker
+            and candidate != primary_ticker
+            and price is not None
+            and price > 0
+            and not stale_during_session
+        ):
+            selected_ticker = candidate
+            quote_values = (
+                price,
+                previous_close,
+                market_date,
+                market_timezone,
+            )
+            break
+
+    local_ticker = company.ticker
+    local_quote = candidate_quotes.get(local_ticker)
+    if (
+        local_ticker != primary_ticker
+        and local_ticker.rpartition(".")[2] in {"DE", "F", "SG"}
+        and local_quote is not None
+        and local_quote[0] is not None
+        and _intraday_timestamp_is_today(local_quote[4], now)
+    ):
+        primary_quote = candidate_quotes.get(primary_ticker)
+        if (
+            primary_quote is not None
+            and primary_quote[0] is not None
+            and _intraday_timestamp_is_today(primary_quote[4], now)
+            and primary_quote[4] > local_quote[4]
+        ):
+            selected_ticker = primary_ticker
+            quote_values = primary_quote[:4]
+        else:
+            selected_ticker = local_ticker
+            quote_values = local_quote[:4]
+
+    if selected_ticker is None:
+        selected_ticker = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate_quotes[candidate][0] is not None
+            ),
+            None,
+        )
+        if selected_ticker is not None:
+            quote_values = candidate_quotes[selected_ticker][:4]
+
+    if selected_ticker is None:
+        selected_ticker = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate_data[candidate][0]
+            ),
+            None,
+        )
+        if selected_ticker is None:
+            message = (
+                f"Yahoo Finance no devolvió cotización ni fundamentales para "
+                f"{company.ticker} ni para {primary_ticker}"
+            )
+            if quote_errors:
+                message = f"{message}. {'; '.join(quote_errors)}"
+            logging.warning("%s (%s)", company.name, message)
+            return Quote(warning=message, price_ticker=company.ticker)
+        selected_info, selected_history = candidate_data[selected_ticker]
+        price_native = _finite_float(
+            selected_info.get("currentPrice")
+            or selected_info.get("regularMarketPrice")
+        )
+        previous_close_native = _finite_float(selected_info.get("previousClose"))
+        market_date = _market_date(selected_info)
+        market_timezone = (
+            _market_timezone(selected_info).key
+            if selected_info.get("exchangeTimezoneName")
+            else None
+        )
+        quote_values = (
+            price_native,
+            previous_close_native,
+            market_date,
+            market_timezone,
+        )
+    else:
+        selected_info = candidate_data[selected_ticker][0]
+
+    if primary_ticker not in candidate_data:
+        try:
+            primary_info = yf.Ticker(primary_ticker).get_info()
+            candidate_data[primary_ticker] = (
+                primary_info if isinstance(primary_info, dict) else {},
+                None,
+            )
+        except Exception as error:
+            quote_errors.append(
+                f"{primary_ticker} fundamentales: {type(error).__name__}: {error}"
+            )
+            logging.warning(
+                "No se pudieron obtener fundamentales de respaldo de %s: %s: %s",
+                primary_ticker,
+                type(error).__name__,
+                error,
+            )
+            candidate_data[primary_ticker] = ({}, None)
+
+    price_native, previous_close, market_date, market_timezone = quote_values
+    source_currency = (
+        selected_info.get("currency")
+        or _ticker_currency_from_symbol(selected_ticker)
+    )
+    currency = str(source_currency).upper()
+    fx_rate = 1.0 if currency == "EUR" else None
+    fx_warning = None
+    if currency != "EUR" and (
+        price_native is not None or selected_info.get("targetMeanPrice") is not None
+    ):
+        try:
+            fx_rate = get_fx_rate(currency)
+        except ValueError as error:
+            fx_warning = f"Tipo de cambio {currency}/EUR no disponible: {error}"
+            logging.warning("%s (%s)", company.name, fx_warning)
+
+    current_price_eur = (
+        _finite_float(price_native, multiplier=fx_rate)
+        if fx_rate is not None
+        else None
+    )
+    previous_fx_rate = fx_rate if currency == "EUR" else None
+    if currency != "EUR" and previous_close is not None:
+        try:
+            previous_fx_rate = get_previous_fx_rate(currency, now)
+        except ValueError as error:
+            fx_warning = fx_warning or str(error)
+            logging.warning(
+                "%s (cierre previo %s/EUR no disponible: %s)",
+                company.name,
+                currency,
+                error,
+            )
+    previous_close_eur = (
+        _finite_float(previous_close, multiplier=previous_fx_rate)
+        if previous_close is not None and previous_fx_rate is not None
+        else None
+    )
+    daily_change_abs_eur = (
+        current_price_eur - previous_close_eur
+        if current_price_eur is not None and previous_close_eur is not None
+        else None
+    )
+    daily_change_pct = (
+        (current_price_eur / previous_close_eur - 1) * 100
+        if current_price_eur is not None
+        and previous_close_eur is not None
+        and previous_close_eur > 0
+        else None
+    )
+
+    fundamental_info = dict(selected_info)
+    extra_info = dict(selected_info)
+    target_source_info = selected_info
+    primary_data = candidate_data.get(primary_ticker)
+    if primary_ticker != selected_ticker and primary_data is not None:
+        primary_info = primary_data[0]
+        fundamental_fields = (
+            "pegRatio",
+            "trailingPegRatio",
+            "trailingPE",
+            "recommendationKey",
+            "numberOfAnalystOpinions",
+            "targetMeanPrice",
+            "earningsTimestamp",
+            "earningsTimestampStart",
+            "sector",
+        )
+        for key in fundamental_fields:
+            if primary_info.get(key) is not None:
+                fundamental_info[key] = primary_info[key]
+        for key in (
+            "currency",
+            "marketCap",
+            "quoteType",
+            "country",
+        ):
+            if fundamental_info.get(key) is None:
+                fundamental_info[key] = primary_info.get(key)
+        if primary_info.get("targetMeanPrice") is not None:
+            target_source_info = primary_info
+            extra_info = dict(primary_info)
+        else:
+            extra_info = dict(fundamental_info)
+
+    target_currency = str(
+        target_source_info.get("currency")
+        or (
+            _ticker_currency_from_symbol(primary_ticker)
+            if target_source_info is not selected_info
+            else currency
+        )
+    ).upper()
+    target_fx_rate = fx_rate if target_currency == currency else None
+    if target_fx_rate is None and fundamental_info.get("targetMeanPrice") is not None:
+        try:
+            target_fx_rate = get_fx_rate(target_currency)
+        except ValueError as error:
+            logging.warning(
+                "No se pudo convertir el precio objetivo de %s a EUR: %s",
+                company.ticker,
+                error,
+            )
+            fx_warning = fx_warning or str(error)
+    target_mean = (
+        _finite_float(
+            fundamental_info.get("targetMeanPrice"),
+            multiplier=target_fx_rate,
+        )
+        if target_fx_rate is not None
+        else None
+    )
+    peg_ratio = fundamental_info.get("pegRatio")
     if peg_ratio is None:
-        peg_ratio = info.get("trailingPegRatio")
+        peg_ratio = fundamental_info.get("trailingPegRatio")
     peg_ratio_value = _finite_float(peg_ratio)
-    pe_ratio_value = _finite_float(info.get("trailingPE"))
-    recommendation = info.get("recommendationKey")
-    analyst_count = info.get("numberOfAnalystOpinions")
-    
+    pe_ratio_value = _finite_float(fundamental_info.get("trailingPE"))
+    recommendation = fundamental_info.get("recommendationKey")
+    analyst_count = fundamental_info.get("numberOfAnalystOpinions")
+
+    extra = extra_quote_fields(extra_info, now)
+    if target_mean is not None and current_price_eur is not None and current_price_eur > 0:
+        extra["analyst_upside_pct"] = round(
+            (target_mean / current_price_eur - 1) * 100,
+            1,
+        )
+    else:
+        extra.pop("analyst_upside_pct", None)
+
+    reference_fields = (
+        ("fiftyTwoWeekHigh", "pct_from_52w_high"),
+        ("fiftyTwoWeekLow", "pct_above_52w_low"),
+        ("fiftyDayAverage", "pct_vs_sma50"),
+        ("twoHundredDayAverage", "pct_vs_sma200"),
+    )
+    primary_info = primary_data[0] if primary_data is not None else {}
+    for yahoo_key, output_key in reference_fields:
+        reference = _finite_float(selected_info.get(yahoo_key))
+        reference_currency = str(
+            selected_info.get("currency") or currency
+        ).upper()
+        if reference is None:
+            reference = _finite_float(primary_info.get(yahoo_key))
+            reference_currency = str(
+                primary_info.get("currency")
+                or _ticker_currency_from_symbol(primary_ticker)
+            ).upper()
+        if reference is None or reference <= 0 or current_price_eur is None:
+            extra.pop(output_key, None)
+            continue
+        if reference_currency == "EUR":
+            live_price_in_reference_currency = current_price_eur
+        else:
+            reference_fx_rate = (
+                fx_rate if reference_currency == currency else None
+            )
+            if reference_fx_rate is None:
+                try:
+                    reference_fx_rate = get_fx_rate(reference_currency)
+                except ValueError as error:
+                    logging.warning(
+                        "No se pudo comparar la cotización actual de %s con %s: %s",
+                        company.ticker,
+                        output_key,
+                        error,
+                    )
+                    extra.pop(output_key, None)
+                    continue
+            live_price_in_reference_currency = (
+                current_price_eur / reference_fx_rate
+            )
+        extra[output_key] = round(
+            (live_price_in_reference_currency / reference - 1) * 100,
+            1,
+        )
     return Quote(
-        current_price_native=_finite_float(current_price),
-        previous_close=_finite_float(previous_close),
-        current_price_eur=_finite_float(current_price, multiplier=fx_rate),
-        daily_change_pct=_finite_float(daily_change_pct, multiplier=1.0),
+        current_price_native=price_native,
+        previous_close=previous_close,
+        current_price_eur=current_price_eur,
+        previous_close_eur=previous_close_eur,
+        daily_change_pct=_finite_float(daily_change_pct),
         market_date=market_date,
-        market_timezone=_market_timezone(info).key,
-        daily_change_abs_eur=_finite_float(daily_change_abs, multiplier=fx_rate),
+        market_timezone=market_timezone,
+        daily_change_abs_eur=_finite_float(daily_change_abs_eur),
         peg_ratio=peg_ratio_value,
         pe_ratio=pe_ratio_value,
         analyst_consensus=ANALYST_LABELS.get(str(recommendation).lower()),
         analyst_count=_positive_int(analyst_count),
-        target_mean_eur=_finite_float(target_mean, multiplier=fx_rate),
-        sector=(str(info["sector"]).strip() if info.get("sector") else None),
-        extra=extra_quote_fields(info, datetime.now(TIMEZONE)),
-        currency=(str(currency).upper() if currency else None),
+        target_mean_eur=target_mean,
+        sector=(
+            str(fundamental_info["sector"]).strip()
+            if fundamental_info.get("sector")
+            else None
+        ),
+        extra=extra,
+        currency=currency,
+        price_ticker=selected_ticker,
+        fx_rate=fx_rate,
         warning=(
-            None
+            fx_warning
             if (
                 recommendation
                 or daily_change_pct is not None
-                or current_price is not None
+                or current_price_eur is not None
                 or peg_ratio_value is not None
                 or pe_ratio_value is not None
             )
-            else "Yahoo Finance no devolvió cotización, consenso, PEG ni PER"
+            else (
+                fx_warning
+                or "Yahoo Finance no devolvió cotización, consenso, PEG ni PER"
+            )
         ),
     )
+
+
+def _latest_intraday_quote(
+    history: Any,
+) -> tuple[float | None, float | None, date | None, str | None]:
+    if not isinstance(history, pd.DataFrame) or history.empty or "Close" not in history:
+        return None, None, None, None
+    closes = pd.to_numeric(history["Close"], errors="coerce").dropna()
+    closes = closes[closes.map(math.isfinite) & (closes > 0)].sort_index()
+    exchange_timezone = getattr(closes.index, "tz", None)
+    if exchange_timezone and str(exchange_timezone).startswith("America/"):
+        closes = closes[
+            [
+                timestamp.timetz().replace(tzinfo=None) <= datetime_time(17, 0)
+                for timestamp in closes.index
+            ]
+        ]
+    if closes.empty:
+        return None, None, None, None
+
+    latest_timestamp = closes.index[-1]
+    latest_date = latest_timestamp.date()
+    daily_closes: dict[date, float] = {}
+    for timestamp, value in closes.items():
+        daily_closes[timestamp.date()] = float(value)
+    previous_dates = [day for day in daily_closes if day < latest_date]
+    previous_close = daily_closes[max(previous_dates)] if previous_dates else None
+    market_timezone = getattr(latest_timestamp, "tz", None)
+    timezone_name = (
+        str(getattr(market_timezone, "zone", market_timezone))
+        if market_timezone is not None
+        else None
+    )
+    return (
+        float(closes.iloc[-1]),
+        previous_close,
+        latest_date,
+        timezone_name,
+    )
+
+
+def _latest_intraday_timestamp(history: Any) -> pd.Timestamp | None:
+    if not isinstance(history, pd.DataFrame) or history.empty or "Close" not in history:
+        return None
+    closes = pd.to_numeric(history["Close"], errors="coerce").dropna()
+    closes = closes[closes.map(math.isfinite) & (closes > 0)].sort_index()
+    exchange_timezone = getattr(closes.index, "tz", None)
+    if exchange_timezone and str(exchange_timezone).startswith("America/"):
+        closes = closes[
+            [
+                timestamp.timetz().replace(tzinfo=None) <= datetime_time(17, 0)
+                for timestamp in closes.index
+            ]
+        ]
+    return pd.Timestamp(closes.index[-1]) if not closes.empty else None
+
+
+def _intraday_timestamp_is_today(
+    timestamp: pd.Timestamp | None,
+    now: datetime,
+) -> bool:
+    if timestamp is None or timestamp.tzinfo is None:
+        return False
+    timestamp_datetime = timestamp.to_pydatetime()
+    market_now = now.astimezone(timestamp_datetime.tzinfo)
+    return (
+        timestamp_datetime.date() == market_now.date()
+        and timestamp_datetime <= market_now
+    )
+
+
+def _intraday_quote_is_stale(history: Any, now: datetime) -> bool:
+    local_now = now.astimezone(TIMEZONE)
+    if local_now.weekday() >= 5:
+        return False
+    local_minutes = local_now.hour * 60 + local_now.minute
+    market_session = 7 * 60 + 30 <= local_minutes <= 23 * 60
+    if not isinstance(history, pd.DataFrame) or history.empty or "Close" not in history:
+        return market_session
+    closes = pd.to_numeric(history["Close"], errors="coerce").dropna()
+    if closes.empty:
+        return market_session
+    latest = closes.index[-1]
+    market_zone = getattr(latest, "tz", None)
+    if market_zone is None:
+        return False
+    latest_time = latest.to_pydatetime()
+    market_now = now.astimezone(market_zone)
+    if not market_session:
+        return False
+    if latest_time.tzinfo is None:
+        return True
+    age = market_now - latest_time.astimezone(market_zone)
+    return latest_time.date() != market_now.date() or age.total_seconds() > 30 * 60
 
 
 def _market_date(info: dict[str, Any]) -> date | None:
@@ -1117,11 +1680,29 @@ def portfolio_transactions_from_activity(
     ]
 
 
+def _consume_fifo_lots(lots: list[list[float]], quantity: float) -> float:
+    remaining = quantity
+    sold_cost = 0.0
+    while remaining > 1e-9 and lots:
+        lot_shares, unit_cost = lots[0]
+        consumed = min(remaining, lot_shares)
+        sold_cost += consumed * unit_cost
+        remaining -= consumed
+        lot_shares -= consumed
+        if lot_shares <= 1e-9:
+            lots.pop(0)
+        else:
+            lots[0][0] = lot_shares
+    if remaining > 1e-7:
+        raise ValueError("La venta supera las participaciones disponibles en lotes FIFO")
+    return sold_cost
+
+
 def portfolio_assets_from_transactions(
     transactions: list[PortfolioTransaction],
 ) -> tuple[PortfolioAsset, ...]:
     holdings: dict[str, dict[str, Any]] = {}
-    for transaction in transactions:
+    for transaction in sorted(transactions, key=lambda item: item.trade_date):
         holding = holdings.setdefault(
             transaction.ticker,
             {
@@ -1129,6 +1710,7 @@ def portfolio_assets_from_transactions(
                 "currency": transaction.currency,
                 "shares": 0.0,
                 "cost_eur": 0.0,
+                "lots": [],
             },
         )
         if holding["name"] != transaction.name or holding["currency"] != transaction.currency:
@@ -1136,23 +1718,24 @@ def portfolio_assets_from_transactions(
                 f"El ticker {transaction.ticker} tiene nombre o divisa inconsistentes"
             )
         if transaction.side == "BUY":
+            purchase_cost = (
+                transaction.gross_amount_eur
+                if transaction.gross_amount_eur is not None
+                else transaction.quantity * transaction.price_eur
+            ) + transaction.fees_eur
             holding["shares"] += transaction.quantity
-            holding["cost_eur"] += (
-                    (
-                        transaction.gross_amount_eur
-                        if transaction.gross_amount_eur is not None
-                        else transaction.quantity * transaction.price_eur
-                    )
-                    + transaction.fees_eur
-                )
+            holding["cost_eur"] += purchase_cost
+            holding["lots"].append(
+                [transaction.quantity, purchase_cost / transaction.quantity]
+            )
             continue
         if transaction.quantity > holding["shares"] + 1e-9:
             raise ValueError(
                 f"Venta de {transaction.ticker} supera las participaciones compradas"
             )
-        average_cost = holding["cost_eur"] / holding["shares"]
+        sold_cost = _consume_fifo_lots(holding["lots"], transaction.quantity)
         holding["shares"] -= transaction.quantity
-        holding["cost_eur"] -= average_cost * transaction.quantity
+        holding["cost_eur"] -= sold_cost
         if holding["shares"] <= 1e-9:
             holding["shares"] = 0.0
             holding["cost_eur"] = 0.0
@@ -1275,6 +1858,7 @@ def _portfolio_transaction_chart_data(
 
     shares: dict[str, float] = {}
     cost_basis: dict[str, float] = {}
+    fifo_lots: dict[str, list[list[float]]] = {}
     realized_pnl = 0.0
     income_total = 0.0
     income_dates = sorted(income_by_date)
@@ -1307,10 +1891,19 @@ def _portfolio_transaction_chart_data(
                 purchase_cost = gross + transaction.fees_eur
                 shares[ticker] = held_shares + transaction.quantity
                 cost_basis[ticker] = held_cost + purchase_cost
+                fifo_lots.setdefault(ticker, []).append(
+                    [transaction.quantity, purchase_cost / transaction.quantity]
+                )
                 day_buy_cost += purchase_cost
             else:
-                average_cost = held_cost / held_shares if held_shares > 0 else 0.0
-                sold_cost = average_cost * transaction.quantity
+                if transaction.quantity > held_shares + 1e-9:
+                    raise ValueError(
+                        f"Venta de {ticker} supera las participaciones compradas"
+                    )
+                sold_cost = _consume_fifo_lots(
+                    fifo_lots.setdefault(ticker, []),
+                    transaction.quantity,
+                )
                 sale_proceeds = gross - transaction.fees_eur
                 realized_pnl += sale_proceeds - sold_cost
                 shares[ticker] = max(0.0, held_shares - transaction.quantity)
@@ -1439,6 +2032,9 @@ def collect_fund_lookthrough(
         for report in reports
         if report.company.ticker
     }
+    reports_by_name = {
+        report.company.name.casefold(): report for report in reports
+    }
     lookthrough: dict[str, dict[str, Any]] = {}
     for position in portfolio:
         report = reports_by_ticker.get(position.asset.ticker)
@@ -1522,6 +2118,7 @@ def _ticker_currency_from_symbol(symbol: str) -> str:
         "MC": "EUR",
         "MI": "EUR",
         "PA": "EUR",
+        "SG": "EUR",
         "SW": "CHF",
         "L": "GBP",
         "TO": "CAD",
@@ -1550,6 +2147,9 @@ def calculate_portfolio_risk_metrics(
         report.company.ticker: report
         for report in reports
         if report.company.ticker
+    }
+    reports_by_name = {
+        report.company.name.casefold(): report for report in reports
     }
     valued_positions = [
         position
@@ -1606,6 +2206,9 @@ def calculate_portfolio_risk_metrics(
             continue
         series = pd.Series(dict(closes), dtype="float64").sort_index()
         series = series[series > 0]
+        report = reports_by_ticker.get(ticker) or reports_by_name.get(
+            position.asset.name.casefold()
+        )
         if position.asset.currency.upper() == "USD":
             fx = fx_series.reindex(series.index).ffill()
             series = series * fx
@@ -1717,7 +2320,9 @@ def calculate_portfolio_risk_metrics(
         ticker = position.asset.ticker
         value = _finite_float(position.current_value_eur) or 0
         weight = value / total_value
-        report = reports_by_ticker.get(ticker)
+        report = reports_by_ticker.get(ticker) or reports_by_name.get(
+            position.asset.name.casefold()
+        )
         quote = report.quote if report is not None else Quote()
         industry = str(quote.extra.get("industry") or "").casefold()
         quote_type = str(quote.extra.get("quote_type") or "").upper()
@@ -2018,9 +2623,31 @@ def _risk_no_data_reason(
 def fetch_portfolio(
     assets: tuple[PortfolioAsset, ...] = PORTFOLIO,
     as_of: date | None = None,
+    reports: list[StockReport] | None = None,
 ) -> list[PortfolioPosition]:
     as_of = as_of or datetime.now(TIMEZONE).date()
-    usd_assets = any(asset.currency == "USD" for asset in assets)
+    reports_by_ticker = {
+        report.company.ticker: report
+        for report in reports or []
+        if report.company.ticker
+    }
+    reports_by_name = {
+        report.company.name.casefold(): report for report in reports or []
+    }
+
+    def report_for(asset: PortfolioAsset) -> StockReport | None:
+        return reports_by_ticker.get(asset.ticker) or reports_by_name.get(
+            asset.name.casefold()
+        )
+
+    usd_assets = any(
+        asset.currency == "USD"
+        or (
+            (report := report_for(asset)) is not None
+            and report.quote.currency == "USD"
+        )
+        for asset in assets
+    )
     fx_closes: list[tuple[date, float]] = []
     fx_warning = None
     if usd_assets:
@@ -2041,6 +2668,10 @@ def fetch_portfolio(
             logging.warning("%s", fx_warning)
 
     def fetch_position(asset: PortfolioAsset) -> PortfolioPosition:
+        report = report_for(asset)
+        quote = report.quote if report is not None else Quote()
+        source_ticker = quote.price_ticker or asset.ticker
+        source_currency = quote.currency or asset.currency
         position = PortfolioPosition(
             asset=asset,
             prices_eur={"Hoy": None, **{period: None for period, _ in PORTFOLIO_PERIODS}},
@@ -2054,12 +2685,13 @@ def fetch_portfolio(
                 reason,
             )
 
-        if asset.currency == "USD" and fx_warning:
-            position.warning = fx_warning
-            log_risk_no_data("precio ausente por falta de tipo de cambio")
-            return position
+        history_warning = None
         try:
-            history = yf.Ticker(asset.ticker).history(period="2y", auto_adjust=False)
+            history = yf.Ticker(source_ticker).history(
+                period="2y",
+                auto_adjust=False,
+                timeout=20,
+            )
             closes = _dated_closes(history)
             exchange_timezone = getattr(history.index, "tz", None)
             if exchange_timezone is not None:
@@ -2074,39 +2706,41 @@ def fetch_portfolio(
             ValueError,
             KeyError,
         ) as error:
-            position.warning = (
-                f"{asset.ticker}: {type(error).__name__}: {error}"
+            history = pd.DataFrame()
+            closes = []
+            history_warning = (
+                f"{source_ticker}: {type(error).__name__}: {error}"
             )
-            logging.warning("No se pudo obtener el histórico de %s: %s", asset.ticker, error)
-            log_risk_no_data("precio ausente porque no se pudo obtener el histórico")
-            return position
-
-        if not closes:
-            position.warning = f"{asset.ticker}: Yahoo Finance no devolvió cierres históricos"
-            logging.warning("%s", position.warning)
-            log_risk_no_data(
-                f"histórico insuficiente (0 de {ATR_WINDOW + 1} sesiones válidas)"
-            )
-            return position
+            logging.warning("No se pudo obtener el histórico de %s: %s", source_ticker, error)
 
         targets = {"Hoy": as_of}
         targets.update(
             {period: as_of - timedelta(days=days) for period, days in PORTFOLIO_PERIODS}
         )
         for label, target in targets.items():
+            if label == "Hoy" and quote.current_price_eur is not None:
+                position.prices_eur[label] = quote.current_price_eur
+                position.price_date = quote.market_date or as_of
+                position.market_timezone = (
+                    quote.market_timezone or position.market_timezone
+                )
+                continue
             dated_close = _close_on_or_before(closes, target)
             if dated_close is None:
                 continue
             price_date, close = dated_close
             if label == "Hoy":
                 position.price_date = price_date
-            if asset.currency == "USD":
+            if source_currency == "USD":
                 dated_fx_rate = _close_on_or_before(fx_closes, price_date)
                 if dated_fx_rate is None:
                     continue
                 _, fx_rate = dated_fx_rate
                 close *= fx_rate
             position.prices_eur[label] = close
+
+        if quote.previous_close_eur is not None:
+            position.prices_eur["1D"] = quote.previous_close_eur
 
         current_price = position.prices_eur["Hoy"]
         risk_history = (
@@ -2119,6 +2753,26 @@ def fetch_portfolio(
             if position.price_date is not None
             else history.iloc[0:0]
         )
+        if source_currency == "USD" and not risk_history.empty:
+            if fx_warning:
+                risk_history = risk_history.iloc[0:0]
+            else:
+                risk_history = risk_history.copy()
+                for timestamp in risk_history.index:
+                    history_date = pd.Timestamp(timestamp).date()
+                    fx_rate = (
+                        quote.fx_rate
+                        if quote.fx_rate is not None
+                        and history_date == quote.market_date
+                        else (
+                            _close_on_or_before(fx_closes, history_date) or (None, None)
+                        )[1]
+                    )
+                    if fx_rate is None:
+                        continue
+                    for column in ("Open", "High", "Low", "Close"):
+                        if column in risk_history:
+                            risk_history.loc[timestamp, column] *= fx_rate
         position.risk_zones = calculate_risk_zones(
             risk_history, current_price, ticker=asset.ticker
         )
@@ -2130,9 +2784,15 @@ def fetch_portfolio(
             position.max_return_pct = (
                 (position.current_value_eur / asset.investment_eur - 1) * 100
             )
+        if quote.daily_change_pct is not None and position.prices_eur["Hoy"] is not None:
+            position.returns_pct["1D"] = quote.daily_change_pct
         for period, _ in PORTFOLIO_PERIODS:
             historical_price = position.prices_eur[period]
-            if current_price is not None and historical_price:
+            if (
+                current_price is not None
+                and historical_price is not None
+                and (period != "1D" or position.returns_pct["1D"] is None)
+            ):
                 position.returns_pct[period] = (
                     (current_price - historical_price) / historical_price * 100
                 )
@@ -2151,6 +2811,12 @@ def fetch_portfolio(
                     f"{', '.join(missing_periods)}"
                 )
                 logging.warning("%s", position.warning)
+        if history_warning or fx_warning:
+            position.warning = "; ".join(
+                filter(None, (position.warning, history_warning, fx_warning))
+            )
+        if not closes and current_price is not None:
+            log_risk_no_data("histórico insuficiente (0 cierres válidos)")
         return position
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -2168,7 +2834,7 @@ def _is_ai_excluded_position(ticker: str, name: str = "") -> bool:
 
 def _mentions_ai_excluded_position(text: str) -> bool:
     ticker_pattern = re.compile(
-        r"(?<![A-Z0-9])(?:EUNL\.DE|XDWT\.DE|MELI|MSCIW|XTDE)(?![A-Z0-9])",
+        r"(?<![A-Z0-9])(?:EUNL\.DE|XDWT\.DE|MELI|MLB1\.SG|MSCIW|XTDE)(?![A-Z0-9])",
         re.IGNORECASE,
     )
     return bool(ticker_pattern.search(text)) or _is_ai_excluded_position("", text)
@@ -2310,56 +2976,62 @@ def _analysis_inputs(
 
 
 THEMES: dict[str, str] = {
+    "VWCE.DE": "ETF global",
     "EUNL.DE": "ETF global",
-    "SWDA.L": "ETF global",
-    "VWRP.L": "ETF global",
     "SXR8.DE": "ETF EE. UU.",
-    "RSP": "ETF EE. UU.",
-    "EQQU.L": "ETF Nasdaq/tecnología",
-    "CNDX.L": "ETF Nasdaq/tecnología",
+    "XDEW.DE": "ETF EE. UU.",
+    "EQQB.DE": "ETF Nasdaq/tecnología",
+    "SXRV.DE": "ETF Nasdaq/tecnología",
     "XDWT.DE": "ETF Nasdaq/tecnología",
-    "QTUM": "ETF temático",
-    "IS3N.DE": "ETF emergentes",
-    "CSH2.PA": "Liquidez",
-    "NVDA": "Semiconductores",
-    "AVGO": "Semiconductores",
-    "AMD": "Semiconductores",
-    "MRVL": "Semiconductores",
-    "MU": "Semiconductores",
-    "TSM": "Semiconductores",
-    "INTC": "Semiconductores",
-    "ASML.AS": "Semiconductores",
+    "QUTM.DE": "ETF temático",
+    "JEDI.DE": "ETF temático",
     "VVSM.DE": "Semiconductores",
+    "IS3N.DE": "ETF emergentes",
+    "LYXE.DE": "Liquidez",
+    "NVD.SG": "Semiconductores",
+    "1YD.SG": "Semiconductores",
+    "AMD.SG": "Semiconductores",
+    "MRVL": "Semiconductores",
+    "MTE.SG": "Semiconductores",
+    "TSFA.SG": "Semiconductores",
+    "INL.SG": "Semiconductores",
+    "ASME.SG": "Semiconductores",
     "DELL": "Infraestructura IA",
-    "SMCI": "Infraestructura IA",
-    "NBIS": "Infraestructura IA",
-    "LITE": "Infraestructura IA",
+    "MS51.SG": "Infraestructura IA",
+    "YDX.SG": "Infraestructura IA",
+    "2LU.SG": "Infraestructura IA",
     "VRT": "Infraestructura IA",
-    "MOD": "Infraestructura IA",
+    "MDF.SG": "Infraestructura IA",
     "VST": "Energía para IA",
     "GEV": "Energía para IA",
     "BE": "Energía para IA",
-    "MSFT": "Big Tech y software",
-    "GOOGL": "Big Tech y software",
-    "META": "Big Tech y software",
-    "AMZN": "Big Tech y software",
-    "AAPL": "Big Tech y software",
-    "ORCL": "Big Tech y software",
-    "PLTR": "Big Tech y software",
-    "NFLX": "Consumo y medios",
-    "DIS": "Consumo y medios",
-    "UBER": "Consumo y medios",
-    "MELI": "Consumo y fintech LatAm",
-    "SOFI": "Financieras",
-    "GS": "Financieras",
-    "CAT": "Industriales",
-    "MP": "Materiales críticos",
+    "MSF.SG": "Big Tech y software",
+    "ABEA.SG": "Big Tech y software",
+    "FB2A.SG": "Big Tech y software",
+    "AMZ.SG": "Big Tech y software",
+    "APC.SG": "Big Tech y software",
+    "ORC.SG": "Big Tech y software",
+    "PTX.F": "Big Tech y software",
+    "NFC.SG": "Consumo y medios",
+    "WDP.SG": "Consumo y medios",
+    "UT8.SG": "Consumo y medios",
+    "MLB1.SG": "Consumo y fintech LatAm",
+    "4S0.SG": "Financieras",
+    "GOS.SG": "Financieras",
+    "CAT1.SG": "Industriales",
+    "54M.SG": "Materiales críticos",
     "NEO.TO": "Materiales críticos",
-    "MRNA": "Salud",
+    "0QF.SG": "Salud",
     "TEM": "Salud",
     "RKLB": "Espacio",
-    "NKE": "Consumo y medios",
+    "NKE.SG": "Consumo y medios",
     "NVO": "Salud",
+    "WMT.SG": "Consumo defensivo",
+    "DLTR": "Consumo defensivo",
+    "IREN": "Minería de Bitcoin",
+    "AMP.MC": "Industriales",
+    "TL0.SG": "Automoción",
+    "AAOI": "Infraestructura IA",
 }
 TECH_IA_THEMES = {
     "Semiconductores",
@@ -4556,11 +5228,15 @@ def calculate_rsi14(closes: Any) -> float | None:
 
 
 def enrich_reports_with_rsi14(reports: list[StockReport]) -> None:
+    ticker_by_report = {
+        id(report): report.quote.price_ticker or report.company.ticker
+        for report in reports
+    }
     tickers = list(
         dict.fromkeys(
-            report.company.ticker
+            ticker_by_report[id(report)]
             for report in reports
-            if report.company.ticker
+            if ticker_by_report[id(report)]
         )
     )
     if not tickers:
@@ -4594,7 +5270,7 @@ def enrich_reports_with_rsi14(reports: list[StockReport]) -> None:
         return
 
     for report in reports:
-        ticker = report.company.ticker
+        ticker = ticker_by_report[id(report)]
         closes = _intraday_close_series(history, ticker) if ticker else None
         report.quote.extra["rsi14"] = calculate_rsi14(closes)
         if report.quote.extra["rsi14"] is None:
@@ -4817,7 +5493,36 @@ def collect_chart_data(
         if report.company.ticker and not risk_only
     }
     portfolio_by_ticker = {position.asset.ticker: position for position in portfolio}
-    usd_portfolio = any(position.asset.currency == "USD" for position in portfolio)
+    reports_by_name = {
+        report.company.name.casefold(): report for report in reports
+    }
+
+    def report_for_position(position: PortfolioPosition) -> StockReport | None:
+        return report_by_ticker.get(position.asset.ticker) or reports_by_name.get(
+            position.asset.name.casefold()
+        )
+
+    report_sources = {
+        ticker: report.quote.price_ticker or ticker
+        for ticker, report in report_by_ticker.items()
+    }
+    portfolio_sources = {
+        ticker: (
+            report.quote.price_ticker
+            if (report := report_for_position(position)) is not None
+            and report.quote.price_ticker
+            else ticker
+        )
+        for ticker, position in portfolio_by_ticker.items()
+    }
+    usd_portfolio = any(
+        position.asset.currency == "USD"
+        or (
+            (report := report_for_position(position)) is not None
+            and report.quote.currency == "USD"
+        )
+        for position in portfolio
+    ) or any(report.quote.currency == "USD" for report in reports)
     benchmark_tickers = (
         [ticker for _, ticker in MARKET_BENCHMARKS]
         if portfolio or transactions
@@ -4826,8 +5531,8 @@ def collect_chart_data(
     tickers = list(
         dict.fromkeys(
             [
-                *report_by_ticker,
-                *portfolio_by_ticker,
+                *report_sources.values(),
+                *portfolio_sources.values(),
                 *benchmark_tickers,
                 *(["USDEUR=X"] if usd_portfolio else []),
             ]
@@ -4851,8 +5556,15 @@ def collect_chart_data(
                 threads=True,
                 timeout=20,
             )
-            for ticker in tickers:
-                close_series = _intraday_close_series(history, ticker)
+            for ticker in dict.fromkeys(
+                [*report_sources, *portfolio_sources, *tickers]
+            ):
+                source_ticker = (
+                    report_sources.get(ticker)
+                    or portfolio_sources.get(ticker)
+                    or ticker
+                )
+                close_series = _intraday_close_series(history, source_ticker)
                 if close_series is not None:
                     closes_by_ticker[ticker] = close_series
         except (
@@ -4872,7 +5584,7 @@ def collect_chart_data(
     historical_closes: dict[str, list[tuple[date, float]]] = {}
     adjusted_historical_closes: dict[str, list[tuple[date, float]]] = {}
     historical_tickers = [
-        *portfolio_by_ticker,
+        *portfolio_sources.values(),
         *(transaction.ticker for transaction in transactions),
         *benchmark_tickers,
         *(
@@ -4919,6 +5631,48 @@ def collect_chart_data(
                 adjusted_historical_closes[ticker] = _dated_closes(
                     adjusted_series
                 )
+            for display_ticker, source_ticker in portfolio_sources.items():
+                position = portfolio_by_ticker[display_ticker]
+                report = report_for_position(position)
+                source_currency = (
+                    report.quote.currency
+                    if report is not None and report.quote.currency
+                    else position.asset.currency
+                )
+                source_currency = source_currency.upper()
+                position_currency = position.asset.currency.upper()
+                convert_currency = (
+                    source_currency != position_currency
+                    and {source_currency, position_currency} == {"EUR", "USD"}
+                )
+                if display_ticker == source_ticker and not convert_currency:
+                    continue
+                closes = historical_closes.get(source_ticker, [])
+                adjusted_closes = adjusted_historical_closes.get(source_ticker, [])
+                if convert_currency:
+                    fx_closes = historical_closes.get("USDEUR=X", [])
+
+                    def convert_history(
+                        prices: list[tuple[date, float]],
+                    ) -> list[tuple[date, float]]:
+                        converted = []
+                        for day, price in prices:
+                            fx = _close_on_or_before(fx_closes, day)
+                            if fx is not None:
+                                converted_price = (
+                                    price * fx[1]
+                                    if source_currency == "USD"
+                                    else price / fx[1]
+                                )
+                                converted.append(
+                                    (day, converted_price)
+                                )
+                        return converted
+
+                    closes = convert_history(closes)
+                    adjusted_closes = convert_history(adjusted_closes)
+                historical_closes[display_ticker] = closes
+                adjusted_historical_closes[display_ticker] = adjusted_closes
         except (
             yf.exceptions.YFException,
             requests.RequestException,
@@ -5034,7 +5788,11 @@ def collect_chart_data(
                 market_date,
                 market_timezone,
                 position.current_value_eur,
-                position.asset.currency,
+                (
+                    report.quote.currency
+                    if report is not None
+                    else position.asset.currency
+                ),
                 previous_close_is_native,
             )
         )
@@ -5618,6 +6376,7 @@ def build_market_data(
                 "ticker": report.company.ticker,
                 "name": report.company.name,
                 "sector": quote.sector,
+                "price_source_ticker": quote.price_ticker,
                 "current_price_eur": quote.current_price_eur,
                 "currency": quote.currency,
                 "daily_change_abs_eur": quote.daily_change_abs_eur,
@@ -5661,8 +6420,8 @@ def build_market_data(
         activity.ticker: activity.asset_class.casefold()
         for activity in portfolio_activity
     }
-    transaction_totals: dict[str, dict[str, float | int]] = {}
-    for transaction in transactions:
+    transaction_totals: dict[str, dict[str, Any]] = {}
+    for transaction in sorted(transactions, key=lambda item: item.trade_date):
         if transaction.side not in {"BUY", "SELL"}:
             continue
         totals = transaction_totals.setdefault(
@@ -5672,6 +6431,7 @@ def build_market_data(
                 "cost_basis_eur": 0.0,
                 "invested_cost_eur": 0.0,
                 "realized_pnl_eur": 0.0,
+                "lots": [],
             },
         )
         gross_amount = (
@@ -5684,23 +6444,25 @@ def build_market_data(
             totals["shares"] += transaction.quantity
             totals["cost_basis_eur"] += purchase_cost
             totals["invested_cost_eur"] += purchase_cost
+            totals["lots"].append(
+                [transaction.quantity, purchase_cost / transaction.quantity]
+            )
         else:
             shares_before_sale = totals["shares"]
             if transaction.quantity > shares_before_sale + 1e-9:
                 raise ValueError(
                     f"Venta de {transaction.ticker} supera las participaciones compradas"
                 )
-            average_cost = (
-                totals["cost_basis_eur"] / shares_before_sale
-                if shares_before_sale > 0
-                else 0
+            sold_cost = _consume_fifo_lots(
+                totals["lots"],
+                transaction.quantity,
             )
             sale_proceeds = gross_amount - transaction.fees_eur
             totals["realized_pnl_eur"] += (
-                sale_proceeds - average_cost * transaction.quantity
+                sale_proceeds - sold_cost
             )
             totals["shares"] -= transaction.quantity
-            totals["cost_basis_eur"] -= average_cost * transaction.quantity
+            totals["cost_basis_eur"] -= sold_cost
 
     positions = []
     for position in portfolio:
@@ -5745,6 +6507,8 @@ def build_market_data(
                 "name": asset.name,
                 "asset_class": asset_class,
                 "currency": asset.currency,
+                "price_source_ticker": quote.price_ticker,
+                "price_currency": quote.currency,
                 "shares": asset.shares,
                 "investment_eur": asset.investment_eur,
                 "invested_cost_eur": (
@@ -8469,7 +9233,7 @@ def main() -> int:
             return 2
     reports = collect_reports()
     enrich_reports_with_rsi14(reports)
-    portfolio = fetch_portfolio(assets)
+    portfolio = fetch_portfolio(assets, reports=reports)
     generated_at = datetime.now(TIMEZONE)
     chart_data = collect_chart_data(
         reports,

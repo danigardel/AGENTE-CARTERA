@@ -37,12 +37,15 @@ from daily_report import (
     PortfolioPosition,
     PortfolioTransaction,
     PORTFOLIO,
+    PORTFOLIO_TICKER_CURRENCIES,
     PORTFOLIO_PERIODS,
     Quote,
     RiskZones,
     StockReport,
     TIMEZONE,
+    AI_EXCLUDED_PORTFOLIO_TICKERS,
     _last_good_analysis_for_dashboard,
+    _mentions_ai_excluded_position,
     _model_pool_allows_fallback,
     _market_session_series,
     _read_gemini_cache,
@@ -74,6 +77,7 @@ from daily_report import (
     collect_market_events,
     collect_market_radar,
     collect_financial_news,
+    get_previous_fx_rate,
     collect_chart_data,
     calculate_risk_zones,
     external_ideas_html,
@@ -93,6 +97,7 @@ from daily_report import (
     portfolio_transactions_from_activity,
     portfolio_history_from_transactions,
     _portfolio_transaction_chart_data,
+    _consume_fifo_lots,
     collect_reports,
     render_dashboard,
     translate_headline,
@@ -213,6 +218,220 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(quote.peg_ratio, 2.4)
 
+    @patch("daily_report.get_previous_fx_rate", return_value=0.88)
+    @patch("daily_report.get_fx_rate", return_value=0.9)
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_quote_converts_live_price_and_previous_close_to_eur(
+        self, ticker_mock, _fx_mock, _previous_fx_mock
+    ):
+        ticker_mock.return_value.get_info.return_value = {
+            "currency": "USD",
+            "regularMarketTime": datetime(
+                2026, 10, 9, 15, 30, tzinfo=timezone.utc
+            ).timestamp(),
+            "exchangeTimezoneName": "America/New_York",
+        }
+        ticker_mock.return_value.history.return_value = pd.DataFrame(
+            {"Close": [100.0, 110.0]},
+            index=pd.date_range(
+                "2026-10-08 16:00",
+                periods=2,
+                freq="D",
+                tz="America/New_York",
+            ),
+        )
+
+        quote = fetch_quote(Company("Example Co", "EX"))
+
+        self.assertEqual(quote.currency, "USD")
+        self.assertEqual(quote.price_ticker, "EX")
+        self.assertAlmostEqual(quote.current_price_eur, 99.0)
+        self.assertAlmostEqual(quote.previous_close_eur, 88.0)
+        self.assertAlmostEqual(quote.daily_change_abs_eur, 11.0)
+        self.assertAlmostEqual(quote.daily_change_pct, 12.5)
+
+    @patch("daily_report.yf.Ticker")
+    def test_previous_fx_rate_uses_the_most_recent_prior_daily_close(self, ticker_mock):
+        history = pd.DataFrame(
+            {"Close": [0.91, 0.92]},
+            index=pd.DatetimeIndex(
+                ["2030-01-01", "2030-01-02"],
+                tz="UTC",
+            ),
+        )
+        ticker_mock.return_value.history.return_value = history
+
+        rate = get_previous_fx_rate(
+            "USD",
+            datetime(2030, 1, 2, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(rate, 0.91)
+        ticker_mock.assert_called_once_with("USDEUR=X")
+
+    @patch("daily_report.get_previous_fx_rate", return_value=0.88)
+    @patch("daily_report.get_fx_rate", return_value=0.9)
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_quote_falls_back_to_primary_ticker_without_eur_price(
+        self, ticker_mock, _fx_mock, _previous_fx_mock
+    ):
+        now = datetime.now(TIMEZONE)
+        history = pd.DataFrame(
+            {"Close": [100.0, 110.0]},
+            index=pd.date_range(
+                now.date() - timedelta(days=1),
+                periods=2,
+                freq="D",
+                tz="America/New_York",
+            ),
+        )
+
+        def ticker_factory(symbol):
+            if symbol == "EUR.SG":
+                return SimpleNamespace(
+                    get_info=lambda: {"currency": "EUR"},
+                    history=lambda **_kwargs: pd.DataFrame(),
+                )
+            return SimpleNamespace(
+                get_info=lambda: {
+                    "currency": "USD",
+                    "pegRatio": 1.2,
+                    "trailingPE": 15,
+                    "recommendationKey": "buy",
+                    "numberOfAnalystOpinions": 10,
+                    "targetMeanPrice": 120,
+                    "sector": "Technology",
+                },
+                history=lambda **_kwargs: history,
+            )
+
+        ticker_mock.side_effect = ticker_factory
+
+        quote = fetch_quote(Company("Example Co", "EUR.SG", "EX"))
+
+        self.assertEqual(quote.price_ticker, "EX")
+        self.assertEqual(quote.currency, "USD")
+        self.assertAlmostEqual(quote.current_price_eur, 99.0)
+        self.assertAlmostEqual(quote.previous_close_eur, 88.0)
+        self.assertAlmostEqual(quote.peg_ratio, 1.2)
+        self.assertAlmostEqual(quote.pe_ratio, 15)
+        self.assertEqual(quote.analyst_consensus, "Compra")
+        self.assertEqual(quote.analyst_count, 10)
+        self.assertAlmostEqual(quote.target_mean_eur, 108.0)
+        self.assertEqual(quote.sector, "Technology")
+
+    def test_fetch_quote_keeps_today_european_quote_when_primary_is_older(self):
+        now = datetime(2026, 11, 2, 15, 0, tzinfo=TIMEZONE)
+        local_history = pd.DataFrame(
+            {"Close": [100.0]},
+            index=pd.DatetimeIndex(["2026-11-02 14:00"], tz="Europe/Berlin"),
+        )
+        primary_history = pd.DataFrame(
+            {"Close": [110.0]},
+            index=pd.DatetimeIndex(["2026-11-01 16:00"], tz="America/New_York"),
+        )
+
+        def ticker_factory(symbol):
+            history = local_history if symbol == "EUR.SG" else primary_history
+            info = {"currency": "EUR" if symbol == "EUR.SG" else "USD"}
+            return SimpleNamespace(
+                get_info=lambda: info,
+                history=lambda **_kwargs: history,
+            )
+
+        with (
+            patch("daily_report.datetime") as datetime_mock,
+            patch("daily_report.yf.Ticker", side_effect=ticker_factory),
+            patch(
+                "daily_report._intraday_quote_is_stale",
+                side_effect=lambda history, _now: history is local_history
+                or history is primary_history,
+            ),
+        ):
+            datetime_mock.now.return_value = now
+            quote = fetch_quote(Company("Example Co", "EUR.SG", "EX"))
+
+        self.assertEqual(quote.price_ticker, "EUR.SG")
+        self.assertEqual(quote.current_price_eur, 100.0)
+
+    @patch("daily_report.get_previous_fx_rate", return_value=0.88)
+    @patch("daily_report.get_fx_rate", return_value=0.9)
+    def test_fetch_quote_uses_newer_same_day_primary_quote(
+        self, _fx_mock, _previous_fx_mock
+    ):
+        now = datetime(2026, 11, 2, 15, 35, tzinfo=TIMEZONE)
+        local_history = pd.DataFrame(
+            {"Close": [100.0]},
+            index=pd.DatetimeIndex(["2026-11-02 14:00"], tz="Europe/Berlin"),
+        )
+        primary_history = pd.DataFrame(
+            {"Close": [100.0, 110.0]},
+            index=pd.DatetimeIndex(
+                ["2026-11-01 16:00", "2026-11-02 09:30"],
+                tz="America/New_York",
+            ),
+        )
+
+        def ticker_factory(symbol):
+            history = local_history if symbol == "EUR.SG" else primary_history
+            info = {"currency": "EUR" if symbol == "EUR.SG" else "USD"}
+            return SimpleNamespace(
+                get_info=lambda: info,
+                history=lambda **_kwargs: history,
+            )
+
+        with (
+            patch("daily_report.datetime") as datetime_mock,
+            patch("daily_report.yf.Ticker", side_effect=ticker_factory),
+            patch(
+                "daily_report._intraday_quote_is_stale",
+                side_effect=lambda history, _now: history is local_history
+                or history is primary_history,
+            ),
+        ):
+            datetime_mock.now.return_value = now
+            quote = fetch_quote(Company("Example Co", "EUR.SG", "EX"))
+
+        self.assertEqual(quote.price_ticker, "EX")
+        self.assertEqual(quote.current_price_eur, 99.0)
+        self.assertAlmostEqual(quote.previous_close_eur, 88.0)
+
+    @patch("daily_report.yf.Ticker")
+    def test_primary_fundamentals_failure_preserves_european_fundamentals(
+        self, ticker_mock
+    ):
+        def unavailable_info():
+            raise requests.Timeout("Yahoo temporarily unavailable")
+
+        def ticker_factory(symbol):
+            if symbol == "EUR.SG":
+                return SimpleNamespace(
+                    get_info=lambda: {
+                        "currency": "EUR",
+                        "pegRatio": 2.1,
+                        "trailingPE": 30,
+                        "recommendationKey": "buy",
+                        "numberOfAnalystOpinions": 4,
+                        "sector": "Technology",
+                    },
+                    history=lambda **_kwargs: pd.DataFrame(),
+                )
+            return SimpleNamespace(
+                get_info=unavailable_info,
+                history=lambda **_kwargs: pd.DataFrame(),
+            )
+
+        ticker_mock.side_effect = ticker_factory
+
+        quote = fetch_quote(Company("Example Co", "EUR.SG", "EX"))
+
+        self.assertEqual(quote.price_ticker, "EUR.SG")
+        self.assertEqual(quote.peg_ratio, 2.1)
+        self.assertEqual(quote.pe_ratio, 30)
+        self.assertEqual(quote.analyst_consensus, "Compra")
+        self.assertEqual(quote.analyst_count, 4)
+        self.assertEqual(quote.sector, "Technology")
+
     @patch("daily_report.yf.Ticker")
     def test_fetch_quote_turns_json_decode_error_into_quote_warning(self, ticker_mock):
         ticker_mock.return_value.get_info.side_effect = json.JSONDecodeError(
@@ -236,6 +455,53 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(extra["analyst_upside_pct"], 25)
         self.assertEqual(extra["pct_from_52w_high"], -33.3)
+
+    @patch("daily_report.get_fx_rate", return_value=0.9)
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_quote_recalculates_analyst_and_reference_metrics_from_live_price(
+        self, ticker_mock, _fx_mock
+    ):
+        now = datetime.now(TIMEZONE)
+        local_info = {
+            "currency": "EUR",
+            "currentPrice": 90.0,
+            "fiftyTwoWeekHigh": 120.0,
+            "fiftyTwoWeekLow": 80.0,
+        }
+        primary_info = {
+            "currency": "USD",
+            "currentPrice": 100.0,
+            "targetMeanPrice": 120.0,
+            "fiftyDayAverage": 100.0,
+            "twoHundredDayAverage": 150.0,
+        }
+        local_history = pd.DataFrame(
+            {"Close": [110.0]},
+            index=pd.DatetimeIndex([now - timedelta(minutes=5)]),
+        )
+
+        def ticker_factory(symbol):
+            if symbol == "EUR.SG":
+                return SimpleNamespace(
+                    get_info=lambda: local_info,
+                    history=lambda **_kwargs: local_history,
+                )
+            return SimpleNamespace(
+                get_info=lambda: primary_info,
+                history=lambda **_kwargs: pd.DataFrame(),
+            )
+
+        ticker_mock.side_effect = ticker_factory
+
+        quote = fetch_quote(Company("Example Co", "EUR.SG", "EX"))
+
+        self.assertAlmostEqual(quote.current_price_eur, 110.0)
+        self.assertAlmostEqual(quote.target_mean_eur, 108.0)
+        self.assertAlmostEqual(quote.extra["analyst_upside_pct"], -1.8)
+        self.assertAlmostEqual(quote.extra["pct_from_52w_high"], -8.3)
+        self.assertAlmostEqual(quote.extra["pct_above_52w_low"], 37.5)
+        self.assertAlmostEqual(quote.extra["pct_vs_sma50"], 22.2)
+        self.assertAlmostEqual(quote.extra["pct_vs_sma200"], -18.5)
 
     def test_rsi14_calculates_and_handles_insufficient_history(self):
         increasing = pd.Series(range(1, 21), dtype="float64")
@@ -338,6 +604,60 @@ class SentimentTests(unittest.TestCase):
         )
         self.assertIsNotNone(metrics["annualized_volatility_pct"])
         self.assertEqual(len(metrics["correlation_matrix"]), 2)
+
+    def test_portfolio_risk_metrics_do_not_reconvert_euro_primary_quote(self):
+        sessions = pd.bdate_range("2026-01-01", periods=30)
+        dates = [session.date() for session in sessions]
+        euro_prices = [100 + index * 0.7 for index in range(len(dates))]
+        benchmark_prices = [100 + index * 0.4 for index in range(len(dates))]
+        fx_prices = [0.8 + index * 0.005 for index in range(len(dates))]
+        histories_usd = {
+            "MELI": list(
+                zip(
+                    dates,
+                    [price / fx for price, fx in zip(euro_prices, fx_prices)],
+                )
+            ),
+            "EUNL.DE": list(zip(dates, benchmark_prices)),
+            "USDEUR=X": list(zip(dates, fx_prices)),
+        }
+        histories_eur = {
+            "MELI": list(zip(dates, euro_prices)),
+            "EUNL.DE": list(zip(dates, benchmark_prices)),
+        }
+        position_usd = PortfolioPosition(
+            PortfolioAsset("MercadoLibre", "MELI", 1, 100, "USD"),
+            current_value_eur=100,
+        )
+        position_eur = PortfolioPosition(
+            PortfolioAsset("MercadoLibre", "MELI", 1, 100, "EUR"),
+            current_value_eur=100,
+        )
+        reports = [
+            StockReport(
+                Company("MercadoLibre", "MLB1.SG", "MELI"),
+                quote=Quote(currency="EUR", sector="Consumer cyclical"),
+            )
+        ]
+
+        usd_account_metrics = calculate_portfolio_risk_metrics(
+            [position_usd],
+            histories_usd,
+            reports,
+        )
+        euro_account_metrics = calculate_portfolio_risk_metrics(
+            [position_eur],
+            histories_eur,
+            reports,
+        )
+
+        for key in (
+            "annualized_volatility_pct",
+            "max_drawdown_pct",
+            "sharpe_ratio",
+            "sortino_ratio",
+        ):
+            self.assertEqual(usd_account_metrics[key], euro_account_metrics[key])
 
     def test_portfolio_risk_metrics_handle_missing_history(self):
         portfolio = [
@@ -1023,6 +1343,46 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(tuple(position.returns_pct), tuple(period for period, _ in PORTFOLIO_PERIODS))
 
     @patch("daily_report.yf.Ticker")
+    def test_fetch_portfolio_uses_watchlist_quote_for_current_eur_price(
+        self, ticker_mock
+    ):
+        as_of = date(2026, 11, 2)
+        asset = PortfolioAsset("Example", "EUR.SG", 2, 200, "EUR")
+        quote = Quote(
+            current_price_native=123,
+            previous_close=120,
+            current_price_eur=123,
+            previous_close_eur=120,
+            daily_change_pct=2.5,
+            market_date=as_of,
+            market_timezone="Europe/Berlin",
+            currency="EUR",
+            price_ticker="EUR.SG",
+            fx_rate=1,
+        )
+        report = StockReport(Company("Example", "EUR.SG"), quote=quote)
+        history = pd.DataFrame(
+            {
+                "High": [121, 124],
+                "Low": [119, 122],
+                "Close": [120, 123],
+            },
+            index=pd.date_range("2026-10-30", periods=2, freq="D"),
+        )
+        ticker_mock.return_value.history.return_value = history
+
+        position = fetch_portfolio(
+            (asset,),
+            as_of=as_of,
+            reports=[report],
+        )[0]
+
+        self.assertEqual(position.prices_eur["Hoy"], quote.current_price_eur)
+        self.assertEqual(position.prices_eur["1D"], quote.previous_close_eur)
+        self.assertEqual(position.returns_pct["1D"], quote.daily_change_pct)
+        self.assertEqual(position.current_value_eur, 246)
+
+    @patch("daily_report.yf.Ticker")
     def test_fetch_portfolio_warns_and_keeps_position_when_risk_history_is_short(
         self, ticker_mock
     ):
@@ -1236,15 +1596,67 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(assets[0].shares, 8)
         self.assertAlmostEqual(assets[0].investment_eur, 80.8)
 
+    def test_partial_sales_use_fifo_cost_basis_across_portfolio_views(self):
+        transactions = [
+            PortfolioTransaction(
+                date(2026, 1, 1), "EX", "Example", "BUY", 1, 10, "EUR",
+                gross_amount_eur=10,
+            ),
+            PortfolioTransaction(
+                date(2026, 1, 2), "EX", "Example", "BUY", 1, 20, "EUR",
+                gross_amount_eur=20,
+            ),
+            PortfolioTransaction(
+                date(2026, 1, 3), "EX", "Example", "SELL", 1, 30, "EUR",
+                gross_amount_eur=30,
+            ),
+        ]
+
+        assets = portfolio_assets_from_transactions(transactions)
+        position = PortfolioPosition(
+            asset=assets[0],
+            current_value_eur=30,
+            prices_eur={"Hoy": 30, "1D": 20},
+            returns_pct={"1D": 50},
+        )
+        market_data = build_market_data(
+            [],
+            [position],
+            transactions=transactions,
+            generated_at=datetime(2026, 1, 3, 12, tzinfo=TIMEZONE),
+        )
+        with patch(
+            "daily_report._consume_fifo_lots",
+            wraps=_consume_fifo_lots,
+        ) as consume_fifo:
+            _portfolio_transaction_chart_data(
+                transactions,
+                historical_closes={
+                    "EX": [
+                        (date(2026, 1, 1), 10),
+                        (date(2026, 1, 2), 20),
+                        (date(2026, 1, 3), 30),
+                    ]
+                },
+            )
+
+        self.assertEqual(assets[0].shares, 1)
+        self.assertEqual(assets[0].investment_eur, 20)
+        self.assertEqual(
+            market_data["portfolio"]["positions"][0]["realized_pnl_eur"],
+            20,
+        )
+        self.assertEqual(consume_fifo.call_count, 1)
+
     def test_portfolio_activity_builds_positions_and_keeps_benefits_separate(self):
         rows = [
             {
                 "date": "2026-01-01",
                 "action": "BUY",
-                "ticker": "NVDA",
+                "ticker": "NVD.SG",
                 "name": "NVIDIA",
                 "asset_class": "STOCK",
-                "currency": "USD",
+                "currency": "EUR",
                 "shares": 10,
                 "price_eur": 10,
                 "amount_eur": -100,
@@ -1254,10 +1666,10 @@ class SentimentTests(unittest.TestCase):
             {
                 "date": "2026-01-02",
                 "action": "DIVIDEND",
-                "ticker": "NVDA",
+                "ticker": "NVD.SG",
                 "name": "NVIDIA",
                 "asset_class": "STOCK",
-                "currency": "USD",
+                "currency": "EUR",
                 "shares": 10,
                 "price_eur": None,
                 "amount_eur": 2,
@@ -1267,10 +1679,10 @@ class SentimentTests(unittest.TestCase):
             {
                 "date": "2026-01-03",
                 "action": "SELL",
-                "ticker": "NVDA",
+                "ticker": "NVD.SG",
                 "name": "NVIDIA",
                 "asset_class": "STOCK",
-                "currency": "USD",
+                "currency": "EUR",
                 "shares": 2,
                 "price_eur": 15,
                 "amount_eur": 30,
@@ -1280,10 +1692,10 @@ class SentimentTests(unittest.TestCase):
             {
                 "date": "2026-01-04",
                 "action": "STOCKPERK",
-                "ticker": "NVDA",
+                "ticker": "NVD.SG",
                 "name": "NVIDIA",
                 "asset_class": "STOCK",
-                "currency": "USD",
+                "currency": "EUR",
                 "shares": None,
                 "price_eur": None,
                 "amount_eur": 5,
@@ -1316,6 +1728,11 @@ class SentimentTests(unittest.TestCase):
         configured_tickers = {
             report.ticker for report in COMPANIES if report.ticker
         }
+        configured_tickers.update(
+            report.primary_ticker
+            for report in COMPANIES
+            if report.primary_ticker
+        )
         public_fields = {
             "date",
             "action",
@@ -1342,14 +1759,15 @@ class SentimentTests(unittest.TestCase):
             self.assertAlmostEqual(
                 assets_by_ticker[configured.ticker].investment_eur,
                 configured.investment_eur,
+                places=2,
             )
-        self.assertIn("NKE", configured_tickers)
+        self.assertIn("NKE.SG", configured_tickers)
         self.assertIn("NVO", configured_tickers)
         dashboard = render_dashboard([], portfolio_activity=activities)
         self.assertIn("Historial de inversión · 61 movimientos", dashboard)
         self.assertEqual(dashboard.count('data-label="Movimiento"'), 61)
-        self.assertIn("AMZN", assets_by_ticker)
-        self.assertAlmostEqual(assets_by_ticker["AMZN"].shares, 0.187863)
+        self.assertIn("AMZ.SG", assets_by_ticker)
+        self.assertAlmostEqual(assets_by_ticker["AMZ.SG"].shares, 0.187863)
 
         todays_activities = [
             item for item in activities if item.trade_date == date(2026, 11, 2)
@@ -1776,38 +2194,81 @@ class SentimentTests(unittest.TestCase):
 
     def test_watchlist_matches_updated_company_list(self):
         companies = [(company.name, company.ticker) for company in COMPANIES]
-        self.assertEqual(len(COMPANIES), 57)
+        self.assertEqual(len(COMPANIES), 56)
         self.assertEqual(
             companies[:5],
             [
-                ("SoFi Technologies", "SOFI"),
+                ("SoFi Technologies", "4S0.SG"),
                 ("Neo Performance Materials", "NEO.TO"),
                 ("Tempus AI", "TEM"),
-                ("Walmart", "WMT"),
+                ("Walmart", "WMT.SG"),
                 ("Dollar Tree", "DLTR"),
             ],
         )
-        self.assertIn(("Space Innovators USD (A)", "JEDI"), companies)
+        self.assertIn(("Space Innovators USD (A)", "JEDI.DE"), companies)
         self.assertIn(("Amper", "AMP.MC"), companies)
         self.assertIn(("IREN", "IREN"), companies)
         self.assertIn(("Applied Optoelectronics", "AAOI"), companies)
         self.assertIn(("Core MSCI World USD (Acc)", "EUNL.DE"), companies)
-        self.assertIn(("Nike (B)", "NKE"), companies)
+        self.assertIn(("MercadoLibre", "MLB1.SG"), companies)
+        self.assertIn(("Nike (B)", "NKE.SG"), companies)
         self.assertIn(("Novo Nordisk (ADR)", "NVO"), companies)
+        self.assertNotIn("SpaceX", {company.name for company in COMPANIES})
         self.assertEqual(
-            next(company.ticker for company in COMPANIES if company.name == "SpaceX"),
-            "SPCX",
+            next(company.primary_ticker for company in COMPANIES if company.name == "ASML"),
+            "ASML",
+        )
+        self.assertEqual(
+            next(company.primary_ticker for company in COMPANIES if company.name == "MercadoLibre"),
+            "MELI",
+        )
+        self.assertIn("MLB1.SG", AI_EXCLUDED_PORTFOLIO_TICKERS)
+        self.assertIn("MELI", AI_EXCLUDED_PORTFOLIO_TICKERS)
+        self.assertTrue(_mentions_ai_excluded_position("MLB1.SG"))
+        self.assertTrue(_mentions_ai_excluded_position("MELI"))
+        self.assertEqual(
+            {asset.ticker: asset.currency for asset in PORTFOLIO},
+            {
+                "EUNL.DE": "EUR",
+                "ASME.SG": "EUR",
+                "VST": "USD",
+                "GEV": "USD",
+                "XDWT.DE": "EUR",
+                "1YD.SG": "EUR",
+                "NVD.SG": "EUR",
+                "ABEA.SG": "EUR",
+                "MLB1.SG": "EUR",
+                "AMZ.SG": "EUR",
+            },
+        )
+        self.assertEqual(
+            set(PORTFOLIO_TICKER_CURRENCIES),
+            {
+                "NVD.SG",
+                "ABEA.SG",
+                "AMZ.SG",
+                "EUNL.DE",
+                "ASME.SG",
+                "NKE.SG",
+                "NVO",
+                "MLB1.SG",
+                "LYXE.DE",
+                "GEV",
+                "1YD.SG",
+                "VST",
+                "XDWT.DE",
+            },
         )
 
     def test_portfolio_positions_match_transactions_through_today(self):
         portfolio_by_ticker = {asset.ticker: asset for asset in PORTFOLIO}
 
         world_etf = portfolio_by_ticker["EUNL.DE"]
-        google = portfolio_by_ticker["GOOGL"]
-        amazon = portfolio_by_ticker["AMZN"]
+        google = portfolio_by_ticker["ABEA.SG"]
+        amazon = portfolio_by_ticker["AMZ.SG"]
 
         self.assertEqual(world_etf.shares, 2.944716)
-        self.assertAlmostEqual(world_etf.investment_eur, 368.660788)
+        self.assertAlmostEqual(world_etf.investment_eur, 373.52)
         self.assertEqual(google.shares, 0.357767)
         self.assertEqual(google.investment_eur, 102.00)
         self.assertEqual(amazon.shares, 0.187863)
@@ -1841,12 +2302,12 @@ class SentimentTests(unittest.TestCase):
         )
 
         news = fetch_financial_news(
-            Company("Example Corp", "EX"),
+            Company("Example Corp", "EUR.SG", "EX"),
             date(2026, 10, 11),
         )
 
         self.assertEqual(len(news), 1)
-        self.assertEqual(news[0].ticker, "EX")
+        self.assertEqual(news[0].ticker, "EUR.SG")
         self.assertEqual(news[0].title, "Company reports growth")
         self.assertEqual(news[0].summary, "Revenue & profits increased.")
         self.assertIn("s=EX", get_mock.call_args.args[0])
@@ -2262,6 +2723,77 @@ class SentimentTests(unittest.TestCase):
         charts = collect_chart_data([report], portfolio)
 
         self.assertAlmostEqual(charts.portfolio_series[0]["value"], (110 * 0.91 / 90 - 1) * 100)
+
+    @patch("daily_report.calculate_portfolio_risk_metrics", return_value=None)
+    @patch("daily_report.yf.download")
+    def test_chart_history_converts_usd_primary_ticker_for_eur_position(
+        self, download_mock, risk_metrics_mock
+    ):
+        daily_index = pd.date_range("2026-10-05", periods=2, freq="D")
+        daily_columns = pd.MultiIndex.from_product(
+            [["EX", "USDEUR=X", "SXR8.DE", "EUNL.DE"], ["Close"]],
+            names=["Ticker", "Price"],
+        )
+        daily = pd.DataFrame(
+            [[100, 0.9, 100, 100], [110, 0.8, 101, 102]],
+            index=daily_index,
+            columns=daily_columns,
+        )
+        download_mock.side_effect = [pd.DataFrame(), daily]
+        company = Company("Example", "EUR.SG", "EX")
+        report = StockReport(
+            company,
+            quote=Quote(currency="USD", price_ticker="EX"),
+        )
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("Example", "EUR.SG", 1, 90, "EUR"),
+                current_value_eur=90,
+            )
+        ]
+
+        collect_chart_data([report], portfolio)
+
+        historical_closes = risk_metrics_mock.call_args.args[1]
+        self.assertEqual(
+            historical_closes["EUR.SG"],
+            [(date(2026, 10, 5), 90), (date(2026, 10, 6), 88)],
+        )
+
+    @patch("daily_report.calculate_portfolio_risk_metrics", return_value=None)
+    @patch("daily_report.yf.download")
+    def test_chart_history_converts_eur_primary_ticker_for_usd_account_position(
+        self, download_mock, risk_metrics_mock
+    ):
+        daily_index = pd.date_range("2026-10-05", periods=2, freq="D")
+        daily_columns = pd.MultiIndex.from_product(
+            [["MLB1.SG", "USDEUR=X", "SXR8.DE", "EUNL.DE"], ["Close"]],
+            names=["Ticker", "Price"],
+        )
+        daily = pd.DataFrame(
+            [[90, 0.9, 100, 100], [88, 0.8, 101, 102]],
+            index=daily_index,
+            columns=daily_columns,
+        )
+        download_mock.side_effect = [pd.DataFrame(), daily]
+        report = StockReport(
+            Company("MercadoLibre", "MLB1.SG", "MELI"),
+            quote=Quote(currency="EUR", price_ticker="MLB1.SG"),
+        )
+        portfolio = [
+            PortfolioPosition(
+                PortfolioAsset("MercadoLibre", "MELI", 1, 5, "USD"),
+                current_value_eur=90,
+            )
+        ]
+
+        collect_chart_data([report], portfolio)
+
+        historical_closes = risk_metrics_mock.call_args.args[1]
+        self.assertEqual(
+            historical_closes["MELI"],
+            [(date(2026, 10, 5), 100), (date(2026, 10, 6), 110)],
+        )
 
     @patch("daily_report.yf.download", return_value=pd.DataFrame())
     def test_portfolio_heatmap_items_use_portfolio_weights_and_quote_freshness(
