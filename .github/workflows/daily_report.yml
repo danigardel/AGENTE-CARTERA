@@ -1,8 +1,8 @@
 name: Daily stock report
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  #schedule:
+  #  - cron: '*/5 * * * *'
   workflow_dispatch:
   workflow_run:
     workflows: ["Portfolio event agent"]
