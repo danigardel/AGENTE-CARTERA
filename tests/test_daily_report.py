@@ -48,13 +48,12 @@ from daily_report import (
     _read_gemini_cache,
     _write_gemini_cache,
     _write_gemini_failure_cache,
-    build_contribution_plan,
     calculate_portfolio_risk_metrics,
     calculate_rsi14,
     buy_the_dip_candidates,
     collect_fund_lookthrough,
+    enrich_inputs,
     extra_quote_fields,
-    next_savings_plan_date,
     _analysis_section,
     _apply_payload_profile,
     _risk_no_data_reason,
@@ -94,7 +93,6 @@ from daily_report import (
     portfolio_transactions_from_activity,
     portfolio_history_from_transactions,
     _portfolio_transaction_chart_data,
-    _portfolio_risk_section_html,
     collect_reports,
     render_dashboard,
     translate_headline,
@@ -282,46 +280,6 @@ class SentimentTests(unittest.TestCase):
             [],
         )
 
-    def test_contribution_plan_allocates_full_amount_to_underweight_core(self):
-        positions = [
-            PortfolioPosition(
-                PortfolioAsset("MSCI World", "EUNL.DE", 1, 300, "EUR"),
-                current_value_eur=300,
-            ),
-            PortfolioPosition(
-                PortfolioAsset("Satellite A", "AAA", 1, 200, "USD"),
-                current_value_eur=200,
-            ),
-            PortfolioPosition(
-                PortfolioAsset("Satellite B", "BBB", 1, 500, "USD"),
-                current_value_eur=500,
-            ),
-        ]
-
-        plan = build_contribution_plan(
-            positions,
-            datetime(2026, 11, 2, 12, 0, tzinfo=TIMEZONE),
-        )
-
-        allocations = {
-            item["ticker"]: item["planned_contribution_eur"]
-            for item in plan["allocations"]
-        }
-        self.assertTrue(plan["enabled"])
-        self.assertEqual(plan["next_contribution_date"], date(2026, 11, 2))
-        self.assertEqual(sum(allocations.values()), 150)
-        self.assertEqual(allocations["EUNL.DE"], 150)
-
-    def test_next_contribution_schedule_advances_after_savings_days(self):
-        self.assertEqual(
-            next_savings_plan_date(date(2026, 11, 3)),
-            date(2026, 11, 16),
-        )
-        self.assertEqual(
-            next_savings_plan_date(date(2026, 11, 17)),
-            date(2026, 12, 2),
-        )
-
     def test_portfolio_risk_metrics_use_euro_returns_and_yahoo_beta(self):
         sessions = pd.bdate_range("2026-01-01", periods=30)
         dates = [session.date() for session in sessions]
@@ -432,33 +390,57 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(result["FUND.DE"]["holdings_coverage_pct"], 8)
         self.assertEqual(result["FUND.DE"]["sector_weights_pct"]["technology"], 42)
 
-    def test_portfolio_risk_html_shows_sector_and_fund_lookthrough(self):
-        html = _portfolio_risk_section_html(
-            {
-                "sector_exposure_pct": {"Technology": 40},
-                "sector_coverage_pct": 80,
-                "lookthrough": {
-                    "EUNL.DE": {
-                        "holdings": [
-                            {
-                                "ticker": "NVDA",
-                                "name": "NVIDIA <script>",
-                                "weight_pct": 5,
-                            }
-                        ],
-                        "holdings_coverage_pct": 75,
-                        "sector_weights_pct": {"Technology": 30},
-                        "sector_coverage_pct": 90,
-                    }
-                },
-            }
+    def test_risk_metrics_are_included_in_the_ai_analysis_context(self):
+        risk_metrics = {
+            "annualized_volatility_pct": 22.4,
+            "max_drawdown_pct": -18.3,
+            "beta_vs_eunl": 1.2,
+            "sector_exposure_pct": {"Technology": 55.0},
+            "lookthrough": {
+                "FUND.DE": {
+                    "holdings": [{"ticker": "NVDA", "weight_pct": 8.0}],
+                }
+            },
+            "correlation_matrix": [
+                {"ticker": "NVDA", "values": {"EUNL.DE": 0.6}}
+            ],
+        }
+        inputs = enrich_inputs(
+            {"portfolio": [], "watchlist": []},
+            [],
+            [],
+            datetime(2026, 11, 2, 12, 0, tzinfo=TIMEZONE),
+            deterministic_signals={
+                "portfolio_risk_metrics": risk_metrics,
+            },
+        )
+        prompt = build_analysis_prompt(
+            inputs,
+            datetime(2026, 11, 2, 12, 0, tzinfo=TIMEZONE),
         )
 
-        self.assertIn("Exposición sectorial", html)
-        self.assertIn("Look-through de fondos", html)
-        self.assertIn("NVDA", html)
-        self.assertIn("NVIDIA &lt;script&gt;", html)
-        self.assertNotIn("<script>", html)
+        self.assertIn('"portfolio_risk_metrics"', prompt)
+        self.assertIn('"annualized_volatility_pct": 22.4', prompt)
+        self.assertIn('"sector_exposure_pct": {"Technology": 55.0}', prompt)
+        self.assertIn('"correlation_matrix"', prompt)
+
+    def test_portfolio_risk_details_are_not_rendered_in_the_dashboard(self):
+        html = render_dashboard(
+            [],
+            chart_data=DashboardCharts(
+                risk_metrics={
+                    "sector_exposure_pct": {"Technology": 55.0},
+                    "correlation_matrix": [],
+                    "lookthrough": {},
+                }
+            ),
+        )
+
+        self.assertNotIn("Riesgo cuantitativo de cartera", html)
+        self.assertNotIn("Exposición sectorial", html)
+        self.assertNotIn("Look-through de fondos", html)
+        self.assertNotIn("Matriz de correlación completa", html)
+        self.assertNotIn("Próxima aportación", html)
 
     @patch("daily_report.requests.get")
     def test_translate_headline_requests_spanish_and_joins_translation_parts(self, get_mock):
@@ -4681,12 +4663,20 @@ class SentimentTests(unittest.TestCase):
                 ),
             ],
             analysis=analysis,
-            chart_data=DashboardCharts(watchlist=[{"value": float("inf")}]),
+            chart_data=DashboardCharts(
+                watchlist=[{"value": float("inf")}],
+                risk_metrics={"annualized_volatility_pct": 12.3},
+            ),
             generated_at=generated_at,
             vix={"price": 18.5, "change_pct": 2.1},
         )
 
         self.assertEqual(payload["schema_version"], 1)
+        self.assertNotIn("contribution_plan", payload)
+        self.assertEqual(
+            payload["risk_metrics"],
+            {"annualized_volatility_pct": 12.3},
+        )
         self.assertEqual(
             payload["macro_indicators"]["vix"],
             {"price": 18.5, "change_pct": 2.1},

@@ -13,7 +13,6 @@ import requests
 from daily_report import (
     ALERT_DROP_PCT,
     BUY_THE_DIP_SCORE_THRESHOLD,
-    SAVINGS_PLAN_CONTRIBUTION_EUR,
     TIMEZONE,
     PORTFOLIO,
     PORTFOLIO_ACTIVITY_FILE,
@@ -22,9 +21,9 @@ from daily_report import (
     _http_status,
     _market_data_is_current,
     analyze_portfolio,
-    build_contribution_plan,
     buy_the_dip_candidates,
     collect_reports,
+    collect_chart_data,
     enrich_reports_with_rsi14,
     fetch_portfolio,
     load_portfolio_activity,
@@ -422,6 +421,11 @@ def run_agent(
     portfolio = fetch_portfolio(assets)
     enrich_reports_with_rsi14(reports)
     state = load_agent_state(state_path, local_date)
+    risk_data = collect_chart_data(
+        reports,
+        portfolio,
+        risk_only=True,
+    ).risk_metrics
     price_alerts = find_price_alerts(portfolio, reports, state, now)
     dip_candidates = buy_the_dip_candidates(
         reports,
@@ -447,11 +451,6 @@ def run_agent(
                 "category": alert["category"],
             }
     save_agent_state(state_path, state)
-    contribution_plan = build_contribution_plan(
-        portfolio,
-        now,
-        SAVINGS_PLAN_CONTRIBUTION_EUR,
-    )
     analyze_portfolio(
         reports,
         portfolio,
@@ -459,7 +458,7 @@ def run_agent(
         send_telegram=True,
         deterministic_signals={
             "dip_candidates": dip_candidates,
-            "contribution_plan": contribution_plan,
+            "portfolio_risk_metrics": risk_data,
         },
     )
 

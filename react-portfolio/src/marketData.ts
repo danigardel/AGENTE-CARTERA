@@ -144,27 +144,6 @@ export interface BuyTheDipCandidateData {
   market_date: string | null;
 }
 
-export interface ContributionPlanData {
-  enabled: boolean;
-  amount_eur: number;
-  next_contribution_date: string;
-  commission_eur: number;
-  target_core_ticker: string;
-  target_core_weight_pct: number;
-  target_satellite_weight_pct: number;
-  allocations: {
-    ticker: string;
-    name: string;
-    current_value_eur: number;
-    current_weight_pct: number;
-    target_weight_pct: number;
-    target_value_after_eur: number;
-    deviation_eur: number;
-    planned_contribution_eur: number;
-  }[];
-  warning: string | null;
-}
-
 export interface FundLookthroughData {
   holdings: {
     ticker: string;
@@ -242,7 +221,6 @@ export interface MarketData {
   watchlist: WatchlistItem[];
   portfolio: PortfolioData;
   buy_the_dip_candidates?: BuyTheDipCandidateData[];
-  contribution_plan?: ContributionPlanData;
   risk_metrics?: PortfolioRiskMetricsData;
   macro_indicators?: MacroIndicatorsData;
   analysis: {
@@ -658,33 +636,6 @@ function isBuyTheDipCandidate(value: unknown): value is BuyTheDipCandidateData {
   );
 }
 
-function isContributionPlan(value: unknown): value is ContributionPlanData {
-  return (
-    isRecord(value) &&
-    typeof value.enabled === "boolean" &&
-    isFiniteNumber(value.amount_eur) &&
-    typeof value.next_contribution_date === "string" &&
-    isFiniteNumber(value.commission_eur) &&
-    typeof value.target_core_ticker === "string" &&
-    isFiniteNumber(value.target_core_weight_pct) &&
-    isFiniteNumber(value.target_satellite_weight_pct) &&
-    Array.isArray(value.allocations) &&
-    value.allocations.every(
-      (item) =>
-        isRecord(item) &&
-        typeof item.ticker === "string" &&
-        typeof item.name === "string" &&
-        isFiniteNumber(item.current_value_eur) &&
-        isFiniteNumber(item.current_weight_pct) &&
-        isFiniteNumber(item.target_weight_pct) &&
-        isFiniteNumber(item.target_value_after_eur) &&
-        isFiniteNumber(item.deviation_eur) &&
-        isFiniteNumber(item.planned_contribution_eur),
-    ) &&
-    isNullableString(value.warning)
-  );
-}
-
 function isFundLookthrough(value: unknown): value is FundLookthroughData {
   return (
     isRecord(value) &&
@@ -827,8 +778,6 @@ export function isMarketData(value: unknown): value is MarketData {
     (value.buy_the_dip_candidates === undefined ||
       (Array.isArray(value.buy_the_dip_candidates) &&
         value.buy_the_dip_candidates.every(isBuyTheDipCandidate))) &&
-    (value.contribution_plan === undefined ||
-      isContributionPlan(value.contribution_plan)) &&
     (value.risk_metrics === undefined ||
       isPortfolioRiskMetrics(value.risk_metrics)) &&
     isRecord(totals) &&

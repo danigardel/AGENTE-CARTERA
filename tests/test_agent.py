@@ -3,6 +3,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent import (
@@ -241,6 +242,9 @@ class AutonomousAgentTests(unittest.TestCase):
         self.assertIn("score 3/5", text)
         self.assertIn("RSI(14) 30.0; PEG 1.20", text)
 
+    @patch("agent.collect_chart_data", return_value=SimpleNamespace(
+        risk_metrics={"annualized_volatility_pct": 12.3}
+    ))
     @patch("agent.analyze_portfolio", return_value=PortfolioAnalysis(
         warning="Narrativa IA no disponible."
     ))
@@ -255,6 +259,7 @@ class AutonomousAgentTests(unittest.TestCase):
         portfolio_mock,
         alert_mock,
         analysis_mock,
+        risk_mock,
     ):
         reports_mock.return_value = [self._report("FRESH", self.now.date(), -3.0)]
         portfolio_mock.return_value = [self._position("FRESH", self.now.date())]
@@ -277,6 +282,12 @@ class AutonomousAgentTests(unittest.TestCase):
         self.assertIn("FRESH", state["alerts"])
         self.assertEqual(state["alerts"]["FRESH"]["last_alerted_pct"], -3.0)
         self.assertNotIn("last_drop_pct", state["alerts"]["FRESH"])
+        self.assertEqual(
+            analysis_mock.call_args.kwargs["deterministic_signals"][
+                "portfolio_risk_metrics"
+            ],
+            risk_mock.return_value.risk_metrics,
+        )
 
     def test_load_state_migrates_legacy_drop_percentage(self):
         with TemporaryDirectory() as temp_dir:
