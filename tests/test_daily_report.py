@@ -101,6 +101,8 @@ from daily_report import (
     collect_reports,
     render_dashboard,
     translate_headline,
+    fetch_ls_intraday_and_quote,
+    LS_INSTRUMENTS_BY_TICKER,
     main,
 )
 
@@ -183,6 +185,190 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(headlines[0].source, "Example News")
         self.assertGreater(headlines[0].sentiment, 0)
         self.assertIn("after%3A2026-09-27", get_mock.call_args.args[0])
+
+    @patch("daily_report._ls_session")
+    def test_fetch_ls_intraday_quote_uses_today_mid_and_previous_close(
+        self, session_mock
+    ):
+        now = datetime(2026, 11, 3, 10, 15, tzinfo=TIMEZONE)
+
+        def epoch(hour, minute):
+            return int(
+                datetime(
+                    2026,
+                    11,
+                    3,
+                    hour,
+                    minute,
+                    tzinfo=TIMEZONE,
+                ).timestamp()
+                * 1000
+            )
+
+        response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "info": {
+                    "plotlines": [
+                        {"id": "previousDay", "label": "Vortag 100,000", "value": 100}
+                    ]
+                },
+                "series": {
+                    "intraday": {
+                        "data": [
+                            [epoch(7, 29), 99],
+                            [epoch(7, 30), 101],
+                            [epoch(10, 10), 110],
+                            [epoch(10, 30), 111],
+                            [epoch(23, 1), 112],
+                        ]
+                    }
+                },
+            },
+        )
+        session_mock.return_value.get.return_value = response
+
+        quote = fetch_ls_intraday_and_quote(1234, now)
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.currency, "EUR")
+        self.assertEqual(quote.current_price_eur, 110)
+        self.assertEqual(quote.previous_close_eur, 100)
+        self.assertEqual(quote.daily_change_abs_eur, 10)
+        self.assertAlmostEqual(quote.daily_change_pct, 10)
+        self.assertEqual(quote.market_date, date(2026, 11, 3))
+        self.assertEqual(len(quote.intraday_series), 2)
+        self.assertEqual(
+            quote.intraday_series[-1][0],
+            datetime(2026, 11, 3, 10, 10, tzinfo=TIMEZONE),
+        )
+        session_mock.return_value.get.assert_called_once_with(
+            "https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument",
+            params={
+                "instrumentId": 1234,
+                "marketId": 1,
+                "quotetype": "mid",
+                "series": "intraday",
+                "localeId": 2,
+            },
+            timeout=(4, 10),
+        )
+
+    @patch("daily_report.fetch_ls_intraday_and_quote", return_value=None)
+    @patch("daily_report.yf.Ticker")
+    def test_fetch_quote_falls_back_to_yfinance_when_ls_unavailable(
+        self, ticker_mock, ls_quote_mock
+    ):
+        now = datetime.now(TIMEZONE)
+        history = pd.DataFrame(
+            {"Close": [90.0, 100.0]},
+            index=pd.DatetimeIndex(
+                [now - timedelta(days=1), now],
+                name="Datetime",
+            ),
+        )
+        ticker_mock.return_value.get_info.return_value = {
+            "currency": "EUR",
+            "previousClose": 90.0,
+            "pegRatio": 1.2,
+        }
+        ticker_mock.return_value.history.return_value = history
+
+        quote = fetch_quote(Company("Example Co", "EX", ls_id=9876))
+
+        self.assertEqual(quote.current_price_eur, 100)
+        self.assertEqual(quote.previous_close_eur, 90)
+        self.assertEqual(quote.price_ticker, "EX")
+        ls_quote_mock.assert_called_once_with(9876, unittest.mock.ANY)
+
+    def test_fetch_quote_uses_ls_price_with_yfinance_fundamentals(self):
+        now = datetime.now(TIMEZONE)
+        history = pd.DataFrame(
+            {"Close": [100.0]},
+            index=pd.DatetimeIndex([now]),
+        )
+        ls_quote = Quote(
+            current_price_native=110.0,
+            previous_close=100.0,
+            current_price_eur=110.0,
+            previous_close_eur=100.0,
+            daily_change_pct=10.0,
+            market_date=now.date(),
+            market_timezone=TIMEZONE.key,
+            daily_change_abs_eur=10.0,
+            currency="EUR",
+            intraday_series=[(now, 110.0)],
+        )
+
+        def ticker_factory(symbol):
+            if symbol == "EUR.SG":
+                return SimpleNamespace(
+                    get_info=lambda: {"currency": "EUR"},
+                    history=lambda **_kwargs: history,
+                )
+            return SimpleNamespace(
+                get_info=lambda: {
+                    "currency": "USD",
+                    "pegRatio": 1.2,
+                    "trailingPE": 20,
+                    "recommendationKey": "buy",
+                    "numberOfAnalystOpinions": 8,
+                    "targetMeanPrice": 150,
+                    "fiftyTwoWeekHigh": 200,
+                },
+                history=lambda **_kwargs: pd.DataFrame(),
+            )
+
+        with (
+            patch("daily_report.fetch_ls_intraday_and_quote", return_value=ls_quote) as ls_mock,
+            patch("daily_report.yf.Ticker", side_effect=ticker_factory),
+            patch("daily_report.get_fx_rate", return_value=0.9),
+        ):
+            quote = fetch_quote(Company("Example Co", "EUR.SG", "EX", ls_id=1234))
+
+        self.assertEqual(quote.current_price_eur, 110)
+        self.assertEqual(quote.previous_close_eur, 100)
+        self.assertAlmostEqual(quote.daily_change_pct, 10)
+        self.assertEqual(quote.currency, "EUR")
+        self.assertEqual(quote.price_ticker, "EUR.SG")
+        self.assertEqual(quote.peg_ratio, 1.2)
+        self.assertEqual(quote.analyst_consensus, "Compra")
+        self.assertEqual(quote.target_mean_eur, 135)
+        self.assertEqual(quote.extra["analyst_upside_pct"], 22.7)
+        self.assertEqual(quote.intraday_series, [(now, 110)])
+        ls_mock.assert_called_once_with(1234, unittest.mock.ANY)
+
+    def test_fetch_quote_keeps_ls_price_when_yahoo_fundamentals_and_history_fail(self):
+        now = datetime.now(TIMEZONE)
+        ls_quote = Quote(
+            current_price_native=110.0,
+            previous_close=100.0,
+            current_price_eur=110.0,
+            previous_close_eur=100.0,
+            daily_change_pct=10.0,
+            market_date=now.date(),
+            market_timezone=TIMEZONE.key,
+            currency="EUR",
+        )
+
+        def unavailable(*_args, **_kwargs):
+            raise requests.Timeout("Yahoo unavailable")
+
+        with (
+            patch("daily_report.fetch_ls_intraday_and_quote", return_value=ls_quote),
+            patch(
+                "daily_report.yf.Ticker",
+                return_value=SimpleNamespace(
+                    get_info=unavailable,
+                    history=unavailable,
+                ),
+            ),
+        ):
+            quote = fetch_quote(Company("Example Co", "EUR.SG", "EX", ls_id=4321))
+
+        self.assertEqual(quote.current_price_eur, 110)
+        self.assertEqual(quote.previous_close_eur, 100)
+        self.assertIn("Yahoo Finance no devolvió fundamentales", quote.warning)
 
     @patch("daily_report.get_fx_rate", return_value=1.0)
     @patch("daily_report.yf.Ticker")
@@ -1733,6 +1919,7 @@ class SentimentTests(unittest.TestCase):
             for report in COMPANIES
             if report.primary_ticker
         )
+        configured_tickers.update(PORTFOLIO_TICKER_CURRENCIES)
         public_fields = {
             "date",
             "action",
@@ -1749,6 +1936,7 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(len(activities), 61)
         self.assertTrue(all(set(row) == public_fields for row in raw_activities))
+        self.assertTrue(all(item.currency == "EUR" for item in activities))
         self.assertTrue(all(item.ticker in configured_tickers for item in activities))
         self.assertEqual(set(assets_by_ticker), {asset.ticker for asset in PORTFOLIO})
         for configured in PORTFOLIO:
@@ -2194,26 +2382,28 @@ class SentimentTests(unittest.TestCase):
 
     def test_watchlist_matches_updated_company_list(self):
         companies = [(company.name, company.ticker) for company in COMPANIES]
-        self.assertEqual(len(COMPANIES), 56)
+        self.assertEqual(len(COMPANIES), 57)
         self.assertEqual(
             companies[:5],
             [
-                ("SoFi Technologies", "4S0.SG"),
-                ("Neo Performance Materials", "NEO.TO"),
-                ("Tempus AI", "TEM"),
+                ("SoFi Technologies", "6B0.SG"),
+                ("Neo Performance Materials", "N14.SG"),
+                ("Tempus AI", "F3M.SG"),
                 ("Walmart", "WMT.SG"),
-                ("Dollar Tree", "DLTR"),
+                ("Dollar Tree", "DT3.SG"),
             ],
         )
         self.assertIn(("Space Innovators USD (A)", "JEDI.DE"), companies)
         self.assertIn(("Amper", "AMP.MC"), companies)
         self.assertIn(("IREN", "IREN"), companies)
-        self.assertIn(("Applied Optoelectronics", "AAOI"), companies)
+        self.assertIn(("Applied Optoelectronics", "A59.SG"), companies)
         self.assertIn(("Core MSCI World USD (Acc)", "EUNL.DE"), companies)
         self.assertIn(("MercadoLibre", "MLB1.SG"), companies)
-        self.assertIn(("Nike (B)", "NKE.SG"), companies)
-        self.assertIn(("Novo Nordisk (ADR)", "NVO"), companies)
-        self.assertNotIn("SpaceX", {company.name for company in COMPANIES})
+        self.assertIn(("McDonald's", "MDO.SG"), companies)
+        self.assertIn(("Indra Sistemas", "IDA.SG"), companies)
+        self.assertIn(("SpaceX", "SPX.SG"), companies)
+        self.assertNotIn("Nike (B)", {company.name for company in COMPANIES})
+        self.assertNotIn("Novo Nordisk (ADR)", {company.name for company in COMPANIES})
         self.assertEqual(
             next(company.primary_ticker for company in COMPANIES if company.name == "ASML"),
             "ASML",
@@ -2221,6 +2411,29 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(
             next(company.primary_ticker for company in COMPANIES if company.name == "MercadoLibre"),
             "MELI",
+        )
+        self.assertEqual(
+            next(company.primary_ticker for company in COMPANIES if company.name == "SpaceX"),
+            "SPCX",
+        )
+        spacex = next(company for company in COMPANIES if company.name == "SpaceX")
+        self.assertEqual(spacex.isin, "US84615Q1031")
+        self.assertEqual(spacex.ls_id, LS_INSTRUMENTS_BY_TICKER["SPX.SG"][1])
+        self.assertEqual(
+            next(
+                company.ticker
+                for company in COMPANIES
+                if company.name == "MercadoLibre"
+            ),
+            "MLB1.SG",
+        )
+        self.assertEqual(
+            next(
+                asset.ticker
+                for asset in PORTFOLIO
+                if asset.name == "MercadoLibre"
+            ),
+            "MLB1.SG",
         )
         self.assertIn("MLB1.SG", AI_EXCLUDED_PORTFOLIO_TICKERS)
         self.assertIn("MELI", AI_EXCLUDED_PORTFOLIO_TICKERS)
@@ -2231,8 +2444,8 @@ class SentimentTests(unittest.TestCase):
             {
                 "EUNL.DE": "EUR",
                 "ASME.SG": "EUR",
-                "VST": "USD",
-                "GEV": "USD",
+                "0V6.SG": "EUR",
+                "Y5C.SG": "EUR",
                 "XDWT.DE": "EUR",
                 "1YD.SG": "EUR",
                 "NVD.SG": "EUR",
@@ -2241,6 +2454,7 @@ class SentimentTests(unittest.TestCase):
                 "AMZ.SG": "EUR",
             },
         )
+        self.assertTrue(all(asset.currency == "EUR" for asset in PORTFOLIO))
         self.assertEqual(
             set(PORTFOLIO_TICKER_CURRENCIES),
             {
@@ -2252,10 +2466,10 @@ class SentimentTests(unittest.TestCase):
                 "NKE.SG",
                 "NVO",
                 "MLB1.SG",
-                "LYXE.DE",
-                "GEV",
+                "LYOR.DE",
+                "Y5C.SG",
                 "1YD.SG",
-                "VST",
+                "0V6.SG",
                 "XDWT.DE",
             },
         )
@@ -2622,6 +2836,41 @@ class SentimentTests(unittest.TestCase):
             [101, 102],
         )
         self.assertEqual(download_mock.call_count, 2)
+
+    @patch("daily_report.yf.download", return_value=pd.DataFrame())
+    def test_collect_chart_data_prefers_ls_intraday_series(self, _download_mock):
+        now = datetime(2026, 11, 3, 10, 15, tzinfo=TIMEZONE)
+        report = StockReport(
+            Company("SpaceX", "SPX.SG", "SPCX", "US84615Q1031", 4796122),
+            quote=Quote(
+                current_price_native=110,
+                previous_close=100,
+                current_price_eur=110,
+                previous_close_eur=100,
+                daily_change_pct=10,
+                market_date=now.date(),
+                market_timezone=TIMEZONE.key,
+                currency="EUR",
+                price_ticker="SPX.SG",
+                intraday_series=[
+                    (now - timedelta(minutes=5), 105),
+                    (now, 110),
+                ],
+            ),
+        )
+
+        charts = collect_chart_data([report], [])
+
+        self.assertEqual(
+            [point["value"] for point in charts.sparklines["SPX.SG"]],
+            [105, 110],
+        )
+        for actual, expected in zip(
+            [point["value"] for point in charts.watchlist_series],
+            [5, 10],
+            strict=True,
+        ):
+            self.assertAlmostEqual(actual, expected)
 
     @patch("daily_report.yf.download")
     def test_portfolio_intraday_series_is_value_weighted_and_compared_to_benchmarks(

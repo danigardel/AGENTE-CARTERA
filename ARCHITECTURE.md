@@ -35,10 +35,33 @@
 - Los símbolos `.DE`, `.F` y `.SG` se tratan como cotizaciones europeas. Yahoo
   puede retrasar o no ofrecer datos; no se garantiza que replique el precio,
   spread u horario de Trade Republic.
+- Los símbolos europeos de la lista deben corresponder al activo real, no solo
+  parecerse por precio: por ejemplo, `6B0.SG` es SoFi (no `4S0.SG`, que
+  identifica ServiceNow), `55H0.SG` es MP Materials (no `54M.SG`) y
+  `LYOR.DE` es Smart Overnight Return (no `LYXE.DE`). McDonald's e Indra están
+  en seguimiento como `MDO.SG` e `IDA.SG`; Nike y Novo Nordisk ya no se siguen,
+  aunque sus operaciones históricas se conservan. El ISIN de SpaceX
+  `US84615Q1031` se asocia a `SPCX` y su cotización alemana en EUR se configura
+  como `SPX.SG`.
+- La comprobación de Yahoo del 2 de noviembre de 2026 mostró velas `.SG` hasta
+  las 21:55, no hasta las 23:00. Además, los precios y porcentajes pueden
+  diferir de Trade Republic incluso con el mismo activo y la misma divisa;
+  comparar cierres no demuestra paridad de proveedor.
 - Los precios, cierres anteriores y objetivos se normalizan a EUR. Para una
   cotización no EUR, el precio actual usa el FX más reciente y el cierre
   anterior usa el último cierre FX diario previo, de modo que la variación
   diaria en euros incluye el cambio de divisa.
+- Las empresas que tienen un `ls_id` verificado consultan la serie intradía
+  `mid` del endpoint público de Lang & Schwarz. El precio y el cierre previo
+  del proveedor se usan en EUR para la cotización, el cambio diario y los
+  gráficos; solo se aceptan velas de hoy entre 07:30 y 23:00 hora de Madrid y
+  no futuras. Las peticiones se limitan a tres simultáneas y usan timeout
+  `(4, 10)`. Si falta el identificador, la respuesta falla o la vela queda
+  obsoleta durante la sesión, se conserva el fallback existente de Yahoo.
+  `yfinance` sigue proporcionando fundamentales, noticias RSS e históricos
+  diarios/intradía largos para métricas. `scripts/discover_ls_instruments.py`
+  busca identificadores en el endpoint público; la configuración fija solo
+  incluye coincidencias verificadas por ISIN.
 - Distancias a máximos de 52 semanas y medias móviles y potencial de analistas
   se recalculan respecto al precio actual en EUR, convirtiendo a la divisa
   original de cada referencia fundamental cuando sea necesario.
@@ -46,9 +69,11 @@
   `MELI` como ticker matriz. Ambos identificadores permanecen excluidos del
   análisis IA de posiciones, junto con los ETF excluidos configurados en
   `AI_EXCLUDED_PORTFOLIO_TICKERS`.
-- Solo `MLB1.SG` de los símbolos `.SG` adicionales revisados (12D.SG, MWV.SG,
-  1BE.SG, DLT.SG, MLB1.SG y NOVC.SG) devolvió datos intradía válidos en la
-  comprobación de Yahoo realizada el 2 de noviembre de 2026.
+- Solo `MLB1.SG` de los símbolos exactos `.SG` adicionales revisados
+  (`12D.SG`, `MWV.SG`, `1BE.SG`, `DLT.SG`, `MLB1.SG` y `NOVC.SG`) devolvió
+  datos intradía válidos en la comprobación de Yahoo realizada el 2 de
+  noviembre de 2026. Esto no implica que variantes con otro código, como
+  `12DA.SG` o `1ZB.SG`, carezcan de datos.
 
 ## Análisis, alertas y métricas
 
@@ -84,6 +109,10 @@
 - Los datos Yahoo son públicos y pueden estar retrasados, incompletos o diferir
   de la plaza de negociación real. La conversión FX no elimina spreads ni
   diferencias entre proveedores.
+- Lang & Schwarz y Trade Republic pueden mostrar distintos lados del spread o
+  actualizarse en momentos diferentes. La serie de L&S disponible en Yahoo
+  para la comparación puede no contener velas hasta las 23:00; el endpoint
+  público y su disponibilidad también pueden cambiar.
 
 ## Validación reciente
 

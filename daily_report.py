@@ -15,7 +15,7 @@ import time
 import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
@@ -106,6 +106,9 @@ MAX_HEADLINES = 8
 MAX_GEMINI_NEWS_ITEMS = 200
 MAX_MARKET_RADAR_ITEMS = 400
 MAX_WORKERS = 8
+LS_QUOTE_URL = "https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument"
+LS_CONCURRENT_REQUESTS = threading.BoundedSemaphore(3)
+LS_SESSION_LOCAL = threading.local()
 _alert_drop_value = os.getenv("ALERT_DROP_PCT") or "2"
 try:
     ALERT_DROP_PCT = float(_alert_drop_value)
@@ -224,6 +227,8 @@ class Company:
     name: str
     ticker: str | None
     primary_ticker: str | None = None
+    isin: str | None = None
+    ls_id: int | None = None
 
 
 @dataclass
@@ -247,6 +252,7 @@ class Quote:
     currency: str | None = None
     price_ticker: str | None = None
     fx_rate: float | None = None
+    intraday_series: list[tuple[datetime, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -414,8 +420,8 @@ class DashboardCharts:
 PORTFOLIO = (
     PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 2.944716, 373.52, "EUR"),
     PortfolioAsset("ASML", "ASME.SG", 0.049265, 65.45, "EUR"),
-    PortfolioAsset("Vistra", "VST", 0.407497, 50.00, "USD"),
-    PortfolioAsset("GE Vernova", "GEV", 0.038649, 30.00, "USD"),
+    PortfolioAsset("Vistra", "0V6.SG", 0.407497, 50.00, "EUR"),
+    PortfolioAsset("GE Vernova", "Y5C.SG", 0.038649, 30.00, "EUR"),
     PortfolioAsset("MSCI World Information Tech.", "XDWT.DE", 0.218023, 30.00, "EUR"),
     PortfolioAsset("Broadcom", "1YD.SG", 0.084104, 25.00, "EUR"),
     PortfolioAsset("NVIDIA", "NVD.SG", 0.259347, 47.00, "EUR"),
@@ -431,12 +437,12 @@ PORTFOLIO_TICKER_CURRENCIES = {
     "EUNL.DE": "EUR",
     "ASME.SG": "EUR",
     "NKE.SG": "EUR",
-    "NVO": "USD",
+    "NVO": "EUR",
     "MLB1.SG": "EUR",
-    "LYXE.DE": "EUR",
-    "GEV": "USD",
+    "LYOR.DE": "EUR",
+    "Y5C.SG": "EUR",
     "1YD.SG": "EUR",
-    "VST": "USD",
+    "0V6.SG": "EUR",
     "XDWT.DE": "EUR",
 }
 PORTFOLIO_ACTIVITY_ACTIONS = {
@@ -449,38 +455,40 @@ PORTFOLIO_ACTIVITY_ACTIONS = {
 
 # LISTA DE SEGUIMIENTO
 COMPANIES = (
-    Company("SoFi Technologies", "4S0.SG", "SOFI"),
-    Company("Neo Performance Materials", "NEO.TO"),
-    Company("Tempus AI", "TEM"),
+    Company("SoFi Technologies", "6B0.SG", "SOFI"),
+    Company("Neo Performance Materials", "N14.SG", "NEO.TO"),
+    Company("Tempus AI", "F3M.SG", "TEM"),
     Company("Walmart", "WMT.SG", "WMT"),
-    Company("Dollar Tree", "DLTR"),
+    Company("Dollar Tree", "DT3.SG", "DLTR"),
     Company("Moderna", "0QF.SG", "MRNA"),
-    Company("MP Materials", "54M.SG", "MP"),
+    Company("MP Materials", "55H0.SG", "MP"),
+    Company("SpaceX", "SPX.SG", "SPCX"),
     Company("Netflix", "NFC.SG", "NFLX"),
     Company("Oracle", "ORC.SG", "ORCL"),
     Company("Uber", "UT8.SG", "UBER"),
     Company("Amper", "AMP.MC"),
     Company("Micron Technology", "MTE.SG", "MU"),
-    Company("Vistra", "VST"),
+    Company("Vistra", "0V6.SG", "VST"),
     Company("Walt Disney", "WDP.SG", "DIS"),
     Company("Quantum Computing USD", "QUTM.DE"),
     Company("S&P 500 Equal Weight US", "XDEW.DE"),
-    Company("Rocket Lab", "RKLB"),
+    Company("Rocket Lab", "6RJ0.SG", "RKLB"),
     Company("MercadoLibre", "MLB1.SG", "MELI"),
     Company("Microsoft", "MSF.SG", "MSFT"),
     Company("Goldman Sachs", "GOS.SG", "GS"),
     Company("Nebius Group (A)", "YDX.SG", "NBIS"),
     Company("Space Innovators USD (A)", "JEDI.DE"),
-    Company("Smart Overnight Return ETF", "LYXE.DE"),
+    Company("Smart Overnight Return ETF", "LYOR.DE"),
     Company("Core MSCI World USD (Acc)", "EUNL.DE"),
     Company("Alphabet (A)", "ABEA.SG", "GOOGL"),
     Company("FTSE All-World USD (Acc)", "VWCE.DE"),
     Company("IREN", "IREN"),
     Company("Amazon.com", "AMZ.SG", "AMZN"),
+    Company("McDonald's", "MDO.SG", "MCD"),
     Company("S&P 500 EUR (Acc)", "SXR8.DE"),
     Company("ASML", "ASME.SG", "ASML"),
     Company("Palantir Technologies", "PTX.F", "PLTR"),
-    Company("Bloom Energy", "BE"),
+    Company("Bloom Energy", "1ZB.SG", "BE"),
     Company("EQQQ Nasdaq 100 USD (Acc)", "EQQB.DE"),
     Company("MSCI Emerging Markets (Acc)", "IS3N.DE"),
     Company("NASDAQ 100 USD (Acc)", "SXRV.DE"),
@@ -489,7 +497,7 @@ COMPANIES = (
     Company("Meta Platforms (A)", "FB2A.SG", "META"),
     Company("Semiconductor USD (Acc)", "VVSM.DE"),
     Company("Broadcom", "1YD.SG", "AVGO"),
-    Company("GE Vernova", "GEV"),
+    Company("GE Vernova", "Y5C.SG", "GEV"),
     Company("Marvell Technology", "MRVL"),
     Company("Tesla", "TL0.SG", "TSLA"),
     Company("TSMC (ADR)", "TSFA.SG", "TSM"),
@@ -499,13 +507,83 @@ COMPANIES = (
     Company("Super Micro Computer", "MS51.SG", "SMCI"),
     Company("Lumentum Holdings", "2LU.SG", "LITE"),
     Company("Intel", "INL.SG", "INTC"),
-    Company("Applied Optoelectronics", "AAOI"),
+    Company("Applied Optoelectronics", "A59.SG", "AAOI"),
     Company("Modine Manufacturing", "MDF.SG", "MOD"),
     Company("Vertiv", "VRT"),
-    Company("Dell Technologies", "DELL"),
-    Company("Nike (B)", "NKE.SG", "NKE"),
-    Company("Novo Nordisk (ADR)", "NVO"),
+    Company("Dell Technologies", "12DA.SG", "DELL"),
+    Company("Indra Sistemas", "IDA.SG", "IDR.MC"),
 )
+
+LS_INSTRUMENTS_BY_TICKER: dict[str, tuple[str, int]] = {
+    "6B0.SG": ("US83406F1021", 1579533),
+    "N14.SG": ("CA64046G1063", 1927838),
+    "F3M.SG": ("US88023B1035", 3331370),
+    "WMT.SG": ("US9311421039", 52763),
+    "DT3.SG": ("US2567461080", 60227),
+    "0QF.SG": ("US60770K1079", 791776),
+    "55H0.SG": ("US5533681012", 3180975),
+    "SPX.SG": ("US84615Q1031", 4796122),
+    "NFC.SG": ("US64110L1061", 41939),
+    "ORC.SG": ("US68389X1054", 41996),
+    "UT8.SG": ("US90353T1007", 858912),
+    "AMP.MC": ("ES0109260291", 4945078),
+    "MTE.SG": ("US5951121038", 52571),
+    "0V6.SG": ("US92840M1027", 753558),
+    "WDP.SG": ("US2546871060", 43844),
+    "QUTM.DE": ("IE0007Y8Y157", 3790645),
+    "XDEW.DE": ("IE00BLNMYC90", 96819),
+    "6RJ0.SG": ("US7731211089", 3793845),
+    "MLB1.SG": ("US58733R1023", 176679),
+    "MSF.SG": ("US5949181045", 42026),
+    "GOS.SG": ("US38141G1040", 44933),
+    "YDX.SG": ("NL0009805522", 55010),
+    "JEDI.DE": ("IE000YU9K6K2", 1881278),
+    "LYOR.DE": ("LU1190417599", 888141),
+    "EUNL.DE": ("IE00B4L5Y983", 44039),
+    "ABEA.SG": ("US02079K3059", 162465),
+    "VWCE.DE": ("IE00BK5BQT80", 1045625),
+    "IREN": ("AU0000185993", 3234424),
+    "AMZ.SG": ("US0231351067", 41786),
+    "MDO.SG": ("US5801351017", 42410),
+    "SXR8.DE": ("IE00B5BMR087", 42965),
+    "ASME.SG": ("NL0010273215", 45299),
+    "PTX.F": ("US69608A1088", 1241119),
+    "1ZB.SG": ("US0937121079", 883059),
+    "EQQB.DE": ("IE00BFZXGZ54", 1922444),
+    "IS3N.DE": ("IE00BKM4GZ66", 49598),
+    "SXRV.DE": ("IE00B53SZB19", 48380),
+    "APC.SG": ("US0378331005", 41780),
+    "XDWT.DE": ("IE00BM67HT60", 317161),
+    "FB2A.SG": ("US30303M1027", 41765),
+    "VVSM.DE": ("IE000I8KRLL9", 1508048),
+    "1YD.SG": ("US11135F1012", 604621),
+    "Y5C.SG": ("US36828A1016", 3178710),
+    "MRVL": ("US5738741041", 1449099),
+    "TL0.SG": ("US88160R1014", 41933),
+    "TSFA.SG": ("US8740391003", 308950),
+    "AMD.SG": ("US0079031078", 41789),
+    "CAT1.SG": ("US1491231015", 49055),
+    "NVD.SG": ("US67066G1040", 43763),
+    "MS51.SG": ("US86800U3023", 3378406),
+    "2LU.SG": ("US55024U1097", 116004),
+    "INL.SG": ("US4581401001", 42023),
+    "A59.SG": ("US03823U1025", 363420),
+    "MDF.SG": ("US6078281002", 752889),
+    "VRT": ("US92537N1081", 1702559),
+    "12DA.SG": ("US24703L2025", 791773),
+    "IDA.SG": ("ES0118594417", 93150),
+}
+
+
+def _with_ls_instrument(company: Company) -> Company:
+    instrument = LS_INSTRUMENTS_BY_TICKER.get(company.ticker or "")
+    if instrument is None:
+        return company
+    isin, ls_id = instrument
+    return replace(company, isin=isin, ls_id=ls_id)
+
+
+COMPANIES = tuple(_with_ls_instrument(company) for company in COMPANIES)
 
 PRIMARY_TICKER_MAP = {
     company.ticker: company.primary_ticker
@@ -835,6 +913,173 @@ def collect_market_radar(
     return unique_items
 
 
+def _ls_session() -> requests.Session:
+    session = getattr(LS_SESSION_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://www.ls-tc.de/",
+            }
+        )
+        LS_SESSION_LOCAL.session = session
+    return session
+
+
+def fetch_ls_intraday_and_quote(
+    ls_id: int,
+    now: datetime,
+) -> Quote | None:
+    if isinstance(ls_id, bool) or not isinstance(ls_id, int) or ls_id <= 0:
+        raise ValueError("ls_id debe ser un entero positivo.")
+    if now.tzinfo is None or now.utcoffset() is None:
+        now = now.replace(tzinfo=TIMEZONE)
+    local_now = now.astimezone(TIMEZONE)
+    params = {
+        "instrumentId": ls_id,
+        "marketId": 1,
+        "quotetype": "mid",
+        "series": "intraday",
+        "localeId": 2,
+    }
+    try:
+        with LS_CONCURRENT_REQUESTS:
+            response = _ls_session().get(
+                LS_QUOTE_URL,
+                params=params,
+                timeout=(4, 10),
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as error:
+        logging.warning(
+            "No se pudo obtener la cotización intradía de L&S %s: %s: %s",
+            ls_id,
+            type(error).__name__,
+            error,
+        )
+        return None
+
+    try:
+        info = payload["info"]
+        points = payload["series"]["intraday"]["data"]
+        if not isinstance(info, dict) or not isinstance(points, list):
+            raise TypeError("formato de cotización inesperado")
+        plotlines = info.get("plotlines")
+        if not isinstance(plotlines, list):
+            raise TypeError("faltan líneas de referencia")
+        previous_close = next(
+            (
+                _finite_float(line.get("value"))
+                for line in plotlines
+                if isinstance(line, dict)
+                and (
+                    line.get("id") == "previousDay"
+                    or "vortag" in str(line.get("label", "")).casefold()
+                )
+                and _finite_float(line.get("value")) is not None
+            ),
+            None,
+        )
+    except (KeyError, TypeError) as error:
+        logging.warning(
+            "L&S devolvió datos incompletos para el instrumento %s: %s",
+            ls_id,
+            error,
+        )
+        return None
+
+    if previous_close is None or previous_close <= 0:
+        logging.warning(
+            "L&S no devolvió un cierre previo válido para el instrumento %s",
+            ls_id,
+        )
+        return None
+
+    valid_points: list[tuple[datetime, float]] = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        timestamp_ms = _finite_float(point[0])
+        price = _finite_float(point[1])
+        if timestamp_ms is None or price is None or price <= 0:
+            continue
+        try:
+            timestamp = datetime.fromtimestamp(
+                timestamp_ms / 1000,
+                tz=timezone.utc,
+            ).astimezone(TIMEZONE)
+        except (OverflowError, OSError, ValueError):
+            continue
+        if (
+            timestamp > local_now
+            or timestamp.time() < datetime_time(7, 30)
+            or timestamp.time() > datetime_time(23, 0)
+        ):
+            continue
+        valid_points.append((timestamp, price))
+
+    if not valid_points:
+        logging.warning(
+            "L&S no devolvió velas intradía válidas para el instrumento %s",
+            ls_id,
+        )
+        return None
+
+    valid_points.sort(key=lambda item: item[0])
+    in_session = (
+        local_now.weekday() < 5
+        and datetime_time(7, 30) <= local_now.time() <= datetime_time(23, 0)
+    )
+    if in_session:
+        todays_points = [
+            item for item in valid_points if item[0].date() == local_now.date()
+        ]
+        if not todays_points:
+            logging.warning(
+                "L&S no tiene una cotización de hoy para el instrumento %s",
+                ls_id,
+            )
+            return None
+        valid_points = todays_points
+        age = local_now - valid_points[-1][0]
+        if age > timedelta(minutes=30):
+            logging.warning(
+                "La última cotización de L&S para el instrumento %s tiene %s minutos",
+                ls_id,
+                int(age.total_seconds() // 60),
+            )
+            return None
+    else:
+        last_session_date = valid_points[-1][0].date()
+        valid_points = [
+            item for item in valid_points if item[0].date() == last_session_date
+        ]
+
+    price = valid_points[-1][1]
+    change_abs = price - previous_close
+    change_pct = change_abs / previous_close * 100
+    return Quote(
+        current_price_native=price,
+        previous_close=previous_close,
+        current_price_eur=price,
+        previous_close_eur=previous_close,
+        daily_change_pct=change_pct,
+        market_date=valid_points[-1][0].date(),
+        market_timezone=TIMEZONE.key,
+        daily_change_abs_eur=change_abs,
+        currency="EUR",
+        fx_rate=1.0,
+        intraday_series=valid_points,
+    )
+
+
 def fetch_quote(company: Company) -> Quote:
     if company.ticker is None:
         return Quote(warning="Sin ticker público configurado")
@@ -844,6 +1089,11 @@ def fetch_quote(company: Company) -> Quote:
         or company.ticker
     )
     now = datetime.now(TIMEZONE)
+    ls_quote = (
+        fetch_ls_intraday_and_quote(company.ls_id, now)
+        if company.ls_id is not None
+        else None
+    )
     candidates = list(dict.fromkeys((company.ticker, primary_ticker)))
     candidate_data: dict[str, tuple[dict[str, Any], Any]] = {}
     candidate_quotes: dict[
@@ -1004,7 +1254,7 @@ def fetch_quote(company: Company) -> Quote:
             ),
             None,
         )
-        if selected_ticker is None:
+        if selected_ticker is None and ls_quote is None:
             message = (
                 f"Yahoo Finance no devolvió cotización ni fundamentales para "
                 f"{company.ticker} ni para {primary_ticker}"
@@ -1013,6 +1263,8 @@ def fetch_quote(company: Company) -> Quote:
                 message = f"{message}. {'; '.join(quote_errors)}"
             logging.warning("%s (%s)", company.name, message)
             return Quote(warning=message, price_ticker=company.ticker)
+        if selected_ticker is None:
+            selected_ticker = company.ticker
         selected_info, selected_history = candidate_data[selected_ticker]
         price_native = _finite_float(
             selected_info.get("currentPrice")
@@ -1054,8 +1306,17 @@ def fetch_quote(company: Company) -> Quote:
             candidate_data[primary_ticker] = ({}, None)
 
     price_native, previous_close, market_date, market_timezone = quote_values
+    if ls_quote is not None:
+        price_native = ls_quote.current_price_eur
+        previous_close = ls_quote.previous_close_eur
+        market_date = ls_quote.market_date
+        market_timezone = ls_quote.market_timezone
+        selected_ticker = company.ticker
+        selected_info = candidate_data.get(company.ticker, ({}, None))[0]
     source_currency = (
-        selected_info.get("currency")
+        "EUR"
+        if ls_quote is not None
+        else selected_info.get("currency")
         or _ticker_currency_from_symbol(selected_ticker)
     )
     currency = str(source_currency).upper()
@@ -1229,6 +1490,34 @@ def fetch_quote(company: Company) -> Quote:
             (live_price_in_reference_currency / reference - 1) * 100,
             1,
         )
+    quote_warning = fx_warning
+    has_fundamentals = any(
+        value is not None
+        for value in (
+            peg_ratio_value,
+            pe_ratio_value,
+            recommendation,
+            analyst_count,
+            target_mean,
+            fundamental_info.get("sector"),
+        )
+    )
+    if ls_quote is not None and not has_fundamentals:
+        quote_warning = (
+            quote_warning
+            or "Cotización de L&S disponible; Yahoo Finance no devolvió fundamentales."
+        )
+    elif not (
+        recommendation
+        or daily_change_pct is not None
+        or current_price_eur is not None
+        or peg_ratio_value is not None
+        or pe_ratio_value is not None
+    ):
+        quote_warning = (
+            quote_warning
+            or "Yahoo Finance no devolvió cotización, consenso, PEG ni PER"
+        )
     return Quote(
         current_price_native=price_native,
         previous_close=previous_close,
@@ -1252,20 +1541,8 @@ def fetch_quote(company: Company) -> Quote:
         currency=currency,
         price_ticker=selected_ticker,
         fx_rate=fx_rate,
-        warning=(
-            fx_warning
-            if (
-                recommendation
-                or daily_change_pct is not None
-                or current_price_eur is not None
-                or peg_ratio_value is not None
-                or pe_ratio_value is not None
-            )
-            else (
-                fx_warning
-                or "Yahoo Finance no devolvió cotización, consenso, PEG ni PER"
-            )
-        ),
+        intraday_series=ls_quote.intraday_series if ls_quote is not None else [],
+        warning=quote_warning,
     )
 
 
@@ -2987,7 +3264,7 @@ THEMES: dict[str, str] = {
     "JEDI.DE": "ETF temático",
     "VVSM.DE": "Semiconductores",
     "IS3N.DE": "ETF emergentes",
-    "LYXE.DE": "Liquidez",
+    "LYOR.DE": "Liquidez",
     "NVD.SG": "Semiconductores",
     "1YD.SG": "Semiconductores",
     "AMD.SG": "Semiconductores",
@@ -2996,15 +3273,15 @@ THEMES: dict[str, str] = {
     "TSFA.SG": "Semiconductores",
     "INL.SG": "Semiconductores",
     "ASME.SG": "Semiconductores",
-    "DELL": "Infraestructura IA",
+    "12DA.SG": "Infraestructura IA",
     "MS51.SG": "Infraestructura IA",
     "YDX.SG": "Infraestructura IA",
     "2LU.SG": "Infraestructura IA",
     "VRT": "Infraestructura IA",
     "MDF.SG": "Infraestructura IA",
-    "VST": "Energía para IA",
-    "GEV": "Energía para IA",
-    "BE": "Energía para IA",
+    "0V6.SG": "Energía para IA",
+    "Y5C.SG": "Energía para IA",
+    "1ZB.SG": "Energía para IA",
     "MSF.SG": "Big Tech y software",
     "ABEA.SG": "Big Tech y software",
     "FB2A.SG": "Big Tech y software",
@@ -3016,22 +3293,23 @@ THEMES: dict[str, str] = {
     "WDP.SG": "Consumo y medios",
     "UT8.SG": "Consumo y medios",
     "MLB1.SG": "Consumo y fintech LatAm",
-    "4S0.SG": "Financieras",
+    "6B0.SG": "Financieras",
     "GOS.SG": "Financieras",
     "CAT1.SG": "Industriales",
-    "54M.SG": "Materiales críticos",
-    "NEO.TO": "Materiales críticos",
+    "55H0.SG": "Materiales críticos",
+    "N14.SG": "Materiales críticos",
     "0QF.SG": "Salud",
-    "TEM": "Salud",
-    "RKLB": "Espacio",
-    "NKE.SG": "Consumo y medios",
-    "NVO": "Salud",
+    "F3M.SG": "Salud",
+    "6RJ0.SG": "Espacio",
+    "SPX.SG": "Espacio",
     "WMT.SG": "Consumo defensivo",
-    "DLTR": "Consumo defensivo",
+    "DT3.SG": "Consumo defensivo",
     "IREN": "Minería de Bitcoin",
     "AMP.MC": "Industriales",
+    "IDA.SG": "Industriales",
+    "MDO.SG": "Consumo y medios",
     "TL0.SG": "Automoción",
-    "AAOI": "Infraestructura IA",
+    "A59.SG": "Infraestructura IA",
 }
 TECH_IA_THEMES = {
     "Semiconductores",
@@ -5579,6 +5857,25 @@ def collect_chart_data(
                 "No se pudieron obtener los datos intradía para los gráficos: %s: %s",
                 type(error).__name__,
                 error,
+            )
+        for ticker, report in report_by_ticker.items():
+            points = report.quote.intraday_series
+            if points:
+                closes_by_ticker[ticker] = pd.Series(
+                    [price for _, price in points],
+                    index=pd.DatetimeIndex([timestamp for timestamp, _ in points]),
+                    name="Close",
+                )
+        for ticker, position in portfolio_by_ticker.items():
+            report = report_for_position(position)
+            if report is None or not report.quote.intraday_series:
+                continue
+            closes_by_ticker[ticker] = pd.Series(
+                [price for _, price in report.quote.intraday_series],
+                index=pd.DatetimeIndex(
+                    [timestamp for timestamp, _ in report.quote.intraday_series]
+                ),
+                name="Close",
             )
 
     historical_closes: dict[str, list[tuple[date, float]]] = {}
