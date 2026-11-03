@@ -107,6 +107,7 @@ MAX_GEMINI_NEWS_ITEMS = 200
 MAX_MARKET_RADAR_ITEMS = 400
 MAX_WORKERS = 8
 LS_QUOTE_URL = "https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument"
+LS_TIMEZONE = ZoneInfo("Europe/Berlin")
 LS_CONCURRENT_REQUESTS = threading.BoundedSemaphore(3)
 LS_SESSION_LOCAL = threading.local()
 _alert_drop_value = os.getenv("ALERT_DROP_PCT") or "2"
@@ -1011,14 +1012,15 @@ def fetch_ls_intraday_and_quote(
         if timestamp_ms is None or price is None or price <= 0:
             continue
         try:
-            timestamp = datetime.fromtimestamp(
-                timestamp_ms / 1000,
-                tz=timezone.utc,
-            ).astimezone(TIMEZONE)
+            timestamp = (
+                datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+                .replace(tzinfo=LS_TIMEZONE)
+                .astimezone(TIMEZONE)
+            )
         except (OverflowError, OSError, ValueError):
             continue
         if (
-            timestamp > local_now
+            timestamp > local_now + timedelta(minutes=2)
             or timestamp.time() < datetime_time(7, 30)
             or timestamp.time() > datetime_time(23, 0)
         ):

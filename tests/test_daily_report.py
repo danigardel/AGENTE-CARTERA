@@ -200,7 +200,7 @@ class SentimentTests(unittest.TestCase):
                     3,
                     hour,
                     minute,
-                    tzinfo=TIMEZONE,
+                    tzinfo=timezone.utc,
                 ).timestamp()
                 * 1000
             )
@@ -252,6 +252,61 @@ class SentimentTests(unittest.TestCase):
                 "localeId": 2,
             },
             timeout=(4, 10),
+        )
+
+    @patch("daily_report._ls_session")
+    def test_fetch_ls_intraday_quote_uses_berlin_wall_time_and_clock_tolerance(
+        self, session_mock
+    ):
+        now = datetime(2026, 11, 3, 10, 15, tzinfo=TIMEZONE)
+
+        def wall_clock_epoch(hour, minute):
+            return int(
+                datetime(
+                    2026,
+                    11,
+                    3,
+                    hour,
+                    minute,
+                    tzinfo=timezone.utc,
+                ).timestamp()
+                * 1000
+            )
+
+        response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "info": {
+                    "plotlines": [
+                        {"id": "previousDay", "label": "Vortag 100,000", "value": 100}
+                    ]
+                },
+                "series": {
+                    "intraday": {
+                        "data": [
+                            [wall_clock_epoch(7, 30), 101],
+                            [wall_clock_epoch(9, 50), 110],
+                            [wall_clock_epoch(10, 14), 111],
+                            [wall_clock_epoch(10, 17), 112],
+                            [wall_clock_epoch(10, 18), 113],
+                        ]
+                    }
+                },
+            },
+        )
+        session_mock.return_value.get.return_value = response
+
+        quote = fetch_ls_intraday_and_quote(4796122, now)
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.current_price_eur, 112)
+        self.assertEqual(
+            quote.intraday_series[-1][0],
+            datetime(2026, 11, 3, 10, 17, tzinfo=TIMEZONE),
+        )
+        self.assertEqual(
+            [timestamp.hour for timestamp, _price in quote.intraday_series],
+            [7, 9, 10, 10],
         )
 
     @patch("daily_report.fetch_ls_intraday_and_quote", return_value=None)
