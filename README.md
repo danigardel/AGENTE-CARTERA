@@ -122,15 +122,14 @@ La lista de seguimiento está en `COMPANIES` y la cartera fija en `PORTFOLIO`, a
 
 ## Automatización y GitHub Pages
 
-El workflow `.github/workflows/daily_report.yml` instala Python, ejecuta la suite de pruebas y genera `public\index.html` con el dashboard original y `public\market_data.json` con los datos estructurados. Despliega esa carpeta a GitHub Pages cada **5 minutos** (el intervalo mínimo de GitHub Actions para `schedule`). GitHub puede retrasar o descartar ejecuciones programadas cuando hay carga, así que no se garantiza una actualización exacta cada 5 minutos. Si una ejecución sigue en curso, no se cancela para iniciar otra; se procesa la más reciente cuando queda disponible. El cron se ejecuta en UTC, pero la hora que aparece en el informe usa `Europe/Madrid`. También se puede iniciar manualmente con `workflow_dispatch`. Cada tarjeta muestra el último precio que Yahoo Finance devuelve durante esa generación, convertido a euros cuando hay tipo de cambio disponible; el proveedor puede retrasar los datos o no cambiar el precio cuando el mercado está cerrado. Las ejecuciones programadas deben estar habilitadas y el workflow debe estar en la rama predeterminada del repositorio.
+El workflow `.github/workflows/daily_report.yml` instala Python, ejecuta la suite de pruebas y genera `public\index.html` con el dashboard original y `public\market_data.json` con los datos estructurados. No tiene activo un cron de GitHub Actions: la automatización externa inicia `portfolio_agent.yml` mediante `workflow_dispatch` cada 30 minutos y, cuando termina correctamente, `daily_report.yml` se inicia por `workflow_run`. El informe también se puede iniciar manualmente con `workflow_dispatch`. Por tanto, la frecuencia automática depende del CronJob externo; si el agente falla, no se dispara la generación posterior del dashboard.
+
+El workflow publica `public/` en la rama `gh-pages` usando un commit huérfano para mantener pequeño el historial de publicación. Para la primera publicación, espera a que el workflow cree esa rama y configura una vez **Settings → Pages → Build and deployment → Source: Deploy from a branch**, seleccionando `gh-pages` y `/(root)`. Después, cada ejecución correcta publica el contenido actualizado en esa rama. La concurrencia evita despliegues simultáneos y no cancela una ejecución que ya está en curso. La hora del informe usa `Europe/Madrid`. Cada tarjeta muestra el último precio que los proveedores devuelven durante esa generación; puede haber retrasos o no cambiar cuando el mercado está cerrado.
 
 Al finalizar correctamente `portfolio_agent.yml`, `daily_report.yml` vuelve a
-generar y publicar el dashboard. Así, si el agente tarda más que el intervalo
-entre builds, una publicación iniciada mientras todavía se calcula el análisis
-puede mostrar temporalmente el último resultado guardado, pero se programa otra
-después de que el agente persiste el nuevo análisis en `data`. Los fallos del
-agente no disparan esta publicación adicional; se conserva el último análisis
-válido y siguen funcionando las publicaciones periódicas.
+generar y publicar el dashboard después de que el agente persiste el nuevo
+análisis en `data`. Los fallos del agente no disparan esta publicación; se
+conserva el último análisis válido hasta la siguiente ejecución correcta.
 
 El archivo `market_data.json` publicado es accesible públicamente, como el resto
 del sitio. Incluye las posiciones y el historial de inversión que ya se

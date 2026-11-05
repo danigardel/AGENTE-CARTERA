@@ -23,7 +23,10 @@
   secretos/variables locales; no se guardan en los datos públicos.
 - Los workflows de GitHub Actions publican el dashboard en Pages y ejecutan el
   agente por separado. La ejecución del agente puede tardar; al persistir un
-  análisis nuevo se programa una generación posterior del dashboard.
+  análisis nuevo se programa una generación posterior del dashboard. El
+  CronJob externo lanza el workflow del agente mediante `workflow_dispatch`;
+  el workflow del dashboard se activa al completarse correctamente el agente
+  y publica el sitio estático en la rama `gh-pages`.
 
 ## Datos de mercado y símbolos
 
