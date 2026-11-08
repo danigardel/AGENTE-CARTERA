@@ -137,6 +137,7 @@ class AutonomousAgentTests(unittest.TestCase):
     @patch.dict(
         "os.environ",
         {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"},
+        clear=True,
     )
     def test_price_alerts_are_grouped_into_one_telegram_message(self, post_mock):
         post_mock.return_value.raise_for_status.return_value = None
@@ -182,6 +183,100 @@ class AutonomousAgentTests(unittest.TestCase):
         self.assertIn("Delta (DDD): +2.50% | 10.00 €", text)
         self.assertEqual(text.count("\n- "), 4)
 
+    @patch("agent.requests.post")
+    @patch.dict(
+        "os.environ",
+        {
+            "TELEGRAM_BOT_TOKEN": "analysis-token",
+            "TELEGRAM_CHAT_ID": "analysis-chat",
+            "TELEGRAM_ALERTS_BOT_TOKEN": "alerts-token",
+            "TELEGRAM_ALERTS_CHAT_ID": "alerts-chat",
+        },
+        clear=True,
+    )
+    def test_price_alerts_use_dedicated_bot_when_configured(self, post_mock):
+        post_mock.return_value.raise_for_status.return_value = None
+
+        self.assertTrue(
+            send_price_alerts(
+                [
+                    {
+                        "ticker": "AAA",
+                        "name": "Alpha",
+                        "daily_change_pct": -3.0,
+                        "current_price_eur": 12.34,
+                        "category": "portfolio_drop",
+                    }
+                ]
+            )
+        )
+
+        post_mock.assert_called_once()
+        self.assertIn(
+            "/botalerts-token/sendMessage",
+            post_mock.call_args.args[0],
+        )
+        self.assertEqual(post_mock.call_args.kwargs["json"]["chat_id"], "alerts-chat")
+
+    @patch("agent.requests.post")
+    @patch.dict(
+        "os.environ",
+        {
+            "TELEGRAM_BOT_TOKEN": "analysis-token",
+            "TELEGRAM_CHAT_ID": "analysis-chat",
+        },
+        clear=True,
+    )
+    def test_price_alerts_fall_back_to_analysis_bot_without_alert_bot(
+        self, post_mock
+    ):
+        post_mock.return_value.raise_for_status.return_value = None
+
+        self.assertTrue(send_price_alerts([self._sample_price_alert()]))
+
+        post_mock.assert_called_once()
+        self.assertIn("/botanalysis-token/sendMessage", post_mock.call_args.args[0])
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["chat_id"],
+            "analysis-chat",
+        )
+
+    @patch("agent.requests.post")
+    @patch.dict(
+        "os.environ",
+        {
+            "TELEGRAM_BOT_TOKEN": "analysis-token",
+            "TELEGRAM_CHAT_ID": "analysis-chat",
+            "TELEGRAM_ALERTS_BOT_TOKEN": "alerts-token",
+        },
+        clear=True,
+    )
+    def test_price_alerts_fall_back_to_complete_analysis_pair_if_alert_pair_partial(
+        self, post_mock
+    ):
+        post_mock.return_value.raise_for_status.return_value = None
+
+        with self.assertLogs(level="WARNING") as captured:
+            self.assertTrue(send_price_alerts([self._sample_price_alert()]))
+
+        post_mock.assert_called_once()
+        self.assertIn("/botanalysis-token/sendMessage", post_mock.call_args.args[0])
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["chat_id"],
+            "analysis-chat",
+        )
+        self.assertIn("configuración del bot de alertas", captured.output[0])
+
+    @staticmethod
+    def _sample_price_alert():
+        return {
+            "ticker": "AAA",
+            "name": "Alpha",
+            "daily_change_pct": -3.0,
+            "current_price_eur": 12.34,
+            "category": "portfolio_drop",
+        }
+
     def test_dip_alert_is_deduplicated_until_score_increases(self):
         report = self._report("DIP", self.now.date(), -1.0)
         report.quote.peg_ratio = 1.2
@@ -221,6 +316,7 @@ class AutonomousAgentTests(unittest.TestCase):
     @patch.dict(
         "os.environ",
         {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"},
+        clear=True,
     )
     def test_dip_candidate_telegram_message_includes_score_and_factors(
         self,

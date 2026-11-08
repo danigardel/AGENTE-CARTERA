@@ -58,6 +58,8 @@ jobs:
           ALERT_DROP_PCT: ${{ vars.ALERT_DROP_PCT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_ALERTS_BOT_TOKEN }}
+          TELEGRAM_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_ALERTS_CHAT_ID }}
           INVESTOR_PROFILE: ${{ vars.INVESTOR_PROFILE }}
           AI_PROVIDER_STATE_PATH: ai_provider_state.json
           AGENT_STATE_PATH: agent_state.json

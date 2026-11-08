@@ -304,12 +304,23 @@ def find_price_alerts(
 def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
     if not alerts:
         return False
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    alerts_bot_token = os.environ.get("TELEGRAM_ALERTS_BOT_TOKEN")
+    alerts_chat_id = os.environ.get("TELEGRAM_ALERTS_CHAT_ID")
+    if alerts_bot_token and alerts_chat_id:
+        bot_token = alerts_bot_token
+        chat_id = alerts_chat_id
+    else:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if alerts_bot_token or alerts_chat_id:
+            logging.warning(
+                "La configuración del bot de alertas de precios está incompleta; "
+                "se usará el bot principal de Telegram."
+            )
     if not bot_token or not chat_id:
         logging.warning(
-            "No se enviaron avisos de precio: faltan TELEGRAM_BOT_TOKEN o "
-            "TELEGRAM_CHAT_ID."
+            "No se enviaron avisos de precio: configura un par completo de "
+            "credenciales del bot de alertas o del bot principal."
         )
         return False
 

@@ -5234,7 +5234,13 @@ class SentimentTests(unittest.TestCase):
     @patch("daily_report.requests.post")
     @patch.dict(
         "os.environ",
-        {"TELEGRAM_BOT_TOKEN": "test-bot-token", "TELEGRAM_CHAT_ID": "12345"},
+        {
+            "TELEGRAM_BOT_TOKEN": "test-bot-token",
+            "TELEGRAM_CHAT_ID": "12345",
+            "TELEGRAM_ALERTS_BOT_TOKEN": "alerts-bot-token",
+            "TELEGRAM_ALERTS_CHAT_ID": "alerts-chat-id",
+        },
+        clear=True,
     )
     def test_send_telegram_alert_posts_full_report_and_splits_long_messages(self, post_mock):
         post_mock.return_value.raise_for_status.return_value = None

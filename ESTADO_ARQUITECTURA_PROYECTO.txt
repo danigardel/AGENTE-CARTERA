@@ -9,7 +9,7 @@ Rama: main
 
 1. PROPÓSITO GENERAL
 
-Este proyecto genera un radar bursátil como página web estática y ofrece dos superficies de agente: un análisis de cartera programado/reactivo y un agente interactivo en consola. El dashboard se genera cada cinco minutos sin IA; un workflow independiente ejecuta el agente cada 30 minutos y persiste sus datos operativos en la rama `data`.
+Este proyecto genera un radar bursátil como página web estática y ofrece dos superficies de agente: un análisis de cartera programado/reactivo y un agente interactivo en consola. Un CronJob externo activa el workflow del agente cada 30 minutos; cuando termina correctamente, se genera sin IA y publica el dashboard. Ambos workflows conservan disparadores manuales y persisten los datos operativos del agente en la rama `data`.
 
 La página reúne:
 
@@ -58,7 +58,7 @@ Configuración y credenciales
 - OpenRouter Free puede escoger modelos distintos y no tiene contexto o cuota universal. Solo se admiten `openrouter/free` y modelos `:free`, salvo `OPENROUTER_ALLOW_PAID=true` local explícito; no se habilita esa variable en Actions.
 - Los proveedores de respaldo reciben datos de cartera. Revisar términos y privacidad de cada proveedor, en especial la configuración de OpenRouter para modelos gratuitos.
 - La consola puede leer `GEMINI_API_KEY.txt` si `GEMINI_API_KEY` no está definida; el archivo está excluido de Git.
-- `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` son secretos opcionales y no se escriben en la caché ni en el dashboard.
+- `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` son secretos opcionales del bot de análisis IA. `TELEGRAM_ALERTS_BOT_TOKEN` y `TELEGRAM_ALERTS_CHAT_ID` configuran el bot opcional de alertas rápidas; si falta el par secundario, las alertas usan el bot principal. Ambos pares se proporcionan al workflow `portfolio_agent.yml`; nunca se guardan en la caché ni en el dashboard.
 - REPORT_TIMEZONE permite cambiar la zona horaria y PORTFOLIO_TRANSACTIONS_CSV indicar un CSV de operaciones.
 - `.gitignore` excluye cachés, estado del agente, bytecode y archivos locales de credenciales. La rama pública `data` contiene la última narrativa IA y estado de alertas/cortacircuitos; nunca claves.
 - Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.
@@ -140,11 +140,11 @@ Lista las dependencias Python directas. No se observa un lockfile en la raíz in
 
 .github\workflows\daily_report.yml
 
-Instala dependencias, restaura el último análisis y estado de alertas desde `data`, genera el dashboard con `--no-ai` y publica `public\index.html` en GitHub Pages cada cinco minutos.
+Instala dependencias, restaura el último análisis y estado de alertas desde `data`, genera el dashboard con `--no-ai` y lo publica en Pages tras completarse correctamente el workflow del agente. No necesita secretos de Telegram porque no envía mensajes.
 
 .github\workflows\portfolio_agent.yml
 
-Ejecuta `agent.py` cada 30 minutos. Restaura y persiste `agent_state.json`, `gemini_cache.json` y `ai_provider_state.json` en la rama `data`, usando concurrencia para evitar escrituras simultáneas. Sus fallos no bloquean la publicación de Pages.
+El CronJob externo lo inicia cada 30 minutos mediante `workflow_dispatch`. Restaura y persiste `agent_state.json`, `gemini_cache.json` y `ai_provider_state.json` en la rama `data`, usando concurrencia para evitar escrituras simultáneas. Tras completarse correctamente, `daily_report.yml` genera y publica el dashboard; si el agente falla, no se activa ese build.
 
 HTML generado
 
@@ -176,7 +176,7 @@ Noticias y análisis IA
 - La memoria temporal del prompt solo usa campos estructurados y validados de la caché anterior; no desplaza los datos actuales.
 - Los triggers de análisis ignoran posiciones ya alertadas ese día y no se ejecutan mientras la caché contiene un warning/failure_warning. Los tickers se guardan junto a la fecha local en la caché de Gemini.
 - Las alertas deterministas usan el umbral configurable `ALERT_DROP_PCT`: caídas y subidas de cartera, y solo subidas de watchlist fuera de cartera. Ignoran precios stale, agrupan por categoría y reavisan tras un movimiento adicional de 1 punto porcentual en la misma dirección. `agent_state.json` usa `last_alerted_pct` y migra los registros heredados `last_drop_pct`.
-- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT; la consola/directo puede enviar Telegram para un análisis nuevo, mientras que `agent.py` desactiva esos avisos narrativos para evitar duplicados.
+- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT; la consola/directo puede enviar análisis IA mediante `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, mientras que `agent.py` desactiva esos avisos narrativos para evitar duplicados. Las alertas deterministas usan `TELEGRAM_ALERTS_BOT_TOKEN`/`TELEGRAM_ALERTS_CHAT_ID`, con fallback al par principal si el secundario no está completo.
 - `market_data.json` mantiene compatibilidad con datos antiguos y añade opcionalmente `analysis.provider_used`, `analysis.is_stale` y `alerts_today`; React valida esos campos y muestra avisos de análisis desactualizado.
 - El prompt incluye `previous_analysis_memory` validada, `portfolio_events` y un límite configurable de caracteres; se eliminan primero titulares y noticias antiguas.
 
