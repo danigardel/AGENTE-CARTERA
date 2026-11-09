@@ -425,7 +425,7 @@ PORTFOLIO = (
     PortfolioAsset("GE Vernova", "Y5C.SG", 0.038649, 30.00, "EUR"),
     PortfolioAsset("MSCI World Information Tech.", "XDWT.DE", 0.218023, 30.00, "EUR"),
     PortfolioAsset("Broadcom", "1YD.SG", 0.084104, 25.00, "EUR"),
-    PortfolioAsset("NVIDIA", "NVD.SG", 0.259347, 47.00, "EUR"),
+    PortfolioAsset("NVIDIA", "NVD.SG", 0.271323, 48.91, "EUR"),
     PortfolioAsset("Alphabet (A)", "ABEA.SG", 0.357767, 102.00, "EUR"),
     PortfolioAsset("MercadoLibre", "MLB1.SG", 0.002776, 5.00, "EUR"),
     PortfolioAsset("Amazon.com", "AMZ.SG", 0.187863, 42.49, "EUR"),

@@ -1989,7 +1989,7 @@ class SentimentTests(unittest.TestCase):
             "tax_eur",
         }
 
-        self.assertEqual(len(activities), 61)
+        self.assertEqual(len(activities), 62)
         self.assertTrue(all(set(row) == public_fields for row in raw_activities))
         self.assertTrue(all(item.currency == "EUR" for item in activities))
         self.assertTrue(all(item.ticker in configured_tickers for item in activities))
@@ -2007,21 +2007,23 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("NKE.SG", configured_tickers)
         self.assertIn("NVO", configured_tickers)
         dashboard = render_dashboard([], portfolio_activity=activities)
-        self.assertIn("Historial de inversión · 61 movimientos", dashboard)
-        self.assertEqual(dashboard.count('data-label="Movimiento"'), 61)
+        self.assertIn("Historial de inversión · 62 movimientos", dashboard)
+        self.assertEqual(dashboard.count('data-label="Movimiento"'), 62)
         self.assertIn("AMZ.SG", assets_by_ticker)
         self.assertAlmostEqual(assets_by_ticker["AMZ.SG"].shares, 0.187863)
+        self.assertAlmostEqual(assets_by_ticker["NVD.SG"].shares, 0.271323)
+        self.assertAlmostEqual(assets_by_ticker["NVD.SG"].investment_eur, 48.91)
 
-        todays_activities = [
+        nov_2_activities = [
             item for item in activities if item.trade_date == date(2026, 11, 2)
         ]
-        self.assertEqual(len(todays_activities), 7)
+        self.assertEqual(len(nov_2_activities), 7)
         self.assertTrue(
-            all(item.fee_eur == 0 for item in todays_activities)
+            all(item.fee_eur == 0 for item in nov_2_activities)
         )
         saveback = next(
             item
-            for item in todays_activities
+            for item in nov_2_activities
             if item.action == "BENEFITS_SAVEBACK"
         )
         self.assertAlmostEqual(saveback.amount_eur, 3.07)
@@ -2030,6 +2032,14 @@ class SentimentTests(unittest.TestCase):
             saveback.amount_eur + saveback.tax_eur,
             2.49,
         )
+        purchase = next(
+            item for item in activities if item.trade_date == date(2026, 11, 9)
+        )
+        self.assertEqual(purchase.ticker, "NVD.SG")
+        self.assertEqual(purchase.shares, 0.011976)
+        self.assertEqual(purchase.price_eur, 159.48)
+        self.assertEqual(purchase.amount_eur, -1.91)
+        self.assertEqual(purchase.fee_eur, 0)
 
     def test_dashboard_renders_filtered_portfolio_activity(self):
         activities = [

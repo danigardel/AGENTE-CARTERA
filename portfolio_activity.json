@@ -791,5 +791,18 @@
     "amount_eur": -2.49,
     "fee_eur": 0.0,
     "tax_eur": 0.0
+  },
+  {
+    "date": "2026-11-09",
+    "action": "BUY",
+    "ticker": "NVD.SG",
+    "name": "NVIDIA",
+    "asset_class": "STOCK",
+    "currency": "EUR",
+    "shares": 0.011976,
+    "price_eur": 159.48,
+    "amount_eur": -1.91,
+    "fee_eur": 0.0,
+    "tax_eur": 0.0
   }
 ]
