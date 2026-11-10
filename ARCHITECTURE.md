@@ -90,7 +90,15 @@
   excluidos no deben reaparecer como posiciones analizadas.
 - El escáner «buy the dip» puntúa señales deterministas (drawdown de 52 semanas,
   RSI(14), SMA200 y potencial de analistas, PEG y proximidad de resultados); la
-  IA puede explicar la señal, no sustituye la puntuación.
+  IA puede explicar la señal, no sustituye la puntuación. La matriz PER+PEG
+  prioriza Forward PE positivo sobre PER TTM, marca combinaciones favorables,
+  mixtas o de riesgo y ajusta la puntuación/razones de Buy the Dip. El
+  diagnóstico es orientativo: no clasifica ETF/fondos ni datos incompletos, y
+  exige comparar múltiplos con empresas del mismo sector.
+- El diagnóstico de valoración se exporta en las fichas y `market_data.json`,
+  llega al prompt IA y acompaña alertas de precios y candidatas Buy the Dip
+  cuando existen PER y PEG positivos. Los beneficios TTM atípicos pueden
+  distorsionar el PER; cuando no existe Forward PE, el TTM es solo respaldo.
 - Las métricas cuantitativas de riesgo (volatilidad, drawdown, Sharpe/Sortino,
   beta/correlación, exposiciones, look-through y stress tests) se calculan con
   históricos públicos para aportar contexto al análisis; no son predicciones.

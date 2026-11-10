@@ -25,6 +25,7 @@ from daily_report import (
     collect_reports,
     collect_chart_data,
     enrich_reports_with_rsi14,
+    fundamental_valuation,
     fetch_portfolio,
     load_portfolio_activity,
     load_portfolio_transactions,
@@ -219,6 +220,36 @@ def find_price_alerts(
     state_alerts = state.get("alerts", {})
     alerts: list[dict[str, Any]] = []
     portfolio_tickers: set[str] = set()
+    reports_by_ticker = {
+        report.company.ticker: report
+        for report in reports
+        if report.company.ticker
+    }
+    reports_by_name = {
+        report.company.name.casefold(): report
+        for report in reports
+    }
+
+    def valuation_alert_fields(
+        ticker: str,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        report = reports_by_ticker.get(ticker) or (
+            reports_by_name.get(name.casefold()) if name else None
+        )
+        if report is None:
+            return {}
+        valuation = fundamental_valuation(report.quote)
+        if valuation["valuation_category"] == "insufficient_data":
+            return {}
+        return {
+            key: valuation[key]
+            for key in (
+                "valuation_category",
+                "valuation_combination",
+                "valuation_verdict",
+            )
+        }
 
     def should_alert(ticker: str, daily_change: float) -> bool:
         previous = state_alerts.get(ticker)
@@ -267,6 +298,7 @@ def find_price_alerts(
                 "category": (
                     "portfolio_rise" if daily_change > 0 else "portfolio_drop"
                 ),
+                **valuation_alert_fields(ticker, position.asset.name),
             }
         )
     for report in reports:
@@ -296,6 +328,7 @@ def find_price_alerts(
                 "daily_change_pct": float(daily_change),
                 "current_price_eur": quote.current_price_eur,
                 "category": "watchlist_rise",
+                **valuation_alert_fields(ticker, report.company.name),
             }
         )
     return alerts
@@ -341,10 +374,30 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
         for alert in grouped:
             if category == "dip_candidate":
                 score = alert["score"]
-                reasons = "; ".join(alert["reasons"]) or "señales técnicas"
+                max_score = alert.get("max_score", 6)
+                valuation_combination = alert.get("valuation_combination")
+                valuation_verdict = alert.get("valuation_verdict")
+                valuation_reason = (
+                    f"{valuation_combination}: {valuation_verdict}"
+                    if valuation_combination and valuation_verdict
+                    else None
+                )
+                reasons = "; ".join(
+                    reason
+                    for reason in alert["reasons"]
+                    if reason != valuation_reason
+                ) or "señales técnicas"
+                valuation_label = (
+                    f' · {valuation_combination} '
+                    f'({valuation_verdict.rstrip(".")})'
+                    if alert.get("valuation_category") != "insufficient_data"
+                    and valuation_combination
+                    and valuation_verdict
+                    else ""
+                )
                 lines.append(
                     f"- {alert['name']} ({alert['ticker']}): "
-                    f"score {score}/5 · {reasons}"
+                    f"score {score}/{max_score} · {reasons}{valuation_label}"
                 )
                 continue
             daily_change = alert["daily_change_pct"]
@@ -356,9 +409,17 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
                 and math.isfinite(price)
                 else "sin precio"
             )
+            valuation_label = (
+                f' · {alert["valuation_combination"]} '
+                f'({alert["valuation_verdict"].rstrip(".")})'
+                if alert.get("valuation_category") != "insufficient_data"
+                and alert.get("valuation_combination")
+                and alert.get("valuation_verdict")
+                else ""
+            )
             lines.append(
                 f"- {alert['name']} ({alert['ticker']}): "
-                f"{daily_change:+.2f}% | {price_text}"
+                f"{daily_change:+.2f}% | {price_text}{valuation_label}"
             )
     try:
         response = requests.post(

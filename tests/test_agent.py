@@ -109,6 +109,39 @@ class AutonomousAgentTests(unittest.TestCase):
             ],
         )
 
+    @patch("agent.requests.post")
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"},
+        clear=True,
+    )
+    def test_price_alerts_include_fundamental_valuation(self, post_mock):
+        post_mock.return_value.raise_for_status.return_value = None
+        position = self._position("GROWTH", self.now.date())
+        report = self._report("GROWTH", self.now.date(), -3.0)
+        report.quote.forward_pe = 25
+        report.quote.pe_ratio = 40
+        report.quote.peg_ratio = 0.8
+        report.quote.sector = "Technology"
+
+        alerts = find_price_alerts(
+            [position],
+            [report],
+            {"alerts": {}},
+            self.now,
+        )
+
+        self.assertEqual(
+            alerts[0]["valuation_combination"],
+            "Crecimiento a Buen Precio",
+        )
+        self.assertTrue(send_price_alerts(alerts))
+        message = post_mock.call_args.kwargs["json"]["text"]
+        self.assertIn(
+            "· Crecimiento a Buen Precio (Sí, barata por crecimiento)",
+            message,
+        )
+
     def test_realerts_when_move_strengthens_in_either_direction(self):
         position = self._position("EX", self.now.date())
         cases = (
@@ -280,6 +313,9 @@ class AutonomousAgentTests(unittest.TestCase):
     def test_dip_alert_is_deduplicated_until_score_increases(self):
         report = self._report("DIP", self.now.date(), -1.0)
         report.quote.peg_ratio = 1.2
+        report.quote.forward_pe = 25
+        report.quote.pe_ratio = 50
+        report.quote.sector = "Technology"
         report.quote.extra.update(
             {
                 "pct_from_52w_high": -25,
@@ -297,6 +333,10 @@ class AutonomousAgentTests(unittest.TestCase):
         repeated = find_dip_candidate_alerts([], [report], state, self.now)
 
         self.assertEqual([item["category"] for item in initial], ["dip_candidate"])
+        self.assertEqual(
+            initial[0]["valuation_combination"],
+            "Valoración Mixta",
+        )
         self.assertEqual(repeated, [])
         self.assertEqual(state["dip_candidates"]["DIP"]["last_score"], score)
 
@@ -327,16 +367,26 @@ class AutonomousAgentTests(unittest.TestCase):
             "ticker": "DIP",
             "name": "Dip Corp",
             "score": 3,
-            "reasons": ["RSI(14) 30.0", "PEG 1.20"],
+            "max_score": 6,
+            "reasons": [
+                "RSI(14) 30.0",
+                "PEG 1.20",
+                "Trampa de Valor: Falsamente barata. (Evitar).",
+            ],
             "category": "dip_candidate",
+            "valuation_category": "value_trap",
+            "valuation_combination": "Trampa de Valor",
+            "valuation_verdict": "Falsamente barata. (Evitar).",
         }
 
         self.assertTrue(send_price_alerts([alert]))
 
         text = post_mock.call_args.kwargs["json"]["text"]
         self.assertIn("CANDIDATAS BUY THE DIP", text)
-        self.assertIn("score 3/5", text)
+        self.assertIn("score 3/6", text)
         self.assertIn("RSI(14) 30.0; PEG 1.20", text)
+        self.assertIn("· Trampa de Valor (Falsamente barata. (Evitar))", text)
+        self.assertEqual(text.count("Trampa de Valor"), 1)
 
     @patch("agent.collect_chart_data", return_value=SimpleNamespace(
         risk_metrics={"annualized_volatility_pct": 12.3}

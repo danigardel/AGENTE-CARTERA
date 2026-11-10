@@ -83,9 +83,11 @@ from daily_report import (
     calculate_risk_zones,
     external_ideas_html,
     executive_summary,
+    fundamental_valuation,
     parse_external_ideas,
     post_gemini,
     send_telegram_alert,
+    score_buy_the_dip,
     fetch_portfolio,
     fetch_headlines,
     fetch_financial_news,
@@ -432,6 +434,7 @@ class SentimentTests(unittest.TestCase):
         ticker_mock.return_value.get_info.return_value = {
             "currency": "USD",
             "pegRatio": 1.15,
+            "forwardPE": 22.0,
             "trailingPE": 28.5,
             "regularMarketTime": datetime(
                 2026, 10, 9, 15, 30, tzinfo=timezone.utc
@@ -442,6 +445,7 @@ class SentimentTests(unittest.TestCase):
         quote = fetch_quote(Company("Example Co", "EX"))
 
         self.assertEqual(quote.peg_ratio, 1.15)
+        self.assertEqual(quote.forward_pe, 22.0)
         self.assertEqual(quote.pe_ratio, 28.5)
         self.assertEqual(quote.market_date, date(2026, 10, 9))
         self.assertEqual(quote.market_timezone, "America/New_York")
@@ -750,6 +754,137 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(calculate_rsi14(increasing), 100.0)
         self.assertIsNone(calculate_rsi14(pd.Series([1.0] * 14)))
+
+    def test_fundamental_valuation_matrix_and_forward_pe_priority(self):
+        cases = [
+            (10, 0.8, "ideal_bargain", "La Ganga Ideal", "Sí, muy barata."),
+            (25, 0.8, "growth_at_fair_price", "Crecimiento a Buen Precio", "Sí, barata por crecimiento."),
+            (16, 1.2, "fair_value", "Valoración Justa", "Precio razonable. (Equilibrada)."),
+            (10, 2, "value_trap", "Trampa de Valor", "Falsamente barata. (Evitar)."),
+            (25, 2, "overvalued", "Sobrevaloración Clara", "No, está cara."),
+            (45, 3, "bubble", "Burbuja / Euforia", "Peligrosamente cara."),
+            (16, 0.8, "mixed", "Valoración Mixta", "Señales mixtas; requiere comparación sectorial."),
+            (25, 1.2, "mixed", "Valoración Mixta", "Señales mixtas; requiere comparación sectorial."),
+        ]
+        for pe, peg, category, combination, verdict in cases:
+            with self.subTest(pe=pe, peg=peg):
+                result = fundamental_valuation(
+                    Quote(pe_ratio=pe, peg_ratio=peg, sector="Technology")
+                )
+                self.assertEqual(result["valuation_category"], category)
+                self.assertEqual(result["valuation_combination"], combination)
+                self.assertEqual(result["valuation_verdict"], verdict)
+                self.assertIn("Technology", result["valuation_interpretation"])
+
+        forward = fundamental_valuation(
+            Quote(forward_pe=10, pe_ratio=45, peg_ratio=0.8)
+        )
+        self.assertEqual(forward["valuation_category"], "ideal_bargain")
+        self.assertEqual(forward["valuation_per"], 10)
+        self.assertEqual(forward["valuation_per_type"], "Forward PE")
+        trailing = fundamental_valuation(
+            Quote(forward_pe=0, pe_ratio=10, peg_ratio=0.8)
+        )
+        self.assertEqual(trailing["valuation_per_type"], "PER (TTM)")
+        self.assertEqual(trailing["valuation_per"], 10)
+        self.assertEqual(
+            fundamental_valuation(
+                Quote(pe_ratio=10, peg_ratio=0.8, extra={"quote_type": "ETF"})
+            )["valuation_category"],
+            "insufficient_data",
+        )
+        self.assertEqual(
+            fundamental_valuation(Quote(pe_ratio=10, peg_ratio=None))[
+                "valuation_combination"
+            ],
+            "Sin datos suficientes",
+        )
+
+    def test_fundamental_valuation_is_exposed_to_analysis_prompt_and_card(self):
+        report = StockReport(
+            Company("Example", "EX"),
+            quote=Quote(
+                forward_pe=18,
+                pe_ratio=25,
+                peg_ratio=1.2,
+                sector="Software",
+            ),
+        )
+        position = PortfolioPosition(
+            PortfolioAsset("Example", "EX", 1, 100, "EUR"),
+            prices_eur={"Hoy": 110},
+            current_value_eur=110,
+        )
+        inputs = _analysis_inputs([report], [position])
+
+        for section in ("portfolio", "watchlist"):
+            item = inputs[section][0]
+            self.assertEqual(item["forward_pe"], 18)
+            self.assertEqual(item["valuation_per_type"], "Forward PE")
+            self.assertEqual(item["valuation_combination"], "Valoración Justa")
+            self.assertEqual(item["valuation_verdict"], "Precio razonable. (Equilibrada).")
+        prompt = build_analysis_prompt(
+            inputs,
+            datetime(2026, 11, 10, 12, 0, tzinfo=TIMEZONE),
+        )
+        self.assertIn("beneficios TTM atípicos", prompt)
+        self.assertIn("empresas del mismo sector", prompt)
+        self.assertIn('"forward_pe": 18', prompt)
+        self.assertIn('"valuation_combination": "Valoración Justa"', prompt)
+
+        html = render_dashboard(
+            [report],
+            generated_at=datetime(2026, 11, 10, 12, 0, tzinfo=TIMEZONE),
+        )
+        self.assertIn("Forward PE", html)
+        self.assertIn("PER (TTM)", html)
+        self.assertIn("Diagnóstico PER + PEG", html)
+        self.assertIn("Precio razonable. (Equilibrada).", html)
+        self.assertIn("Interpretación y sector", html)
+        self.assertIn('id="valuation-filter"', html)
+        self.assertIn('data-valuation-category="fair_value"', html)
+        self.assertIn("valuation: document.getElementById('valuation-filter')", html)
+        self.assertIn("card.dataset.valuationCategory", html)
+
+    def test_buy_the_dip_rewards_attractive_and_penalizes_risky_valuations(self):
+        base_extra = {
+            "pct_from_52w_high": -25,
+            "rsi14": 30,
+            "pct_vs_sma200": -8,
+            "analyst_upside_pct": 20,
+            "days_to_earnings": 10,
+        }
+        bargain = StockReport(
+            Company("Bargain", "BARGAIN"),
+            quote=Quote(
+                market_date=date(2026, 11, 10),
+                market_timezone=TIMEZONE.key,
+                forward_pe=10,
+                pe_ratio=25,
+                peg_ratio=0.8,
+                extra=base_extra.copy(),
+            ),
+        )
+        trap = StockReport(
+            Company("Trap", "TRAP"),
+            quote=Quote(
+                market_date=date(2026, 11, 10),
+                market_timezone=TIMEZONE.key,
+                pe_ratio=10,
+                peg_ratio=2,
+                extra=base_extra.copy(),
+            ),
+        )
+
+        bargain_score = score_buy_the_dip(bargain)
+        trap_score = score_buy_the_dip(trap)
+
+        self.assertEqual(bargain_score["score"], 6)
+        self.assertEqual(bargain_score["details"]["valuation_adjustment"], 1)
+        self.assertIn("La Ganga Ideal", " ".join(bargain_score["reasons"]))
+        self.assertEqual(trap_score["score"], 2)
+        self.assertEqual(trap_score["details"]["valuation_adjustment"], -2)
+        self.assertIn("Trampa de Valor", " ".join(trap_score["reasons"]))
 
     def test_buy_the_dip_score_applies_earnings_penalty_and_held_filter(self):
         report = StockReport(
@@ -1315,7 +1450,10 @@ class SentimentTests(unittest.TestCase):
             'data-daily="1.5000" data-peg="0.9000" data-consensus="Compra" data-analysts="12" data-news="Alcista"',
             html,
         )
-        self.assertIn('data-pe="18.0000" data-sector="Technology"', html)
+        self.assertIn(
+            'data-pe="18.0000" data-valuation-category="mixed" data-sector="Technology"',
+            html,
+        )
         self.assertIn(
             'data-market-cap="2000000000.0000" data-dividend-yield="1.5000" data-beta="0.8000"',
             html,
@@ -1323,6 +1461,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('id="sector-filter"', html)
         self.assertIn('id="peg-filter"', html)
         self.assertIn('id="pe-filter"', html)
+        self.assertIn('id="valuation-filter"', html)
         self.assertIn('id="daily-filter"', html)
         self.assertIn('id="consensus-filter"', html)
         self.assertIn('id="market-cap-filter"', html)
@@ -2764,6 +2903,7 @@ class SentimentTests(unittest.TestCase):
         inputs = _analysis_inputs([report], [])
 
         self.assertEqual(len(inputs["watchlist"][0]["headlines"]), MAX_HEADLINES)
+
 
     @patch("daily_report.fetch_financial_news")
     def test_collect_financial_news_caps_items_at_the_gemini_limit(self, fetch_mock):
@@ -5265,6 +5405,16 @@ class SentimentTests(unittest.TestCase):
                     "ticker": "HIGH",
                     "name": "High",
                     "daily_change_pct": 20,
+                    "forward_pe": 24,
+                    "valuation_category": "growth_at_fair_price",
+                    "valuation_combination": "Crecimiento a Buen Precio",
+                    "valuation_verdict": "Sí, barata por crecimiento.",
+                    "valuation_interpretation": "Contexto del sector Technology.",
+                    "valuation_per": 24,
+                    "valuation_per_type": "Forward PE",
+                    "trailing_pe": 50,
+                    "peg_ratio": 0.8,
+                    "valuation_sector": "Technology",
                     "description": "no debe incluirse",
                     "headlines": [{"title": "High news"}],
                 },
@@ -5301,6 +5451,11 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(reduced["global_market_radar"][0]["summary"], "xxxx")
         self.assertEqual([item["ticker"] for item in reduced["watchlist"]], ["HIGH"])
         self.assertNotIn("description", reduced["watchlist"][0])
+        self.assertEqual(
+            reduced["watchlist"][0]["valuation_combination"],
+            "Crecimiento a Buen Precio",
+        )
+        self.assertEqual(reduced["watchlist"][0]["forward_pe"], 24)
         self.assertEqual(len(reduced["watchlist"][0]["headlines"]), 1)
         self.assertEqual(len(reduced_news.splitlines()), 2)
         self.assertIn("Resumen: aaaa", reduced_news)
@@ -5628,6 +5783,14 @@ class SentimentTests(unittest.TestCase):
         )
         self.assertEqual(payload["watchlist"][0]["ticker"], "EXF")
         self.assertEqual(
+            payload["watchlist"][0]["valuation_category"],
+            "insufficient_data",
+        )
+        self.assertEqual(
+            payload["portfolio"]["positions"][0]["valuation_combination"],
+            "Sin datos suficientes",
+        )
+        self.assertEqual(
             payload["watchlist"][0]["headlines"][0]["display_title"],
             "Fuertes resultados trimestrales",
         )
@@ -5693,6 +5856,46 @@ class SentimentTests(unittest.TestCase):
         )
         self.assertIsNone(payload["watchlist"][0]["fundamentals"]["market_cap"])
         self.assertIsNone(payload["charts"]["watchlist"][0]["value"])
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+
+    def test_market_data_exports_valuation_for_portfolio_and_watchlist(self):
+        generated_at = datetime(2026, 11, 10, 12, 0, tzinfo=TIMEZONE)
+        report = StockReport(
+            Company("Growth Co", "GROW"),
+            quote=Quote(
+                forward_pe=24,
+                pe_ratio=50,
+                peg_ratio=0.8,
+                sector="Technology",
+            ),
+        )
+        position = PortfolioPosition(
+            PortfolioAsset("Growth Co", "GROW", 1, 100, "EUR"),
+            current_value_eur=110,
+        )
+
+        payload = build_market_data(
+            [report],
+            [position],
+            generated_at=generated_at,
+        )
+
+        for item in (
+            payload["watchlist"][0],
+            payload["portfolio"]["positions"][0],
+        ):
+            self.assertEqual(item["forward_pe"], 24)
+            self.assertEqual(item["valuation_per"], 24)
+            self.assertEqual(item["valuation_per_type"], "Forward PE")
+            self.assertEqual(
+                item["valuation_combination"],
+                "Crecimiento a Buen Precio",
+            )
+            self.assertEqual(
+                item["valuation_verdict"],
+                "Sí, barata por crecimiento.",
+            )
+            self.assertIn("Technology", item["valuation_interpretation"])
         json.dumps(payload, ensure_ascii=False, allow_nan=False)
 
     def test_market_data_includes_only_today_deterministic_alerts(self):
