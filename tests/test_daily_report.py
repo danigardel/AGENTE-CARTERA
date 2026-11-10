@@ -31,6 +31,7 @@ from daily_report import (
     MAX_HEADLINES,
     MAX_GEMINI_NEWS_ITEMS,
     MarketEvent,
+    MARKET_BENCHMARKS,
     PortfolioAnalysis,
     PortfolioActivity,
     PortfolioAsset,
@@ -3134,6 +3135,14 @@ class SentimentTests(unittest.TestCase):
         portfolio = [
             PortfolioPosition(
                 asset=PortfolioAsset("Current asset", "CUR", 1, 50, "EUR"),
+                returns_pct={
+                    "1D": 1.5,
+                    "1W": 2.5,
+                    "1M": 3.5,
+                    "6M": 8,
+                    "1Y": 20,
+                },
+                max_return_pct=25,
                 current_value_eur=50,
                 price_date=date(2026, 10, 9),
             ),
@@ -3163,6 +3172,18 @@ class SentimentTests(unittest.TestCase):
             [item["current_day"] for item in payload["portfolio"]],
             [True, False],
         )
+        self.assertEqual(
+            payload["portfolio"][0]["returns_pct_by_period"],
+            {
+                "1D": 1.5,
+                "1W": 2.5,
+                "1M": 3.5,
+                "6M": 8.0,
+                "1Y": 20.0,
+                "MAX": 25.0,
+                "YTD": None,
+            },
+        )
         self.assertIsNone(payload["portfolio"][1]["change_pct"])
         self.assertIn(".attr('class', 'heatmap-name')", html)
         self.assertIn("Number(item.weight_pct)", html)
@@ -3171,6 +3192,45 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("const nameLabels = groups.filter((item) => item.data.current_day)", html)
         self.assertIn("card.scrollIntoView({behavior: 'smooth', block: 'start'})", html)
         self.assertIn(".attr('role', 'link')", html)
+        self.assertIn("window.DashboardPortfolioHeatmapSelect?.(period)", html)
+        self.assertIn("d3.scaleThreshold().domain(scale.thresholds).range(scale.colors)", html)
+        self.assertIn('<option value="YTD">YTD</option>', html)
+
+    @patch("daily_report.calculate_portfolio_risk_metrics", return_value=None)
+    @patch("daily_report.yf.download")
+    def test_portfolio_heatmap_calculates_ytd_return_from_eur_closes(
+        self, download_mock, _risk_metrics_mock
+    ):
+        today = datetime.now(TIMEZONE).date()
+        tickers = ["YTD", *(ticker for _, ticker in MARKET_BENCHMARKS)]
+        columns = pd.MultiIndex.from_product(
+            [tickers, ["Close"]], names=["Ticker", "Price"]
+        )
+        index = pd.DatetimeIndex(
+            [date(today.year, 1, 1), today],
+        )
+        history = pd.DataFrame(
+            [[100] * len(tickers), [100] * len(tickers)],
+            index=index,
+            columns=columns,
+        )
+        download_mock.side_effect = [pd.DataFrame(), history]
+        position = PortfolioPosition(
+            asset=PortfolioAsset("YTD asset", "YTD", 1, 100, "EUR"),
+            prices_eur={"Hoy": 110},
+            current_value_eur=110,
+            price_date=today,
+        )
+
+        charts = collect_chart_data([], [position])
+
+        expected_return = (
+            0.0 if today == date(today.year, 1, 1) else 10.0
+        )
+        self.assertAlmostEqual(
+            charts.portfolio[0]["returns_pct_by_period"]["YTD"],
+            expected_return,
+        )
 
     @patch("daily_report.yf.download", return_value=pd.DataFrame())
     def test_heatmap_payload_uses_short_asset_names(self, _download_mock):
@@ -3268,6 +3328,11 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("nameLabels.append('tspan')", html)
         self.assertIn(".attr('clip-path', (item) => `url(#${item.clipId})`)", html)
         self.assertIn(".attr('text-anchor', 'middle')", html)
+        self.assertIn("renderHeatmap('watchlist-heatmap', payload.watchlist)", html)
+        self.assertIn("renderHeatmap('portfolio-heatmap', payload.portfolio, true, portfolioPeriod)", html)
+        self.assertIn("thresholds: [-1.25, -0.75, -0.25, 0.25, 0.75, 1.25]", html)
+        self.assertIn("thresholds: [-5.5, -3, -0.875, 0.875, 3, 5.5]", html)
+        self.assertIn("thresholds: [-20.5, -10.5, -2.75, 2.75, 10.5, 20.5]", html)
 
     @patch("daily_report.requests.post")
     def test_analyze_portfolio_calls_standard_flash_api_with_portfolio_and_watchlist(self, post_mock):

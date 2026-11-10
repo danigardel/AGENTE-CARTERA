@@ -6129,6 +6129,47 @@ def collect_chart_data(
                 "market_date": market_date.isoformat() if market_date else None,
                 "market_timezone": market_timezone,
             }
+            if group == "portfolio" and ticker in portfolio_by_ticker:
+                position = portfolio_by_ticker[ticker]
+                period_returns = {
+                    period: _finite_float(value)
+                    for period, value in position.returns_pct.items()
+                }
+                period_returns["MAX"] = _finite_float(position.max_return_pct)
+                ytd_start = datetime.now(TIMEZONE).date().replace(month=1, day=1)
+                ytd_base = _close_on_or_before(
+                    historical_closes.get(ticker, []),
+                    ytd_start,
+                )
+                current_price_eur = _finite_float(position.prices_eur.get("Hoy"))
+                if (
+                    current_price_eur is None
+                    and position.current_value_eur is not None
+                    and position.asset.shares > 0
+                ):
+                    current_price_eur = (
+                        position.current_value_eur / position.asset.shares
+                    )
+                if ytd_base is not None and current_price_eur is not None:
+                    ytd_price_eur = ytd_base[1]
+                    if position.asset.currency.upper() == "USD":
+                        ytd_fx = _close_on_or_before(
+                            historical_closes.get("USDEUR=X", []),
+                            ytd_base[0],
+                        )
+                        ytd_price_eur = (
+                            ytd_price_eur * ytd_fx[1]
+                            if ytd_fx is not None
+                            else 0
+                        )
+                    period_returns["YTD"] = (
+                        (current_price_eur / ytd_price_eur - 1) * 100
+                        if ytd_price_eur > 0
+                        else None
+                    )
+                else:
+                    period_returns["YTD"] = None
+                chart_item["returns_pct_by_period"] = period_returns
             if allocation_value is not None and portfolio_value > 0:
                 chart_item["weight_pct"] = (
                     max(allocation_value, 0) / portfolio_value * 100
@@ -7602,6 +7643,9 @@ PORTFOLIO_SCRIPT = """<script>
     ['return', 'Rendimiento (%)'],
     ['close', 'Precio de cierre (€)'],
   ];
+  const ytdOptions = [
+    ['return', 'Rendimiento (%)'],
+  ];
   const maxOptions = [
     ['profit', 'Ganancia absoluta (€)'],
     ['return', 'Rendimiento (%)'],
@@ -7609,7 +7653,9 @@ PORTFOLIO_SCRIPT = """<script>
 
   function updatePortfolioView() {
     const period = periodSelect.value;
-    const options = period === 'MAX' ? maxOptions : historicalOptions;
+    const options = period === 'MAX'
+      ? maxOptions
+      : period === 'YTD' ? ytdOptions : historicalOptions;
     const previousValue = metricSelect.value;
     metricSelect.replaceChildren(...options.map(([value, label]) => {
       const option = document.createElement('option');
@@ -7629,6 +7675,7 @@ PORTFOLIO_SCRIPT = """<script>
         || cell.dataset.portfolioKind !== kind;
     });
     window.DashboardPortfolioChartSelect?.(period === 'MAX' ? 'TOTAL' : period);
+    window.DashboardPortfolioHeatmapSelect?.(period);
   }
 
   periodSelect.addEventListener('change', updatePortfolioView);
@@ -7689,16 +7736,27 @@ CHARTS_SCRIPT = """<script>
   const payload = JSON.parse(payloadNode.textContent);
   const d3 = window.d3;
 
-  function returnColor(value, extent) {
+  function returnColor(value, period) {
     if (value === null || !Number.isFinite(value)) return '#354052';
-    const magnitude = Math.max(extent, 0.5);
-    return d3.scaleDiverging()
-      .domain([-magnitude, 0, magnitude])
-      .interpolator(d3.interpolateRdYlGn)
-      (Math.max(-magnitude, Math.min(magnitude, value)));
+    const colors = ['#b91c1c', '#ef4444', '#fda4af', '#e5e7eb', '#86efac', '#22c55e', '#15803d'];
+    const scale = period === '1D'
+      ? {
+        thresholds: [-1.25, -0.75, -0.25, 0.25, 0.75, 1.25],
+        colors,
+      }
+      : ['1W', '1M', '6M'].includes(period)
+        ? {
+          thresholds: [-5.5, -3, -0.875, 0.875, 3, 5.5],
+          colors,
+        }
+        : {
+          thresholds: [-20.5, -10.5, -2.75, 2.75, 10.5, 20.5],
+          colors,
+        };
+    return d3.scaleThreshold().domain(scale.thresholds).range(scale.colors)(value);
   }
 
-  function renderHeatmap(id, items, proportional = false) {
+  function renderHeatmap(id, items, proportional = false, period = '1D') {
     const node = document.getElementById(id);
     if (!node) return;
     const width = Math.max(1, node.clientWidth || 1);
@@ -7711,7 +7769,12 @@ CHARTS_SCRIPT = """<script>
       return;
     }
 
-    const extent = d3.max(items, (item) => Math.abs(item.change_pct || 0)) || 0.5;
+    const changeFor = (item) => {
+      const value = period === '1D'
+        ? item.change_pct
+        : item.returns_pct_by_period?.[period];
+      return Number.isFinite(value) ? value : null;
+    };
     const root = d3.hierarchy({children: items}).sum((item) => (
       proportional ? Math.max(0, Number(item.weight_pct) || 0) : 1
     ));
@@ -7745,10 +7808,10 @@ CHARTS_SCRIPT = """<script>
       .attr('height', (item) => Math.max(0, item.y1 - item.y0))
       .attr('rx', 5)
       .attr('fill', (item) => item.data.current_day
-        ? returnColor(item.data.change_pct, extent)
+        ? returnColor(changeFor(item.data), period)
         : 'var(--bg)');
     groups.append('title').text((item) => {
-      const change = item.data.change_pct;
+      const change = changeFor(item.data);
       return `${item.data.name} (${item.data.ticker}): ${
         change === null ? 'sin datos' : `${change > 0 ? '+' : ''}${change.toFixed(2)}%`
       }`;
@@ -7776,9 +7839,12 @@ CHARTS_SCRIPT = """<script>
       .attr('x', (item) => (item.x1 - item.x0) / 2)
       .attr('dy', '1.15em')
       .attr('class', 'heatmap-return')
-      .text((item) => item.data.change_pct === null
-        ? '—'
-        : `${item.data.change_pct > 0 ? '+' : ''}${item.data.change_pct.toFixed(2)}%`)
+      .text((item) => {
+        const change = changeFor(item.data);
+        return change === null
+          ? '—'
+          : `${change > 0 ? '+' : ''}${change.toFixed(2)}%`;
+      })
       .style('font-size', function() {
         const item = d3.select(this.parentNode).datum();
         return `${Math.max(3, Math.min(10, (item.y1 - item.y0) * 0.17))}px`;
@@ -7983,7 +8049,8 @@ CHARTS_SCRIPT = """<script>
   function renderAll() {
     renderSparklines();
     renderHeatmap('watchlist-heatmap', payload.watchlist);
-    renderHeatmap('portfolio-heatmap', payload.portfolio, true);
+    const portfolioPeriod = document.getElementById('portfolio-period')?.value || '1D';
+    renderHeatmap('portfolio-heatmap', payload.portfolio, true, portfolioPeriod);
     renderAverageLine(
       'watchlist-average-chart',
       payload.portfolio_intraday_profit_series || [],
@@ -7996,6 +8063,10 @@ CHARTS_SCRIPT = """<script>
     const activePeriod = document.getElementById('portfolio-history-period')?.value || 'TOTAL';
     window.DashboardPortfolioChartSelect(activePeriod);
   }
+
+  window.DashboardPortfolioHeatmapSelect = (period) => {
+    renderHeatmap('portfolio-heatmap', payload.portfolio, true, period);
+  };
 
   function periodStart(period, lastPoint) {
     const lastDate = new Date(lastPoint);
@@ -8881,6 +8952,21 @@ def render_dashboard(
             f'data-portfolio-kind="close">{_portfolio_cell(position.prices_eur.get(period), " €")}</td>'
             for period, _ in PORTFOLIO_PERIODS
         )
+        + _portfolio_value(
+            next(
+                (
+                    item.get("returns_pct_by_period", {}).get("YTD")
+                    for item in chart_data.portfolio
+                    if item.get("ticker") == position.asset.ticker
+                ),
+                None,
+            ),
+            "return",
+        ).replace(
+            "<td",
+            '<td hidden data-label="Rendimiento YTD" data-portfolio-period="YTD" '
+            'data-portfolio-kind="return"',
+        )
         + _portfolio_value(position.max_profit_eur, "profit").replace(
             "<td",
             '<td hidden data-label="Ganancia MAX" data-portfolio-period="MAX" '
@@ -9336,6 +9422,7 @@ def render_dashboard(
           <select id="portfolio-period" class="sort-select">
             <option value="1D" selected>1D</option><option value="1W">1W</option>
             <option value="1M">1M</option><option value="6M">6M</option>
+            <option value="YTD">YTD</option>
             <option value="1Y">1Y</option><option value="MAX">MAX</option>
           </select>
           <label for="portfolio-metric">Mostrar</label>
@@ -9349,8 +9436,8 @@ def render_dashboard(
         <div class="portfolio-visualizations">
           <article class="market-chart-card chart-resize-target">
             <h3>Mapa de calor · Mi cartera</h3>
-            <p class="chart-subtitle">Tamaño proporcional al peso actual de cada posición · rendimiento de hoy</p>
-            <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos diarios de la cartera"></svg>
+            <p class="chart-subtitle">Tamaño proporcional al peso actual de cada posición · rendimiento del periodo seleccionado</p>
+            <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos del periodo seleccionado de la cartera"></svg>
           </article>
           <article class="market-chart-card chart-resize-target">
             <h3>Cartera vs. referencias</h3>
