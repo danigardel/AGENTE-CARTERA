@@ -3336,6 +3336,61 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("d3.scaleThreshold().domain(scale.thresholds).range(scale.colors)", html)
         self.assertIn('<option value="YTD">YTD</option>', html)
 
+    @patch("daily_report.yf.download", return_value=pd.DataFrame())
+    def test_portfolio_heatmap_uses_watchlist_daily_return_and_purchase_return_for_max(
+        self, _download_mock
+    ):
+        today = datetime.now(TIMEZONE).date()
+        report = StockReport(
+            Company("Current asset", "CUR"),
+            quote=Quote(
+                daily_change_pct=1.5,
+                market_date=today,
+                market_timezone=TIMEZONE.key,
+            ),
+        )
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Current asset", "CUR", 1, 100, "EUR"),
+            returns_pct={
+                "1D": -0.5,
+                "1W": 5,
+                "1M": 10,
+                "6M": 20,
+                "1Y": 25,
+            },
+            current_value_eur=140,
+            max_return_pct=40,
+            price_date=today,
+            market_timezone=TIMEZONE.key,
+        )
+
+        charts = collect_chart_data([report], [position])
+        html = render_dashboard(
+            [report],
+            generated_at=datetime.now(TIMEZONE),
+            portfolio=[position],
+            chart_data=charts,
+        )
+        payload = json.loads(
+            html.split('id="dashboard-chart-data">', 1)[1].split("</script>", 1)[0]
+        )
+        heatmap_position = payload["portfolio"][0]
+
+        self.assertEqual(heatmap_position["change_pct"], 1.5)
+        self.assertEqual(
+            heatmap_position["returns_pct_by_period"],
+            {
+                "1D": -0.5,
+                "1W": 5.0,
+                "1M": 10.0,
+                "6M": 20.0,
+                "1Y": 25.0,
+                "MAX": 40.0,
+                "YTD": None,
+            },
+        )
+        self.assertIn("MAX desde compra", html)
+
     @patch("daily_report.calculate_portfolio_risk_metrics", return_value=None)
     @patch("daily_report.yf.download")
     def test_portfolio_heatmap_calculates_ytd_return_from_eur_closes(

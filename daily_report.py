@@ -6206,8 +6206,7 @@ def collect_chart_data(
             market_date = report.quote.market_date or market_date
             market_timezone = report.quote.market_timezone or market_timezone
         if report is not None and report.company.ticker == ticker:
-            if daily_return is None:
-                daily_return = report.quote.daily_change_pct
+            daily_return = report.quote.daily_change_pct
             previous_close = report.quote.previous_close
             previous_close_is_native = previous_close is not None
             if (
@@ -9622,7 +9621,7 @@ def render_dashboard(
         <div class="portfolio-visualizations">
           <article class="market-chart-card chart-resize-target">
             <h3>Mapa de calor · Mi cartera</h3>
-            <p class="chart-subtitle">Tamaño proporcional al peso actual de cada posición · rendimiento del periodo seleccionado</p>
+            <p class="chart-subtitle">Tamaño proporcional al peso actual de cada posición · rendimiento del periodo seleccionado; MAX desde compra</p>
             <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos del periodo seleccionado de la cartera"></svg>
           </article>
           <article class="market-chart-card chart-resize-target">
