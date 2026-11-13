@@ -52,10 +52,10 @@ En el navegador se carga D3.js 7.9.0 desde CDN para dibujar los SVG. Por tanto, 
 
 Configuración y credenciales
 
-- La cadena predeterminada es Gemini principal → Gemini fallback → Gemini Flash Lite → Groq → OpenRouter (`openrouter/free`); Cerebras y Mistral están definidos y deshabilitados. `AI_PROVIDERS` permite ordenarla o reducirla.
+- La cadena predeterminada es Gemini 4 Hydrogen → Gemini 3.8 Flash → Gemini 3.7 Flash → Gemini 3.8 Flash Lite → Groq → OpenRouter (`openrouter/free`); Cerebras y Mistral están definidos y deshabilitados. `AI_PROVIDERS` permite ordenarla o reducirla.
 - `GEMINI_API_KEY`, `GROQ_API_KEY` y `OPENROUTER_API_KEY` son secretos opcionales; los proveedores sin clave se omiten. Las variables `GROQ_MODEL`, `OPENROUTER_MODEL`, `CEREBRAS_MODEL`, `MISTRAL_MODEL` y `INVESTOR_PROFILE` personalizan modelos y perfil.
 - `ai_providers.py` implementa la API OpenAI-compatible con `requests`, JSON estricto, backoff con jitter, `Retry-After`, circuit breaker persistente y salvaguarda gratuita de OpenRouter. GitHub Models fue retirado el 30/07/2026; no es una opción.
-- `ai_config.json` o `AI_CONFIG_PATH` configuran endpoints, modelos, límites, perfiles `full`/`reduced` y el orden de proveedores; nunca guardar secretos allí. Los límites Free exactos de Groq y el nivel gratuito/modelo de Mistral figuran como sin verificar.
+- `ai_config.json` o `AI_CONFIG_PATH` configuran endpoints, modelos, límites TPM, perfiles `full`/`reduced` y el orden de proveedores; nunca guardar secretos allí. Hydrogen usa Interactions API con `thinking_level: high`, `max_output_tokens: 65536` y `store: false`; los fallbacks Gemini conservan `generateContent`. Se mide el prompt con `countTokens`; sobre 200.000 tokens se sintetiza en bloques con un fallback y se espera 65 segundos antes del análisis final. Si falla el conteo, se estima conservadoramente por bytes UTF-8. No se habilita Google Search Grounding. Los límites Free exactos de Groq y el nivel gratuito/modelo de Mistral figuran como sin verificar.
 - El perfil reducido limita inicialmente noticias a 25, titulares macro a 40, watchlist a 15 empresas y resúmenes a 200 caracteres; ante HTTP 413 se reduce una vez más. Los topes de 18.000–20.000 caracteres para respaldos se estiman en 4.500–5.000 tokens (caracteres/4) y no exceden los máximos configurados.
 - OpenRouter Free puede escoger modelos distintos y no tiene contexto o cuota universal. Solo se admiten `openrouter/free` y modelos `:free`, salvo `OPENROUTER_ALLOW_PAID=true` local explícito; no se habilita esa variable en Actions.
 - Los proveedores de respaldo reciben datos de cartera. Revisar términos y privacidad de cada proveedor, en especial la configuración de OpenRouter para modelos gratuitos.
@@ -65,16 +65,16 @@ Configuración y credenciales
 - `.gitignore` excluye cachés, estado del agente, bytecode y archivos locales de credenciales. La rama pública `data` contiene la última narrativa IA y estado de alertas/cortacircuitos; nunca claves.
 - Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.
 
-Límites de proveedores consultados en documentación oficial el 01/11/2026:
+Límites de proveedores consultados en documentación oficial el 01/11/2026; Gemini 4 Hydrogen se verificó el 13/11/2026:
 
 Proveedor   Modelo en ai_config.json       Contexto            Cuotas / verificación
-Gemini      IDs configurables              1.048.576 tokens*   Principal; cuotas variables por proyecto.
+Gemini      Hydrogen → 3.8 Flash → 3.7 Flash 1.048.576 tokens* Principal; salida Hydrogen síncrona de 65.536 tokens; cuotas variables por proyecto.
 Groq        openai/gpt-oss-20b             131.072 tokens      Developer base: 30 RPM, 8K TPM, 1K RPD; límites Free exactos sin verificar.
 OpenRouter  openrouter/free                Variable            Modelo elegido y límites variables; sin cuota/contexto universal.
 Cerebras    qwen-3.8-27b                  Free Trial: 64K     5 RPM, 30K uncached TPM, 90K total TPM, 1M TPH/TPD; prueba promocional, no nivel permanente.
 Mistral     mistral-small-2603 (candidato) Sin verificar       ID, contexto, API gratis y RPM/TPM/RPD sin verificar; deshabilitado.
 
-*El límite de Gemini 3.8 Flash se consulta en la documentación oficial. Groq
+*Hydrogen tiene una ventana unificada de 1.048.576 tokens. Groq
 publica las cuotas Developer base y advierte que las cuotas exactas dependen de
 la organización. Cerebras Free Trial requiere método de pago verificado. Fuentes:
 https://console.groq.com/docs/models

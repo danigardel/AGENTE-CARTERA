@@ -72,6 +72,7 @@ from daily_report import (
     _has_urgent_portfolio_trigger,
     _gemini_request_warning,
     _telegram_message_chunks,
+    _measure_hydrogen_prompt_tokens,
     analyze_portfolio,
     build_analysis_prompt,
     build_market_data,
@@ -100,6 +101,7 @@ from daily_report import (
     _fetch_macro_feed,
     fetch_quote,
     fetch_vix_data,
+    gemini_endpoint,
     load_portfolio_transactions,
     load_portfolio_activity,
     portfolio_assets_from_transactions,
@@ -132,6 +134,12 @@ class SentimentTests(unittest.TestCase):
         )
         provider_config_patcher.start()
         self.addCleanup(provider_config_patcher.stop)
+        token_count_patcher = patch(
+            "daily_report.count_gemini_tokens",
+            return_value=0,
+        )
+        token_count_patcher.start()
+        self.addCleanup(token_count_patcher.stop)
         news_patcher = patch("daily_report.collect_financial_news", return_value=[])
         self.collect_news_mock = news_patcher.start()
         self.addCleanup(news_patcher.stop)
@@ -3916,11 +3924,11 @@ class SentimentTests(unittest.TestCase):
         endpoint, = post_mock.call_args.args
         self.assertEqual(
             endpoint,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
         )
         self.assertNotIn("secret-test-key", endpoint)
         self.assertEqual(post_mock.call_args.kwargs["headers"]["x-goog-api-key"], "secret-test-key")
-        prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        prompt = post_mock.call_args.kwargs["json"]["input"]
         self.assertIn("Aquí tienes las noticias de hoy:", prompt)
         self.assertIn("Example announces quarterly results", prompt)
         self.assertIn("Revenue rises year over year.", prompt)
@@ -3939,10 +3947,16 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('"investment_base_eur": 80', prompt)
         self.assertIn('"weight_pct": 100.0', prompt)
         self.assertIn('"earnings_date"', prompt)
+        hydrogen_body = post_mock.call_args.kwargs["json"]
         self.assertEqual(
-            post_mock.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
-            {"thinkingBudget": 2048},
+            hydrogen_body["generation_config"],
+            {"thinking_level": "high", "max_output_tokens": 65_536},
         )
+        self.assertEqual(
+            hydrogen_body["response_format"],
+            {"type": "text", "mime_type": "application/json"},
+        )
+        self.assertFalse(hydrogen_body["store"])
         self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
         html = render_dashboard(reports, portfolio=portfolio, analysis=analysis)
@@ -4033,7 +4047,7 @@ class SentimentTests(unittest.TestCase):
                 send_telegram=False,
             )
 
-        prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        prompt = post_mock.call_args.kwargs["json"]["input"]
         prompt_data = json.loads(prompt.split("DATOS (JSON):\n", 1)[1])
         self.assertEqual(
             [item["ticker"] for item in prompt_data["portfolio"]],
@@ -4078,7 +4092,7 @@ class SentimentTests(unittest.TestCase):
         unavailable = SimpleNamespace(
             status_code=404,
             json=lambda: {
-                "error": {"message": "models/gemini-3.8-flash is not found"}
+                "error": {"message": "models/gemini-4-hydrogen is not found"}
             },
         )
         failed_response = SimpleNamespace(
@@ -4117,15 +4131,14 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in post_mock.call_args_list],
             [
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
                 "https://generativelanguage.googleapis.com/v1beta/models/"
                 "gemini-3.8-flash:generateContent",
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                "gemini-3.7-flash:generateContent",
             ],
         )
         self.assertEqual(
-            post_mock.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
-            {"thinkingBudget": 2048},
+            post_mock.call_args_list[0].kwargs["json"]["generation_config"],
+            {"thinking_level": "high", "max_output_tokens": 65_536},
         )
         self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
 
@@ -4193,15 +4206,140 @@ class SentimentTests(unittest.TestCase):
         response = SimpleNamespace(raise_for_status=lambda: None)
         post_mock.return_value = response
 
-        actual_response = post_gemini("https://example.test", "key", "prompt")
+        actual_response = post_gemini(
+            "https://example.test",
+            "key",
+            "prompt",
+            model="gemini-3.8-flash",
+        )
 
         self.assertIs(actual_response, response)
         self.assertEqual(post_mock.call_count, 1)
         self.assertNotIn("tools", post_mock.call_args.kwargs["json"])
         self.assertEqual(post_mock.call_args.kwargs["timeout"], (10, 60))
         self.assertEqual(
-            build_request_body("prompt")["generationConfig"]["thinkingConfig"],
-            {"thinkingBudget": 2048},
+            build_request_body("prompt", "gemini-4-hydrogen")["generation_config"],
+            {"thinking_level": "high", "max_output_tokens": 65_536},
+        )
+        fallback_body = build_request_body("prompt", "gemini-3.8-flash")
+        self.assertEqual(
+            fallback_body["generationConfig"],
+            {"responseMimeType": "application/json"},
+        )
+        self.assertNotIn("thinkingConfig", fallback_body["generationConfig"])
+
+    @patch("daily_report.time.sleep")
+    @patch("daily_report.count_gemini_tokens", return_value=200_001)
+    @patch("daily_report.requests.post")
+    def test_hydrogen_summarizes_oversized_context_then_waits_before_final_call(
+        self,
+        post_mock,
+        count_mock,
+        sleep_mock,
+    ):
+        summary = {
+            "facts": ["NVDA quote context preserved"],
+            "coverage": "RSS and market data",
+        }
+        analysis_result = {
+            "portfolio_assessment": "Evaluación válida",
+            "diversification": "Diversificada",
+            "recommended_changes": "Sin cambios",
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto actual",
+            "risks": [],
+        }
+        post_mock.side_effect = [
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "candidates": [
+                        {"content": {"parts": [{"text": json.dumps(summary)}]}}
+                    ]
+                },
+            ),
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "steps": [
+                        {
+                            "type": "model_output",
+                            "content": [
+                                {"type": "text", "text": json.dumps(analysis_result)}
+                            ],
+                        }
+                    ]
+                },
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis = analyze_portfolio(
+                [],
+                [],
+                api_key="test-key",
+                cache_path=Path(temp_dir) / "gemini_cache.json",
+            )
+
+        self.assertEqual(analysis.portfolio_assessment, "Evaluación válida")
+        count_mock.assert_called_once()
+        self.assertEqual(
+            count_mock.call_args.args[0],
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-4-hydrogen:countTokens",
+        )
+        self.assertEqual(
+            [call.args[0] for call in post_mock.call_args_list],
+            [
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-3.8-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
+            ],
+        )
+        summary_body = post_mock.call_args_list[0].kwargs["json"]
+        self.assertEqual(
+            summary_body["generationConfig"]["maxOutputTokens"],
+            2_048,
+        )
+        self.assertNotIn("thinkingConfig", summary_body["generationConfig"])
+        final_body = post_mock.call_args_list[1].kwargs["json"]
+        self.assertIn('"context_summaries"', final_body["input"])
+        self.assertIn("NVDA quote context preserved", final_body["input"])
+        sleep_mock.assert_called_once_with(65)
+
+    @patch(
+        "daily_report.count_gemini_tokens",
+        side_effect=requests.Timeout("countTokens unavailable"),
+    )
+    def test_hydrogen_count_tokens_failure_uses_conservative_byte_estimate(
+        self,
+        count_mock,
+    ):
+        prompt = "áportfolio"
+
+        measured = _measure_hydrogen_prompt_tokens(
+            prompt,
+            "gemini-4-hydrogen",
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            ["key"],
+            0,
+        )
+
+        self.assertEqual(measured, len(prompt.encode("utf-8")))
+        count_mock.assert_called_once()
+
+    def test_gemini_endpoint_routes_hydrogen_to_interactions_only(self):
+        base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+
+        self.assertEqual(
+            gemini_endpoint(base_url, "gemini-4-hydrogen"),
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
+        )
+        self.assertEqual(
+            gemini_endpoint(base_url, "gemini-3.8-flash"),
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-3.8-flash:generateContent",
         )
 
     def test_gemini_quota_warning_includes_provider_quota_dimensions(self):
@@ -4474,9 +4612,9 @@ class SentimentTests(unittest.TestCase):
                 for call in post_mock.call_args_list
             ],
             [
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
                 "gemini-3.8-flash:generateContent",
-                "gemini-3.8-flash:generateContent",
-                "gemini-3.7-flash:generateContent",
             ],
         )
         self.assertEqual(
@@ -4523,8 +4661,8 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0].split("/models/")[-1] for call in post_mock.call_args_list],
             [
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
                 "gemini-3.8-flash:generateContent",
-                "gemini-3.7-flash:generateContent",
             ],
         )
 
@@ -4568,8 +4706,8 @@ class SentimentTests(unittest.TestCase):
                 cache_path=Path(temp_dir) / "gemini_cache.json",
             )
 
+        self.assertIn("Gemini (gemini-4-hydrogen)", analysis.warning)
         self.assertIn("Gemini (gemini-3.8-flash)", analysis.warning)
-        self.assertIn("Gemini (gemini-3.7-flash)", analysis.warning)
         self.assertIn("Gemini (gemini-3.8-flash-lite)", analysis.warning)
         self.assertNotIn("groq", analysis.warning)
         self.assertEqual(post_mock.call_count, 3)
@@ -5235,7 +5373,7 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertEqual(analysis.portfolio_assessment, "Evaluación actual.")
-        prompt = post_mock.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        prompt = post_mock.call_args.kwargs["json"]["input"]
         self.assertIn('"previous_analysis_memory": {', prompt)
         self.assertIn('"portfolio_assessment": "La cartera estaba equilibrada."', prompt)
         self.assertIn('"recommended_changes": "Mantener DCA."', prompt)

@@ -21,6 +21,7 @@ class AIProviderConfig:
     provider_order: tuple[str, ...] = (
         "gemini",
         "gemini_fallback",
+        "gemini_37_fallback",
         "gemini_flash_lite",
     )
     max_retries: int = 2
@@ -31,6 +32,9 @@ class AIProviderConfig:
     max_prompt_chars: int = 150_000
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    gemini_tpm_safety_limit_tokens: int = 200_000
+    gemini_summary_chunk_bytes: int = 80_000
+    gemini_summary_output_tokens: int = 2_048
 
 
 DEFAULT_AI_PROVIDER_CONFIG = AIProviderConfig()
@@ -72,6 +76,9 @@ def load_ai_config(path: Path | None = None) -> AIProviderConfig:
         "circuit_failure_threshold",
         "circuit_cooldown_seconds",
         "max_prompt_chars",
+        "gemini_tpm_safety_limit_tokens",
+        "gemini_summary_chunk_bytes",
+        "gemini_summary_output_tokens",
         "providers",
         "profiles",
     }
@@ -150,6 +157,27 @@ def load_ai_config(path: Path | None = None) -> AIProviderConfig:
             for name, profile in profiles.items()
             if isinstance(name, str) and isinstance(profile, dict)
         },
+        gemini_tpm_safety_limit_tokens=_config_int(
+            raw,
+            "gemini_tpm_safety_limit_tokens",
+            200_000,
+            minimum=1_000,
+            maximum=1_000_000,
+        ),
+        gemini_summary_chunk_bytes=_config_int(
+            raw,
+            "gemini_summary_chunk_bytes",
+            80_000,
+            minimum=1_000,
+            maximum=200_000,
+        ),
+        gemini_summary_output_tokens=_config_int(
+            raw,
+            "gemini_summary_output_tokens",
+            2_048,
+            minimum=256,
+            maximum=16_384,
+        ),
     )
     if config.max_backoff_seconds < config.base_backoff_seconds:
         raise ValueError("max_backoff_seconds no puede ser menor que base_backoff_seconds.")
@@ -461,6 +489,36 @@ def _retry_after_seconds(error: requests.RequestException) -> float | None:
             )
         except (TypeError, ValueError, OverflowError):
             return None
+
+
+def count_gemini_tokens(
+    url: str,
+    api_key: str,
+    prompt: str,
+    *,
+    timeout: tuple[int, int] = (10, 60),
+) -> int:
+    response = requests.post(
+        url,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    body = response.json()
+    total_tokens = body.get("totalTokens") if isinstance(body, dict) else None
+    if (
+        not isinstance(total_tokens, int)
+        or isinstance(total_tokens, bool)
+        or total_tokens < 0
+    ):
+        raise InvalidProviderResponse(
+            "countTokens devolvió un totalTokens no válido."
+        )
+    return total_tokens
 
 
 class PersistentCircuitBreaker:

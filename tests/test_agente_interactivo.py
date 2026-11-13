@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -30,14 +29,13 @@ class PortfolioConsoleTests(unittest.TestCase):
 
             body = console._request_body("Pregunta actual")
 
-        contents = body["contents"]
-        self.assertIn("2026-10-29", contents[0]["parts"][0]["text"])
-        self.assertEqual(contents[1]["role"], "user")
-        self.assertEqual(contents[2]["role"], "model")
-        self.assertEqual(
-            contents[3]["parts"][0]["text"],
-            "Pregunta actual",
-        )
+        self.assertIn("2026-10-29", body["input"])
+        self.assertIn("Pregunta anterior", body["input"])
+        self.assertIn("Respuesta previa", body["input"])
+        self.assertIn("Pregunta actual", body["input"])
+        self.assertEqual(body["model"], "gemini-4-hydrogen")
+        self.assertEqual(body["generation_config"]["thinking_level"], "high")
+        self.assertFalse(body["store"])
 
     def test_slash_commands_are_dispatched_by_the_console(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -54,8 +52,22 @@ class PortfolioConsoleTests(unittest.TestCase):
     def test_chat_rotates_keys_and_keeps_history(self, post_mock):
         post_mock.return_value.raise_for_status.return_value = None
         post_mock.return_value.json.side_effect = [
-            {"candidates": [{"content": {"parts": [{"text": "Respuesta 1"}]}}]},
-            {"candidates": [{"content": {"parts": [{"text": "Respuesta 2"}]}}]},
+            {
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "Respuesta 1"}],
+                    }
+                ]
+            },
+            {
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "Respuesta 2"}],
+                    }
+                ]
+            },
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             console = self.create_console(temp_dir)
@@ -70,10 +82,17 @@ class PortfolioConsoleTests(unittest.TestCase):
             ],
             ["first-key", "second-key"],
         )
+        self.assertEqual(
+            [call.args[0] for call in post_mock.call_args_list],
+            [
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
+            ],
+        )
         self.assertEqual(console.next_api_key_index, 0)
-        second_contents = post_mock.call_args_list[1].kwargs["json"]["contents"]
-        self.assertIn("Primera pregunta", json.dumps(second_contents))
-        self.assertIn("Respuesta 1", json.dumps(second_contents))
+        second_input = post_mock.call_args_list[1].kwargs["json"]["input"]
+        self.assertIn("Primera pregunta", second_input)
+        self.assertIn("Respuesta 1", second_input)
         self.assertEqual(len(console.history), 4)
 
 

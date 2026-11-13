@@ -15,6 +15,7 @@ from ai_providers import (
     PromptTooLarge,
     ProviderCircuitOpen,
     classify_error,
+    count_gemini_tokens,
     load_ai_config,
     post_gemini_request,
 )
@@ -150,16 +151,55 @@ class AIProviderTests(unittest.TestCase):
             (
                 "gemini",
                 "gemini_fallback",
+                "gemini_37_fallback",
                 "gemini_flash_lite",
                 "groq",
                 "openrouter",
             ),
         )
+        self.assertEqual(
+            config.providers["gemini"]["default_model"],
+            "gemini-4-hydrogen",
+        )
+        self.assertEqual(
+            config.providers["gemini_fallback"]["default_model"],
+            "gemini-3.8-flash",
+        )
+        self.assertEqual(
+            config.providers["gemini_37_fallback"]["default_model"],
+            "gemini-3.7-flash",
+        )
+        self.assertEqual(config.gemini_tpm_safety_limit_tokens, 200_000)
         self.assertFalse(config.providers["cerebras"]["enabled"])
         self.assertFalse(config.providers["mistral"]["enabled"])
         self.assertEqual(
             config.providers["openrouter"]["default_model"],
             "openrouter/free",
+        )
+
+    @patch("ai_providers.requests.post")
+    def test_count_gemini_tokens_uses_count_tokens_endpoint_payload(self, post_mock):
+        response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"totalTokens": 234_567},
+        )
+        post_mock.return_value = response
+
+        result = count_gemini_tokens(
+            "https://example.test/models/gemini-4-hydrogen:countTokens",
+            "test-key",
+            "portfolio context",
+        )
+
+        self.assertEqual(result, 234_567)
+        post_mock.assert_called_once()
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"],
+            {"contents": [{"parts": [{"text": "portfolio context"}]}]},
+        )
+        self.assertEqual(
+            post_mock.call_args.kwargs["headers"]["x-goog-api-key"],
+            "test-key",
         )
 
     @patch.dict("os.environ", {"TEST_OPENAI_KEY": "first-secret,second-secret"})
