@@ -61,6 +61,7 @@ Configuración y credenciales
 - Los proveedores de respaldo reciben datos de cartera. Revisar términos y privacidad de cada proveedor, en especial la configuración de OpenRouter para modelos gratuitos.
 - La consola puede leer `GEMINI_API_KEY.txt` si `GEMINI_API_KEY` no está definida; el archivo está excluido de Git.
 - `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` son secretos opcionales del bot de análisis IA. `TELEGRAM_ALERTS_BOT_TOKEN` y `TELEGRAM_ALERTS_CHAT_ID` configuran el bot opcional de alertas rápidas; si falta el par secundario, las alertas usan el bot principal. Ambos pares se proporcionan al workflow `portfolio_agent.yml`; nunca se guardan en la caché ni en el dashboard.
+- La narrativa IA guarda en `gemini_cache.json` los IDs de sus fragmentos por fecha local. Una narrativa nueva borra los fragmentos previos del mismo día solo después de enviarse correctamente; las narrativas de días anteriores permanecen en Telegram como historial. Si no hay credenciales o falla el envío, no se borran los mensajes anteriores.
 - REPORT_TIMEZONE permite cambiar la zona horaria y PORTFOLIO_TRANSACTIONS_CSV indicar un CSV de operaciones.
 - `.gitignore` excluye cachés, estado del agente, bytecode y archivos locales de credenciales. La rama pública `data` contiene la última narrativa IA y estado de alertas/cortacircuitos; nunca claves.
 - Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.

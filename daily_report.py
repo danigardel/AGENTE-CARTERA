@@ -4894,6 +4894,31 @@ def _cache_alerted_tickers(
     return list(dict.fromkeys(ticker for ticker in tickers if isinstance(ticker, str)))
 
 
+def _cache_telegram_message_ids(
+    cached_data: dict[str, Any] | None,
+    local_date: date,
+) -> list[int]:
+    if (
+        not isinstance(cached_data, dict)
+        or cached_data.get("telegram_messages_date") != local_date.isoformat()
+    ):
+        return []
+    message_ids = cached_data.get("telegram_message_ids")
+    if not isinstance(message_ids, list):
+        return []
+    return list(
+        dict.fromkeys(
+            message_id
+            for message_id in message_ids
+            if (
+                isinstance(message_id, int)
+                and not isinstance(message_id, bool)
+                and message_id > 0
+            )
+        )
+    )
+
+
 def _triage_portfolio_events(
     portfolio: list[PortfolioPosition],
     cached_data: dict[str, Any],
@@ -4979,6 +5004,8 @@ def _read_gemini_cache(
         if not isinstance(cached_data, dict):
             return None
         cached = dict(cached_data)
+        cached.pop("telegram_messages_date", None)
+        cached.pop("telegram_message_ids", None)
         if (
             prompt_version is not None
             and cached.get("warning") is None
@@ -5334,6 +5361,8 @@ def _write_gemini_cache(
     next_api_key_index: int,
     alerted_tickers_date: str | None = None,
     alerted_tickers_today: list[str] | None = None,
+    telegram_messages_date: str | None = None,
+    telegram_message_ids: list[int] | None = None,
 ) -> None:
     cached = asdict(analysis)
     timestamp = now_utc.astimezone(timezone.utc).isoformat()
@@ -5350,6 +5379,9 @@ def _write_gemini_cache(
     if alerted_tickers_date is not None:
         cached["alerted_tickers_date"] = alerted_tickers_date
         cached["alerted_tickers_today"] = alerted_tickers_today or []
+    if telegram_messages_date is not None and telegram_message_ids is not None:
+        cached["telegram_messages_date"] = telegram_messages_date
+        cached["telegram_message_ids"] = telegram_message_ids
     temporary_path = cache_path.with_name(f".{cache_path.name}.tmp")
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5384,7 +5416,24 @@ def _write_gemini_failure_cache(
     timestamp = now_utc.astimezone(timezone.utc)
     previous_cache = _load_gemini_cache_data(cache_path)
     last_good_analysis = None
+    telegram_messages_date = None
+    telegram_message_ids = None
     if isinstance(previous_cache, dict):
+        stored_telegram_date = previous_cache.get("telegram_messages_date")
+        stored_telegram_ids = previous_cache.get("telegram_message_ids")
+        if isinstance(stored_telegram_date, str) and isinstance(
+            stored_telegram_ids, list
+        ):
+            telegram_messages_date = stored_telegram_date
+            telegram_message_ids = [
+                message_id
+                for message_id in stored_telegram_ids
+                if (
+                    isinstance(message_id, int)
+                    and not isinstance(message_id, bool)
+                    and message_id > 0
+                )
+            ]
         stored_last_good = previous_cache.get("last_good_analysis")
         if isinstance(stored_last_good, dict):
             last_good_analysis = stored_last_good
@@ -5425,6 +5474,9 @@ def _write_gemini_failure_cache(
             "short_retry" if retry_after_utc is not None else failure_policy
         ),
     }
+    if telegram_messages_date is not None and telegram_message_ids is not None:
+        cached["telegram_messages_date"] = telegram_messages_date
+        cached["telegram_message_ids"] = telegram_message_ids
     if last_good_analysis is not None:
         cached["last_good_analysis"] = last_good_analysis
     if retry_after_utc is not None:
@@ -5567,18 +5619,20 @@ def _telegram_message_chunks(text: str, max_units: int = 3900) -> list[str]:
 def send_telegram_alert(
     analysis: PortfolioAnalysis,
     triggered_by_anomaly: bool,
-) -> None:
+    previous_message_ids: Sequence[int] = (),
+) -> list[int]:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not bot_token or not chat_id:
-        return
+        return []
     report = _format_telegram_analysis(analysis)
     if not report.strip():
         logging.warning(
             "No se envió el análisis a Telegram: la respuesta está vacía."
         )
-        return
+        return []
     chunks = _telegram_message_chunks(report)
+    sent_message_ids: list[int] = []
     for index, chunk in enumerate(chunks, start=1):
         message = f"Análisis de cartera ({index}/{len(chunks)})\n{chunk}"
         try:
@@ -5588,7 +5642,22 @@ def send_telegram_alert(
                 timeout=(10, 20),
             )
             response.raise_for_status()
-        except requests.RequestException as error:
+            response_body = response.json()
+            result = (
+                response_body.get("result")
+                if isinstance(response_body, dict)
+                else None
+            )
+            message_id = (
+                result.get("message_id") if isinstance(result, dict) else None
+            )
+            if (
+                isinstance(message_id, int)
+                and not isinstance(message_id, bool)
+                and message_id > 0
+            ):
+                sent_message_ids.append(message_id)
+        except (requests.RequestException, ValueError) as error:
             status = _http_status(error)
             logging.warning(
                 "No se pudo enviar la parte %d/%d del análisis a Telegram (%s%s).",
@@ -5597,7 +5666,35 @@ def send_telegram_alert(
                 type(error).__name__,
                 f", HTTP {status}" if status is not None else "",
             )
-            return
+            return []
+
+    if sent_message_ids and previous_message_ids:
+        for message_id in previous_message_ids:
+            if not isinstance(message_id, int) or isinstance(message_id, bool):
+                continue
+            try:
+                response = requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": message_id},
+                    timeout=(5, 10),
+                )
+                response.raise_for_status()
+                response_body = response.json()
+                if isinstance(response_body, dict) and response_body.get("ok") is False:
+                    logging.warning(
+                        "Telegram no pudo borrar el mensaje anterior %d del análisis.",
+                        message_id,
+                    )
+            except (requests.RequestException, ValueError) as error:
+                status = _http_status(error)
+                logging.warning(
+                    "No se pudo borrar el mensaje anterior %d del análisis "
+                    "(%s%s).",
+                    message_id,
+                    type(error).__name__,
+                    f", HTTP {status}" if status is not None else "",
+                )
+    return sent_message_ids
 
 
 def _parse_gemini_api_keys(api_key_value: str | None) -> tuple[str, ...]:
@@ -6015,6 +6112,7 @@ def analyze_portfolio(
     )
     local_date = now_utc.astimezone(TIMEZONE).date()
     previously_alerted = _cache_alerted_tickers(cached_data, local_date)
+    previous_telegram_ids = _cache_telegram_message_ids(cached_data, local_date)
     portfolio_events = _triage_portfolio_events(
         analysis_portfolio,
         cached_data or {},
@@ -6540,6 +6638,19 @@ def analyze_portfolio(
         if successful_key_index is not None and api_keys
         else rotation_state["next_api_key_index"]
     )
+    telegram_message_ids = previous_telegram_ids
+    telegram_messages_date = (
+        local_date.isoformat() if previous_telegram_ids else None
+    )
+    if send_telegram:
+        newly_sent_ids = send_telegram_alert(
+            analysis,
+            triggered_by_anomaly,
+            previous_message_ids=previous_telegram_ids,
+        )
+        if newly_sent_ids:
+            telegram_message_ids = newly_sent_ids
+            telegram_messages_date = local_date.isoformat()
     _write_gemini_cache(
         cache_path,
         analysis,
@@ -6548,9 +6659,9 @@ def analyze_portfolio(
         next_key_index,
         alerted_tickers_date=local_date.isoformat(),
         alerted_tickers_today=alerted_tickers_today,
+        telegram_messages_date=telegram_messages_date,
+        telegram_message_ids=telegram_message_ids if telegram_messages_date else None,
     )
-    if send_telegram:
-        send_telegram_alert(analysis, triggered_by_anomaly)
     return analysis
 
 

@@ -61,6 +61,8 @@ from daily_report import (
     extra_quote_fields,
     _analysis_section,
     _apply_payload_profile,
+    _cache_telegram_message_ids,
+    _format_telegram_analysis,
     _risk_no_data_reason,
     _alerts_today_for_market_data,
     _previous_analysis_memory,
@@ -5074,7 +5076,15 @@ class SentimentTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_path = Path(temp_dir) / "gemini_cache.json"
-            _write_gemini_cache(cache_path, successful, now, "fingerprint", 1)
+            _write_gemini_cache(
+                cache_path,
+                successful,
+                now,
+                "fingerprint",
+                1,
+                telegram_messages_date="2026-10-07",
+                telegram_message_ids=[101, 102],
+            )
             _write_gemini_failure_cache(
                 cache_path,
                 "Gemini no está disponible.",
@@ -5091,6 +5101,8 @@ class SentimentTests(unittest.TestCase):
             )
 
         self.assertIn("last_good_analysis", stored)
+        self.assertEqual(stored["telegram_messages_date"], "2026-10-07")
+        self.assertEqual(stored["telegram_message_ids"], [101, 102])
         self.assertEqual(stale.portfolio_assessment, "Evaluación anterior.")
         self.assertEqual(stale.provider_used, "gemini")
         self.assertTrue(stale.is_stale)
@@ -5248,6 +5260,26 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(payload["portfolio"][0]["risk_zones"]["status"], "ok")
         self.assertEqual(payload["portfolio"][0]["risk_zones"]["atr_pct"], 1.0)
 
+    def test_cache_telegram_message_ids_only_returns_ids_for_current_local_date(self):
+        current_date = date(2026, 10, 6)
+        cached_data = {
+            "telegram_messages_date": "2026-10-06",
+            "telegram_message_ids": [11, 12, 12, True, "13"],
+        }
+
+        self.assertEqual(
+            _cache_telegram_message_ids(cached_data, current_date),
+            [11, 12],
+        )
+        self.assertEqual(
+            _cache_telegram_message_ids(
+                {**cached_data, "telegram_messages_date": "2026-10-05"},
+                current_date,
+            ),
+            [],
+        )
+        self.assertEqual(_cache_telegram_message_ids(None, current_date), [])
+
     @patch("daily_report.send_telegram_alert")
     @patch("daily_report.collect_financial_news", return_value=[])
     @patch("daily_report.collect_market_radar", return_value=[])
@@ -5267,6 +5299,8 @@ class SentimentTests(unittest.TestCase):
         )
         cached_data = {
             "timestamp": datetime(2026, 10, 6, 9, 1, tzinfo=TIMEZONE).isoformat(),
+            "telegram_messages_date": "2026-10-06",
+            "telegram_message_ids": [71, 72],
             "portfolio_assessment": "Caché reciente.",
             "diversification": "Diversificación previa.",
             "recommended_changes": "Mantener.",
@@ -5302,6 +5336,7 @@ class SentimentTests(unittest.TestCase):
                 ]
             },
         )
+        telegram_mock.return_value = [81, 82]
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_path = Path(temp_dir) / "gemini_cache.json"
             cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
@@ -5319,7 +5354,141 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(post_mock.call_count, 1)
         self.assertEqual(saved_cache["alerted_tickers_today"], ["VOL"])
         self.assertEqual(saved_cache["alerted_tickers_date"], "2026-10-06")
-        telegram_mock.assert_called_once_with(analysis, True)
+        self.assertEqual(saved_cache["telegram_messages_date"], "2026-10-06")
+        self.assertEqual(saved_cache["telegram_message_ids"], [81, 82])
+        telegram_mock.assert_called_once_with(
+            analysis,
+            True,
+            previous_message_ids=[71, 72],
+        )
+
+    @patch("daily_report.send_telegram_alert")
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_analysis_does_not_replace_previous_day_telegram_messages(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+        telegram_mock,
+    ):
+        now = datetime(2026, 10, 7, 9, 5, tzinfo=TIMEZONE).astimezone(timezone.utc)
+        previous_day = (now.astimezone(TIMEZONE).date() - timedelta(days=1)).isoformat()
+        cached_data = {
+            "timestamp": datetime(2026, 10, 6, 8, 59, tzinfo=TIMEZONE).isoformat(),
+            "prompt_version": AI_ANALYSIS_PROMPT_VERSION,
+            "telegram_messages_date": previous_day,
+            "telegram_message_ids": [71, 72],
+        }
+        result = {
+            "portfolio_assessment": "Análisis actualizado.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "position_analysis": [],
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+        telegram_mock.return_value = [91, 92]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            analyze_portfolio(
+                [],
+                [],
+                api_key="next-day-test-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+            saved_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(telegram_mock.call_count, 1)
+        self.assertFalse(telegram_mock.call_args.args[1])
+        self.assertEqual(
+            telegram_mock.call_args.kwargs["previous_message_ids"],
+            [],
+        )
+        self.assertEqual(saved_cache["telegram_messages_date"], "2026-10-07")
+        self.assertEqual(saved_cache["telegram_message_ids"], [91, 92])
+
+    @patch("daily_report.send_telegram_alert", return_value=[])
+    @patch("daily_report.collect_financial_news", return_value=[])
+    @patch("daily_report.collect_market_radar", return_value=[])
+    @patch("daily_report.requests.post")
+    def test_analysis_keeps_same_day_telegram_ids_when_send_returns_none(
+        self,
+        post_mock,
+        _radar_mock,
+        _news_mock,
+        telegram_mock,
+    ):
+        now = datetime(2026, 10, 6, 9, 5, tzinfo=TIMEZONE).astimezone(timezone.utc)
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Volatile", "VOL", 1, 100, "EUR"),
+            returns_pct={"1D": -4.0},
+            prices_eur={"Hoy": 100.0},
+        )
+        cached_data = {
+            "timestamp": datetime(2026, 10, 6, 9, 1, tzinfo=TIMEZONE).isoformat(),
+            "prompt_version": AI_ANALYSIS_PROMPT_VERSION,
+            "telegram_messages_date": "2026-10-06",
+            "telegram_message_ids": [71, 72],
+        }
+        result = {
+            "portfolio_assessment": "Análisis actualizado.",
+            "diversification": "Diversificada.",
+            "recommended_changes": "Mantener.",
+            "position_analysis": [
+                {
+                    "ticker": "VOL",
+                    "name": "Volatile",
+                    "action": "MANTENER",
+                    "reason": "Variación diaria del -4%; sin catalizador.",
+                }
+            ],
+            "top_buys": [],
+            "sell_candidates": [],
+            "market_context": "Contexto.",
+            "risks": [],
+        }
+        post_mock.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(result)}]}}
+                ]
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "gemini_cache.json"
+            cache_path.write_text(json.dumps(cached_data), encoding="utf-8")
+            analyze_portfolio(
+                [],
+                [position],
+                api_key="empty-telegram-test-key",
+                cache_path=cache_path,
+                now_utc=now,
+            )
+            saved_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(saved_cache["telegram_messages_date"], "2026-10-06")
+        self.assertEqual(saved_cache["telegram_message_ids"], [71, 72])
+        self.assertEqual(
+            telegram_mock.call_args.kwargs["previous_message_ids"],
+            [71, 72],
+        )
 
     @patch("daily_report.collect_financial_news", return_value=[])
     @patch("daily_report.collect_market_radar", return_value=[])
@@ -5995,6 +6164,170 @@ class SentimentTests(unittest.TestCase):
         with self.assertLogs(level="WARNING"):
             send_telegram_alert(analysis, triggered_by_anomaly=False)
         self.assertEqual(post_mock.call_count, 1)
+
+    @patch("daily_report.requests.post")
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "12345"},
+        clear=True,
+    )
+    def test_send_telegram_alert_captures_each_chunk_and_deletes_old_messages(
+        self,
+        post_mock,
+    ):
+        sent_ids: list[int] = []
+        deleted_ids: list[int] = []
+
+        def telegram_response(url, *, json, timeout):
+            if url.endswith("/sendMessage"):
+                message_id = 100 + len(sent_ids)
+                sent_ids.append(message_id)
+                return SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {"ok": True, "result": {"message_id": message_id}},
+                )
+            deleted_id = json["message_id"]
+            deleted_ids.append(deleted_id)
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {"ok": True, "result": True},
+            )
+
+        post_mock.side_effect = telegram_response
+        analysis = PortfolioAnalysis(
+            action_signal="WATCH",
+            telegram_summary="palabra " * 1200,
+        )
+        expected_chunks = len(
+            _telegram_message_chunks(_format_telegram_analysis(analysis))
+        )
+
+        message_ids = send_telegram_alert(
+            analysis,
+            triggered_by_anomaly=False,
+            previous_message_ids=[11, 12],
+        )
+
+        self.assertEqual(len(message_ids), expected_chunks)
+        self.assertEqual(message_ids, sent_ids)
+        self.assertEqual(deleted_ids, [11, 12])
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in post_mock.call_args_list[-2:]],
+            [(5, 10), (5, 10)],
+        )
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in post_mock.call_args_list[-2:]
+            ],
+            [
+                "https://api.telegram.org/bottest-token/deleteMessage",
+                "https://api.telegram.org/bottest-token/deleteMessage",
+            ],
+        )
+        self.assertEqual(
+            [
+                call.kwargs["json"]
+                for call in post_mock.call_args_list[-2:]
+            ],
+            [
+                {"chat_id": "12345", "message_id": 11},
+                {"chat_id": "12345", "message_id": 12},
+            ],
+        )
+        self.assertTrue(
+            all(
+                call.args[0].endswith("/sendMessage")
+                for call in post_mock.call_args_list[:expected_chunks]
+            )
+        )
+
+    @patch("daily_report.requests.post")
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "12345"},
+        clear=True,
+    )
+    def test_telegram_delete_failure_does_not_invalidate_new_message_ids(
+        self,
+        post_mock,
+    ):
+        def telegram_response(url, *, json, timeout):
+            if url.endswith("/sendMessage"):
+                return SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {"ok": True, "result": {"message_id": 201}},
+                )
+
+            def raise_delete_error():
+                raise requests.HTTPError(
+                    response=SimpleNamespace(status_code=400)
+                )
+
+            return SimpleNamespace(
+                raise_for_status=raise_delete_error,
+                json=lambda: {"ok": False},
+            )
+
+        post_mock.side_effect = telegram_response
+
+        with self.assertLogs(level="WARNING") as logs:
+            message_ids = send_telegram_alert(
+                PortfolioAnalysis(telegram_summary="Informe nuevo."),
+                triggered_by_anomaly=False,
+                previous_message_ids=[99, 100],
+            )
+
+        self.assertEqual(message_ids, [201])
+        self.assertEqual(post_mock.call_count, 3)
+        self.assertTrue(any("No se pudo borrar" in line for line in logs.output))
+
+    @patch("daily_report.requests.post")
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "12345"},
+        clear=True,
+    )
+    def test_failed_new_telegram_report_does_not_delete_previous_messages(
+        self,
+        post_mock,
+    ):
+        post_mock.side_effect = [
+            SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {"ok": True, "result": {"message_id": 301}},
+            ),
+            requests.ConnectionError("offline"),
+        ]
+        analysis = PortfolioAnalysis(telegram_summary="palabra " * 1200)
+
+        with self.assertLogs(level="WARNING"):
+            message_ids = send_telegram_alert(
+                analysis,
+                triggered_by_anomaly=False,
+                previous_message_ids=[99, 100],
+            )
+
+        self.assertEqual(message_ids, [])
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertTrue(
+            all(
+                call.args[0].endswith("/sendMessage")
+                for call in post_mock.call_args_list
+            )
+        )
+
+    @patch("daily_report.requests.post")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_telegram_without_credentials_keeps_existing_messages(self, post_mock):
+        message_ids = send_telegram_alert(
+            PortfolioAnalysis(telegram_summary="Informe nuevo."),
+            triggered_by_anomaly=False,
+            previous_message_ids=[99, 100],
+        )
+
+        self.assertEqual(message_ids, [])
+        post_mock.assert_not_called()
 
     def test_gemini_cache_schedule_uses_local_midnight_and_evening_milestones(self):
         cached_data = {
