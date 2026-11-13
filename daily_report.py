@@ -97,8 +97,13 @@ MACRO_FEEDS = (
     ("Investing.com España", "https://es.investing.com/rss/news.rss"),
 )
 TARGET_HOURS = (0, 9, 12, 15, 18, 21)
-AI_ANALYSIS_PROMPT_VERSION = 5
+AI_ANALYSIS_PROMPT_VERSION = 6
 BUY_THE_DIP_SCORE_THRESHOLD = 3
+EURUSD_FLOOR_REFERENCE = 1.1057
+FLOOR_FX_ADJUSTMENT_THRESHOLD_PCT = 2.0
+FLOOR_COST_WEIGHT_THRESHOLD_PCT = 5.0
+FLOOR_COST_LIMIT_PCT = 10.0
+FLOOR_FORWARD_PE_RISK_THRESHOLD_PCT = 25.0
 AI_EXCLUDED_PORTFOLIO_TICKERS = frozenset(
     {"EUNL.DE", "XDWT.DE", "MELI", "MLB1.SG", "MSCIW", "XTDE"}
 )
@@ -602,6 +607,182 @@ PRIMARY_TICKER_MAP.update(
         "NKE.SG": "NKE",
     }
 )
+
+FLOOR_PRICE_CONFIG: dict[str, dict[str, Any]] = {
+    "AAPL": {
+        "name": "Apple",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 280.0,
+        "extreme_floor_eur": 265.0,
+        "criteria": "PER exigente (>30x); exige caída del 12 % hacia la media de 200 sesiones.",
+        "fx_sensitive": True,
+    },
+    "META": {
+        "name": "Meta",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 570.0,
+        "extreme_floor_eur": 515.0,
+        "criteria": "Caída del 20 % desde máximos (PEG 0,83); 515 € coincide con soporte mayor.",
+        "fx_sensitive": True,
+    },
+    "MSFT": {
+        "name": "Microsoft",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 425.0,
+        "extreme_floor_eur": 402.0,
+        "criteria": "Suelo en soporte psicológico de 440 $ (~400 €), Forward PE aproximado de 24x.",
+        "fx_sensitive": True,
+    },
+    "GOOGL": {
+        "name": "Alphabet",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": 285.10,
+        "plan_floor_eur": 248.0,
+        "extreme_floor_eur": 235.0,
+        "criteria": "Mayor satélite (13,2 % de cartera); ampliar solo por debajo del coste medio.",
+        "fx_sensitive": True,
+    },
+    "AMZN": {
+        "name": "Amazon",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": 226.18,
+        "plan_floor_eur": 215.0,
+        "extreme_floor_eur": 202.0,
+        "criteria": "Recibe Saveback mensual; ampliar manualmente solo si cae 10 % bajo coste medio.",
+        "fx_sensitive": True,
+    },
+    "IDR.MC": {
+        "name": "Indra",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 58.0,
+        "extreme_floor_eur": 53.0,
+        "criteria": "PER 17,32x; 58 € se aproxima a SMA50 y 53 € a SMA200.",
+        "fx_sensitive": False,
+    },
+    "TSM": {
+        "name": "TSMC",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 328.0,
+        "extreme_floor_eur": 308.0,
+        "criteria": "Retroceso del 12 % hacia el soporte del hueco alcista del último trimestre.",
+        "fx_sensitive": True,
+    },
+    "VRT": {
+        "name": "Vertiv",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 172.0,
+        "extreme_floor_eur": 155.0,
+        "criteria": "Alta beta y caída desde máximos; validar sobreventa con RSI < 30.",
+        "fx_sensitive": True,
+    },
+    "ASML": {
+        "name": "ASML",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": 1328.53,
+        "plan_floor_eur": 1240.0,
+        "extreme_floor_eur": 1180.0,
+        "criteria": "Pesa el 8,5 % de cartera; no ampliar por encima de 1.240 €.",
+        "fx_sensitive": False,
+    },
+    "UBER": {
+        "name": "Uber",
+        "volatility_category": "stable_big_tech",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 60.0,
+        "extreme_floor_eur": 55.50,
+        "criteria": "Forward PE 15,9x; 55,50 € (~61 $) se aproxima al soporte horizontal de 6 meses.",
+        "fx_sensitive": True,
+    },
+    "GEV": {
+        "name": "GE Vernova",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": 776.22,
+        "plan_floor_eur": 680.0,
+        "extreme_floor_eur": 640.0,
+        "criteria": "Promediar solo con una caída del 12-17 % por debajo del coste de referencia.",
+        "fx_sensitive": True,
+    },
+    "VST": {
+        "name": "Vistra",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": 122.70,
+        "plan_floor_eur": 108.0,
+        "extreme_floor_eur": 100.0,
+        "criteria": "Posición de 6,5 %; ampliar solo si vuelve al suelo de pánico de 110 $ (~100 €).",
+        "fx_sensitive": True,
+    },
+    "AVGO": {
+        "name": "Broadcom",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": 297.25,
+        "plan_floor_eur": 282.0,
+        "extreme_floor_eur": 268.0,
+        "criteria": "Esperar margen por debajo del coste medio de referencia (297,25 €).",
+        "fx_sensitive": True,
+    },
+    "RKLB": {
+        "name": "Rocket Lab",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 39.50,
+        "extreme_floor_eur": 36.0,
+        "criteria": "Alta volatilidad; no entrar a menos de 20 % de máximos.",
+        "fx_sensitive": True,
+    },
+    "MU": {
+        "name": "Micron",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 560.0,
+        "extreme_floor_eur": 520.0,
+        "criteria": "Negocio cíclico de memorias; exige soporte de 580-600 $ (~520-540 €).",
+        "fx_sensitive": True,
+    },
+    "MOD": {
+        "name": "Modine",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": None,
+        "plan_floor_eur": 96.0,
+        "extreme_floor_eur": 89.0,
+        "criteria": "Pequeña capitalización térmica; exige descuento del 18 % para cubrir volatilidad.",
+        "fx_sensitive": True,
+    },
+    "NVDA": {
+        "name": "NVIDIA",
+        "volatility_category": "volatile_chips_energy",
+        "average_cost_reference_eur": 180.26,
+        "plan_floor_eur": 136.0,
+        "extreme_floor_eur": 126.0,
+        "criteria": "Suelo en el objetivo técnico de 139,65 $ (~126 €).",
+        "fx_sensitive": True,
+    },
+}
+
+FLOOR_PRICE_TICKER_ALIASES = {
+    "APC.SG": "AAPL",
+    "FB2A.SG": "META",
+    "MSF.SG": "MSFT",
+    "ABEA.SG": "GOOGL",
+    "AMZ.SG": "AMZN",
+    "IDA.SG": "IDR.MC",
+    "TSFA.SG": "TSM",
+    "ASME.SG": "ASML",
+    "ASML.AS": "ASML",
+    "UT8.SG": "UBER",
+    "Y5C.SG": "GEV",
+    "0V6.SG": "VST",
+    "1YD.SG": "AVGO",
+    "6RJ0.SG": "RKLB",
+    "MTE.SG": "MU",
+    "MDF.SG": "MOD",
+    "NVD.SG": "NVDA",
+}
 
 ANALYST_LABELS = {
     "strong_buy": "Compra fuerte",
@@ -1876,6 +2057,499 @@ def _close_on_or_before(
     closes: list[tuple[date, float]], target: date
 ) -> tuple[date, float] | None:
     return next(((day, value) for day, value in reversed(closes) if day <= target), None)
+
+
+def _floor_config_key(ticker: str | None, primary_ticker: str | None = None) -> str | None:
+    for candidate in (primary_ticker, ticker):
+        if not candidate:
+            continue
+        normalized = candidate.strip().upper()
+        canonical = FLOOR_PRICE_TICKER_ALIASES.get(
+            normalized,
+            PRIMARY_TICKER_MAP.get(normalized, normalized),
+        )
+        canonical = FLOOR_PRICE_TICKER_ALIASES.get(canonical, canonical)
+        if canonical in FLOOR_PRICE_CONFIG:
+            return canonical
+    return None
+
+
+def _next_plan_window(now: datetime) -> tuple[date, int]:
+    local_now = (
+        now.astimezone(TIMEZONE)
+        if now.tzinfo is not None and now.utcoffset() is not None
+        else now.replace(tzinfo=TIMEZONE)
+    )
+    today = local_now.date()
+    for month_offset in range(3):
+        month_start = date(today.year, today.month, 1)
+        month_start = (month_start + timedelta(days=32 * month_offset)).replace(day=1)
+        for day_of_month in (2, 16):
+            candidate = date(month_start.year, month_start.month, day_of_month)
+            if candidate.weekday() == 5:
+                candidate += timedelta(days=2)
+            elif candidate.weekday() == 6:
+                candidate += timedelta(days=1)
+            if candidate >= today:
+                return candidate, (candidate - today).days
+    raise RuntimeError("No se pudo calcular la siguiente ventana 2/16.")
+
+
+def _floor_fortnight_key(now: datetime) -> str:
+    local_now = (
+        now.astimezone(TIMEZONE)
+        if now.tzinfo is not None and now.utcoffset() is not None
+        else now.replace(tzinfo=TIMEZONE)
+    )
+    start_day = "01" if local_now.day <= 15 else "16"
+    return f"{local_now.year:04d}-{local_now.month:02d}-{start_day}"
+
+
+def evaluate_floor_status(
+    ticker: str,
+    current_price_eur: float | None,
+    quote: Quote | None = None,
+    portfolio: list[PortfolioPosition] | None = None,
+    now: datetime | None = None,
+    *,
+    primary_ticker: str | None = None,
+    eurusd: float | None = None,
+    last_manual_shot_quincena: str | None = None,
+    market_data_current: bool | None = None,
+) -> dict[str, Any] | None:
+    canonical_ticker = _floor_config_key(ticker, primary_ticker)
+    if canonical_ticker is None:
+        return None
+    config = FLOOR_PRICE_CONFIG[canonical_ticker]
+    portfolio = portfolio or []
+    now = now or datetime.now(TIMEZONE)
+    quote = quote or Quote()
+    current_price = _finite_float(current_price_eur)
+    position = next(
+        (
+            item
+            for item in portfolio
+            if _floor_config_key(item.asset.ticker) == canonical_ticker
+        ),
+        None,
+    )
+    if market_data_current is None:
+        market_data_current = (
+            _market_data_is_current(
+                quote.market_date,
+                quote.market_timezone,
+                now,
+            )
+            if quote.market_date is not None
+            else current_price is not None
+        )
+    next_plan_date, days_to_next_plan = _next_plan_window(now)
+    fortnight_key = _floor_fortnight_key(now)
+
+    extras = quote.extra
+    high_drawdown = _finite_float(extras.get("pct_from_52w_high"))
+    high_52_week_eur = (
+        current_price / (1 + high_drawdown / 100)
+        if current_price is not None
+        and high_drawdown is not None
+        and high_drawdown > -100
+        else None
+    )
+    sma200_distance = _finite_float(extras.get("pct_vs_sma200"))
+    sma200_eur = (
+        current_price / (1 + sma200_distance / 100)
+        if current_price is not None
+        and sma200_distance is not None
+        and 1 + sma200_distance / 100 > 0
+        else None
+    )
+    support_3m_eur = _finite_float(extras.get("support_3m_eur"))
+    technical_candidates = (
+        [sma200_eur, high_52_week_eur * 0.85 if high_52_week_eur else None]
+        if config["volatility_category"] == "stable_big_tech"
+        else [
+            support_3m_eur,
+            high_52_week_eur * 0.72 if high_52_week_eur else None,
+        ]
+    )
+    technical_values = [
+        value
+        for value in technical_candidates
+        if value is not None and value > 0
+    ]
+    technical_anchor = min(technical_values) if technical_values else None
+
+    fx_change_pct = None
+    fx_adjustment_pct = 0.0
+    fx_factor = 1.0
+    if config["fx_sensitive"] and eurusd is not None and eurusd > 0:
+        fx_change_pct = (eurusd / EURUSD_FLOOR_REFERENCE - 1) * 100
+        if abs(fx_change_pct) > FLOOR_FX_ADJUSTMENT_THRESHOLD_PCT:
+            fx_factor = EURUSD_FLOOR_REFERENCE / eurusd
+            fx_adjustment_pct = (fx_factor - 1) * 100
+
+    configured_plan = config["plan_floor_eur"] * fx_factor
+    configured_extreme = config["extreme_floor_eur"] * fx_factor
+    plan_floor = min(
+        value for value in (configured_plan, technical_anchor) if value is not None
+    )
+    extreme_candidates = [configured_extreme]
+    if technical_anchor is not None:
+        extreme_candidates.append(technical_anchor * 0.92)
+    extreme_floor = min(extreme_candidates)
+    average_cost_eur = None
+    if position is not None:
+        shares = _finite_float(position.asset.shares)
+        investment = _finite_float(position.asset.investment_eur)
+        if shares is not None and shares > 0 and investment is not None:
+            average_cost_eur = investment / shares
+            if not math.isfinite(average_cost_eur) or average_cost_eur <= 0:
+                average_cost_eur = None
+    if average_cost_eur is None or average_cost_eur <= 0:
+        average_cost_eur = _finite_float(config["average_cost_reference_eur"])
+
+    current_weight_pct = None
+    cost_weight_pct = None
+    weight_locked = False
+    if position is not None:
+        values_complete = all(
+            _finite_float(item.current_value_eur) is not None
+            for item in portfolio
+        )
+        total_current_value = sum(
+            _finite_float(item.current_value_eur) or 0 for item in portfolio
+        )
+        position_current_value = _finite_float(position.current_value_eur)
+        if (
+            values_complete
+            and total_current_value > 0
+            and position_current_value is not None
+        ):
+            current_weight_pct = (
+                position_current_value / total_current_value * 100
+            )
+        costs = [
+            _finite_float(item.asset.investment_eur) for item in portfolio
+        ]
+        if all(value is not None for value in costs):
+            total_cost = sum(max(value or 0, 0) for value in costs)
+            position_cost = _finite_float(position.asset.investment_eur)
+            if total_cost > 0 and position_cost is not None:
+                cost_weight_pct = position_cost / total_cost * 100
+        weight_locked = any(
+            weight is not None and weight > FLOOR_COST_WEIGHT_THRESHOLD_PCT
+            for weight in (current_weight_pct, cost_weight_pct)
+        )
+
+    cost_limit_eur = (
+        average_cost_eur * (1 - FLOOR_COST_LIMIT_PCT / 100)
+        if weight_locked and average_cost_eur is not None
+        else None
+    )
+    if cost_limit_eur is not None:
+        plan_floor = min(plan_floor, cost_limit_eur)
+        extreme_floor = min(extreme_floor, cost_limit_eur)
+
+    price_is_valid = current_price is not None and current_price > 0
+    is_fresh = bool(market_data_current and price_is_valid)
+    in_plan_zone = bool(
+        is_fresh and current_price is not None and current_price <= plan_floor
+    )
+    in_extreme_zone = bool(
+        is_fresh and current_price is not None and current_price <= extreme_floor
+    )
+    zone = (
+        "extreme"
+        if in_extreme_zone
+        else "plan"
+        if in_plan_zone
+        else "outside"
+        if is_fresh
+        else "unavailable"
+    )
+    rsi14 = _finite_float(extras.get("rsi14"))
+    forward_pe = _finite_float(quote.forward_pe)
+    trailing_pe = _finite_float(quote.pe_ratio)
+    forward_pe_increase_pct = (
+        (forward_pe / trailing_pe - 1) * 100
+        if forward_pe is not None
+        and trailing_pe is not None
+        and forward_pe >= 0
+        and trailing_pe > 0
+        else None
+    )
+    valuation = fundamental_valuation(quote)
+    thesis_deterioration = (
+        (forward_pe is not None and forward_pe < 0)
+        or (
+            forward_pe_increase_pct is not None
+            and forward_pe_increase_pct > FLOOR_FORWARD_PE_RISK_THRESHOLD_PCT
+        )
+        or valuation["valuation_category"] == "value_trap"
+    )
+    thesis_alert = (in_plan_zone or in_extreme_zone) and thesis_deterioration
+    manual_already_used = last_manual_shot_quincena == fortnight_key
+
+    action_code = "outside_zone"
+    if not price_is_valid:
+        action_code = "missing_price"
+        action = "Sin precio actual válido; no se genera señal."
+    elif not is_fresh:
+        action_code = "stale_quote"
+        action = "Cotización antigua o sin fecha actual; no se genera señal."
+    elif not in_plan_zone:
+        action = "Fuera de la zona de suelo."
+    elif thesis_deterioration:
+        action_code = "thesis_alert"
+        action = (
+            "⚠️ ALERTA DE TESIS: Caída con subida de Forward PE / deterioro de "
+            "beneficios. No comprar hasta revisar resultados"
+        )
+    elif days_to_next_plan <= 5:
+        action_code = "plan"
+        action = (
+            "METE EN PLAN GRATUITO 2/16 (30 € · Ahorra 1 € por cercanía)"
+            if in_extreme_zone
+            else "PROGRAMAR EN PLAN GRATUITO 2/16 (30 € · 0 € comisión)"
+        )
+    elif not in_extreme_zone:
+        action_code = "wait_plan"
+        action = "ESPERAR VENTANA 2/16 (No pagar 1 € · RSI sin pánico)"
+    elif rsi14 is None:
+        action_code = "wait_rsi"
+        action = "Suelo extremo alcanzado pero RSI no disponible: esperar al plan 2/16."
+    elif rsi14 >= 35:
+        action_code = "wait_rsi"
+        action = "En precio extremo pero RSI >= 35 (sin sobreventa real): esperar al plan 2/16."
+    elif manual_already_used:
+        action_code = "manual_limit"
+        action = "Disparo manual ya recomendado esta quincena; esperar a la siguiente ventana."
+    else:
+        action_code = "manual_shot"
+        action = (
+            "DISPARO MANUAL 1 € (Meter 40-50 € para comisión 2,0-2,5 % · "
+            "Máx 1 por quincena)"
+        )
+
+    return {
+        "ticker": canonical_ticker,
+        "name": config["name"],
+        "volatility_category": config["volatility_category"],
+        "average_cost_reference_eur": config["average_cost_reference_eur"],
+        "average_cost_eur": average_cost_eur,
+        "current_price_eur": current_price,
+        "configured_plan_floor_eur": configured_plan,
+        "configured_extreme_floor_eur": configured_extreme,
+        "technical_anchor_eur": technical_anchor,
+        "technical_components_eur": {
+            "sma200": sma200_eur,
+            "high_52_week": high_52_week_eur,
+            "support_3m": support_3m_eur,
+        },
+        "plan_floor_eur": plan_floor,
+        "extreme_floor_eur": extreme_floor,
+        "plan_distance_pct": (
+            (current_price / plan_floor - 1) * 100
+            if current_price is not None and plan_floor > 0
+            else None
+        ),
+        "extreme_distance_pct": (
+            (current_price / extreme_floor - 1) * 100
+            if current_price is not None and extreme_floor > 0
+            else None
+        ),
+        "in_plan_zone": in_plan_zone,
+        "in_extreme_zone": in_extreme_zone,
+        "zone": zone,
+        "criteria": config["criteria"],
+        "market_data_current": is_fresh,
+        "rsi14": rsi14,
+        "rsi14_threshold": 35,
+        "rsi_panic": rsi14 is not None and rsi14 < 30,
+        "next_plan_date": next_plan_date.isoformat(),
+        "days_to_next_plan_window": days_to_next_plan,
+        "fortnight_key": fortnight_key,
+        "weight_current_pct": current_weight_pct,
+        "weight_cost_pct": cost_weight_pct,
+        "weight_limit_applied": weight_locked,
+        "cost_limit_eur": cost_limit_eur,
+        "thesis_deterioration": thesis_deterioration,
+        "thesis_alert": thesis_alert,
+        "forward_pe_increase_pct": forward_pe_increase_pct,
+        "valuation_category": valuation["valuation_category"],
+        "purchase_allowed": (
+            in_plan_zone
+            and not thesis_deterioration
+            and action_code in {"plan", "manual_shot"}
+        ),
+        "manual_shot_used_this_fortnight": manual_already_used,
+        "action_code": action_code,
+        "action": action,
+        "fx_sensitive": config["fx_sensitive"],
+        "eurusd_reference": EURUSD_FLOOR_REFERENCE,
+        "eurusd_current": eurusd if config["fx_sensitive"] else None,
+        "eurusd_change_pct": fx_change_pct,
+        "fx_adjustment_pct": fx_adjustment_pct,
+        "fx_adjustment_applied": fx_factor != 1.0,
+    }
+
+
+def build_floor_statuses(
+    reports: list[StockReport],
+    portfolio: list[PortfolioPosition],
+    now: datetime,
+    *,
+    eurusd: float | None = None,
+    last_manual_shot_quincena: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    if eurusd is None:
+        eurusd = next(
+            (
+                1 / report.quote.fx_rate
+                for report in reports
+                if report.quote.currency == "USD"
+                and report.quote.fx_rate is not None
+                and report.quote.fx_rate > 0
+            ),
+            None,
+        )
+    reports_by_floor_ticker: dict[str, StockReport] = {}
+    for report in reports:
+        canonical = _floor_config_key(
+            report.company.ticker,
+            report.company.primary_ticker,
+        )
+        if canonical is not None:
+            reports_by_floor_ticker[canonical] = report
+    positions_by_floor_ticker = {
+        canonical: position
+        for position in portfolio
+        if (canonical := _floor_config_key(position.asset.ticker)) is not None
+    }
+
+    statuses = {}
+    for canonical in FLOOR_PRICE_CONFIG:
+        report = reports_by_floor_ticker.get(canonical)
+        position = positions_by_floor_ticker.get(canonical)
+        quote = report.quote if report is not None else Quote()
+        current_price = quote.current_price_eur
+        market_data_current = (
+            _market_data_is_current(
+                quote.market_date,
+                quote.market_timezone,
+                now,
+            )
+            if current_price is not None
+            else False
+        )
+        if position is not None:
+            position_price = _finite_float(position.prices_eur.get("Hoy"))
+            position_is_current = _market_data_is_current(
+                position.price_date,
+                position.market_timezone,
+                now,
+            )
+            if position_price is not None and (
+                current_price is None or (position_is_current and not market_data_current)
+            ):
+                current_price = position_price
+                market_data_current = position_is_current
+        status = evaluate_floor_status(
+            canonical,
+            current_price,
+            quote,
+            portfolio,
+            now,
+            eurusd=eurusd,
+            last_manual_shot_quincena=last_manual_shot_quincena,
+            market_data_current=market_data_current,
+        )
+        if status is not None:
+            statuses[canonical] = status
+    limit_floor_manual_shots(statuses)
+    return statuses
+
+
+def _floor_status_for_report(
+    floor_statuses: dict[str, dict[str, Any]] | None,
+    report: StockReport,
+) -> dict[str, Any] | None:
+    canonical = _floor_config_key(
+        report.company.ticker,
+        report.company.primary_ticker,
+    )
+    return floor_statuses.get(canonical) if floor_statuses and canonical else None
+
+
+def _floor_status_for_position(
+    floor_statuses: dict[str, dict[str, Any]] | None,
+    position: PortfolioPosition,
+) -> dict[str, Any] | None:
+    canonical = _floor_config_key(position.asset.ticker)
+    return floor_statuses.get(canonical) if floor_statuses and canonical else None
+
+
+def limit_floor_manual_shots(
+    floor_statuses: dict[str, dict[str, Any]],
+) -> None:
+    candidates = [
+        (ticker, status)
+        for ticker, status in floor_statuses.items()
+        if status.get("action_code") == "manual_shot"
+    ]
+    if len(candidates) < 2:
+        return
+    selected_ticker, _ = min(
+        candidates,
+        key=lambda item: (
+            item[1].get("extreme_distance_pct")
+            if isinstance(item[1].get("extreme_distance_pct"), (int, float))
+            else math.inf,
+            item[0],
+        ),
+    )
+    for ticker, status in candidates:
+        if ticker == selected_ticker:
+            continue
+        status["action_code"] = "manual_limit"
+        status["manual_shot_used_this_fortnight"] = True
+        status["purchase_allowed"] = False
+        status["action"] = (
+            f"Disparo manual reservado para {selected_ticker} esta quincena; "
+            "esperar a la siguiente ventana."
+        )
+
+
+def _floor_analysis_summary(
+    status: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if (
+        status is None
+        or not status.get("market_data_current")
+        or not (status.get("in_plan_zone") or status.get("thesis_alert"))
+    ):
+        return None
+    fields = (
+        "ticker",
+        "current_price_eur",
+        "plan_floor_eur",
+        "extreme_floor_eur",
+        "zone",
+        "rsi14",
+        "rsi14_threshold",
+        "rsi_panic",
+        "next_plan_date",
+        "days_to_next_plan_window",
+        "weight_current_pct",
+        "weight_cost_pct",
+        "weight_limit_applied",
+        "thesis_alert",
+        "forward_pe_increase_pct",
+        "purchase_allowed",
+        "action_code",
+        "action",
+    )
+    return {field: status.get(field) for field in fields}
 
 
 def load_portfolio_transactions(path: Path) -> list[PortfolioTransaction]:
@@ -3226,6 +3900,7 @@ def _mentions_ai_excluded_position(text: str) -> bool:
 def _analysis_inputs(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
+    floor_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     reports_by_ticker = {
         report.company.ticker: report
@@ -3282,6 +3957,9 @@ def _analysis_inputs(
                 else [],
                 **quote.extra,
                 **fundamental_valuation(quote),
+                "price_floor": _floor_analysis_summary(
+                    _floor_status_for_position(floor_statuses, position)
+                ),
             }
         )
 
@@ -3319,6 +3997,9 @@ def _analysis_inputs(
                     for item in report.headlines[:MAX_HEADLINES]
                 ],
                 **fundamental_valuation(quote),
+                "price_floor": _floor_analysis_summary(
+                    _floor_status_for_report(floor_statuses, report)
+                ),
             }
         )
 
@@ -3602,6 +4283,7 @@ FUENTES Y REGLAS
 1b. Usa portfolio_events para priorizar revisiones, no como orden automatica.
 1c. deterministic_signals contiene señales cuantitativas calculadas fuera del modelo. No cambies sus scores, umbrales ni candidatas. Usa portfolio_risk_metrics para contextualizar volatilidad, drawdown, ratios, beta/correlaciones, exposición de divisa/sector, holdings disponibles y stress tests; explica su cobertura y metodología, sin presentar estimaciones como predicciones.
 1d. Usa obligatoriamente valuation_combination, valuation_verdict, valuation_interpretation y forward_pe cuando estén en DATOS. La matriz PER+PEG es un diagnóstico orientativo, no una recomendación ni una predicción. Prioriza forward_pe positivo sobre pe (PER TTM); usa el TTM solo si falta el estimado e indica qué PER se utilizó (valuation_per_type). El PEG de Yahoo representa crecimiento estimado a largo plazo cuando está disponible. Antes de inferir valor, considera beneficios TTM atípicos: prefiere el PER estimado, señala la limitación si solo hay TTM y no declares ganga/careta con datos incompletos. Compara múltiplos con empresas del mismo sector (valuation_sector); no compares directamente sectores distintos. "Sin datos suficientes" no debe convertirse en una valoración favorable o desfavorable.
+1e. price_floor y deterministic_signals.price_floors son señales informativas, no órdenes: respeta purchase_allowed y market_data_current; con thesis_alert=true, no recomiendes comprar sin revisar resultados. Nunca afirmes que se ejecutó una compra.
 2. Revisa global_market_radar y NOTICIAS para contextualizar mercados mundiales y EE. UU.: bancos centrales, tipos, Fed, inflacion, fiscalidad/regulacion, resultados y guias empresariales, informes, riesgos geopoliticos, miedo/aversion al riesgo y sentimiento (incluido VIX si aparece en macro_indicators). Distingue hechos de inferencias. No completes con conocimiento no verificado si las fuentes no hablan de un tema.
 3. En position_analysis incluye exactamente una entrada por ticker elegible de DATOS.portfolio. Indica ticker, nombre, accion (MANTENER, COMPRAR o VENDER) y motivo de su movimiento de hoy. Relaciona variacion, titulares, resultados, sector o macro solo cuando haya evidencia. Copia exactamente daily_change_pct de DATOS; si falta, dilo y no atribuyas causalidad sin fuente. Si no hay catalizador, indicalo expresamente.
 4. Riesgos solo de posiciones elegibles de cartera y limitaciones de datos que las afecten. No analices como posiciones ni menciones en recomendaciones EUNL.DE, XDWT.DE, MELI, MSCIW o XTDE; se excluyen deliberadamente.
@@ -3615,7 +4297,7 @@ FUENTES Y REGLAS
 METODO
 1. Diagnostica concentracion y riesgos comunes solo entre posiciones elegibles en DATOS.portfolio; no uses las excluidas para porcentajes ni conclusiones.
 2. Revisa catalizadores de los proximos 14 dias: resultados, ingresos/BPA frente a consenso, guia, revisiones y eventos regulatorios o macro. Verifica fechas; resultados en 7 dias o menos suponen riesgo binario.
-3. Evalua candidatas de seguimiento por caidas (52 semanas, SMA200, variacion diaria), PEG/PER y valuation_combination/valuation_verdict, catalizadores y riesgo/recompensa. Da contexto favorable a "La Ganga Ideal" y "Crecimiento a Buen Precio"; advierte contra "Trampa de Valor", "Sobrevaloración Clara" y "Burbuja / Euforia". Un buy on the dip requiere mas evidencia que una caida.
+3. Evalua candidatas de seguimiento por caidas (52 semanas, SMA200, variacion diaria), PEG/PER, diagnóstico de valoración, catalizadores y riesgo/recompensa. Usa price_floor para contextualizar niveles, sin llamar oportunidad a una señal bloqueada o antigua. Favorece con cautela "La Ganga Ideal" y "Crecimiento a Buen Precio"; advierte contra trampa, sobrevaloracion y burbuja.
 4. VENDER solo con tesis rota o deterioro demostrado; una caida no basta. No propongas apalancados, inversos, derivados ni criptomonedas.
 5. Aclara cobertura, antiguedad y limitaciones de feeds/indicadores, y di si no se puede atribuir el movimiento diario a noticias concretas.
 
@@ -5088,6 +5770,30 @@ def analyze_portfolio(
         )
 
     now_local = now_utc.astimezone(TIMEZONE)
+    provided_floor_statuses = (
+        deterministic_signals.get("price_floors")
+        if isinstance(deterministic_signals, dict)
+        else None
+    )
+    if isinstance(provided_floor_statuses, dict):
+        floor_statuses: dict[str, dict[str, Any]] = provided_floor_statuses
+    else:
+        floor_statuses = build_floor_statuses(
+            analysis_reports,
+            analysis_portfolio,
+            now_local,
+            last_manual_shot_quincena=(
+                _last_manual_shot_quincena_for_market_data(AGENT_STATE_FILE)
+            ),
+        )
+    deterministic_signals = {
+        **(deterministic_signals or {}),
+        "price_floors": {
+            ticker: summary
+            for ticker, status in floor_statuses.items()
+            if (summary := _floor_analysis_summary(status)) is not None
+        },
+    }
     financial_news = [
         item
         for item in collect_financial_news(COMPANIES, now_local.date())
@@ -5096,7 +5802,11 @@ def analyze_portfolio(
     global_market_radar = collect_market_radar(now_local)
     vix_data = fetch_vix_data()
     base_inputs = enrich_inputs(
-        _analysis_inputs(analysis_reports, analysis_portfolio),
+        _analysis_inputs(
+            analysis_reports,
+            analysis_portfolio,
+            floor_statuses,
+        ),
         analysis_reports,
         analysis_portfolio,
         now_local,
@@ -5660,18 +6370,39 @@ def enrich_reports_with_rsi14(reports: list[StockReport]) -> None:
         KeyError,
     ) as error:
         logging.warning(
-            "No se pudo calcular RSI(14) para la lista de seguimiento: %s: %s",
+            "No se pudo calcular RSI(14) ni soporte de 3 meses: %s: %s",
             type(error).__name__,
             error,
         )
         for report in reports:
             report.quote.extra["rsi14"] = None
+            report.quote.extra["support_3m_eur"] = None
         return
 
     for report in reports:
         ticker = ticker_by_report[id(report)]
         closes = _intraday_close_series(history, ticker) if ticker else None
         report.quote.extra["rsi14"] = calculate_rsi14(closes)
+        lows = _intraday_close_series(history, ticker, "Low") if ticker else None
+        if isinstance(lows, pd.Series):
+            numeric_lows = pd.to_numeric(lows, errors="coerce").dropna()
+            numeric_lows = numeric_lows[
+                numeric_lows.map(math.isfinite) & (numeric_lows > 0)
+            ]
+            support_3m = (
+                float(numeric_lows.min()) if not numeric_lows.empty else None
+            )
+            if support_3m is not None and report.quote.currency == "USD":
+                fx_rate = report.quote.fx_rate
+                if fx_rate is None or fx_rate <= 0:
+                    try:
+                        fx_rate = get_fx_rate("USD")
+                    except ValueError:
+                        fx_rate = None
+                support_3m = support_3m * fx_rate if fx_rate else None
+        else:
+            support_3m = None
+        report.quote.extra["support_3m_eur"] = support_3m
         if report.quote.extra["rsi14"] is None:
             logging.warning(
                 "No se pudo calcular RSI(14) para %s por falta de 15 cierres válidos.",
@@ -5679,7 +6410,10 @@ def enrich_reports_with_rsi14(reports: list[StockReport]) -> None:
             )
 
 
-def score_buy_the_dip(report: StockReport) -> dict[str, Any]:
+def score_buy_the_dip(
+    report: StockReport,
+    floor_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     quote = report.quote
     extra = quote.extra
     drawdown = _finite_float(extra.get("pct_from_52w_high"))
@@ -5718,6 +6452,35 @@ def score_buy_the_dip(report: StockReport) -> dict[str, Any]:
     )
     signals["valuation_attractive"] = valuation_adjustment > 0
     signals["valuation_risk"] = valuation_adjustment < 0
+    floor_adjustment = 0
+    floor_reason = ""
+    if floor_status is not None:
+        signals["floor_actionable"] = bool(
+            floor_status.get("action_code") == "manual_shot"
+            and floor_status.get("purchase_allowed")
+        )
+        signals["floor_risk"] = bool(
+            floor_status.get("thesis_alert")
+            or floor_status.get("action_code") == "manual_limit"
+        )
+        if floor_status.get("thesis_alert"):
+            floor_adjustment = -3
+            floor_reason = (
+                "alerta de tesis: no comprar hasta revisar el deterioro fundamental"
+            )
+        elif (
+            floor_status.get("action_code") == "manual_shot"
+            and floor_status.get("in_extreme_zone")
+            and floor_status.get("purchase_allowed")
+        ):
+            floor_adjustment = 1
+            floor_reason = (
+                "suelo extremo alcanzado con fundamentales y concentración habilitados"
+            )
+        elif floor_status.get("in_plan_zone"):
+            floor_reason = floor_status.get("action") or (
+                "en zona de precio planificada; esperar la ventana 2/16"
+            )
     earnings_risk = days_to_earnings is not None and days_to_earnings <= 3
     score = (
         2 * signals["drawdown_52w"]
@@ -5725,6 +6488,7 @@ def score_buy_the_dip(report: StockReport) -> dict[str, Any]:
         + signals["below_sma200_with_upside"]
         + signals["peg_attractive"]
         + valuation_adjustment
+        + floor_adjustment
         - 2 * earnings_risk
     )
     details = {
@@ -5737,6 +6501,8 @@ def score_buy_the_dip(report: StockReport) -> dict[str, Any]:
         "earnings_risk": earnings_risk,
         "valuation": valuation,
         "valuation_adjustment": valuation_adjustment,
+        "price_floor": _floor_analysis_summary(floor_status),
+        "floor_adjustment": floor_adjustment,
     }
     explanations = {
         "drawdown_52w": (
@@ -5779,13 +6545,14 @@ def score_buy_the_dip(report: StockReport) -> dict[str, Any]:
             }
             else ""
         ),
+        "price_floor": floor_reason,
     }
     return {
         "ticker": report.company.ticker,
         "name": report.company.name,
         "score": int(score),
         "threshold": BUY_THE_DIP_SCORE_THRESHOLD,
-        "max_score": 6,
+        "max_score": 7 if floor_status is not None else 6,
         "signals": signals,
         "details": details,
         **valuation,
@@ -5799,6 +6566,7 @@ def buy_the_dip_candidates(
     portfolio: list[PortfolioPosition],
     now: datetime,
     threshold: int = BUY_THE_DIP_SCORE_THRESHOLD,
+    floor_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     held_tickers = {position.asset.ticker for position in portfolio}
     candidates = []
@@ -5817,7 +6585,10 @@ def buy_the_dip_candidates(
         ):
             continue
         seen_tickers.add(ticker)
-        candidate = score_buy_the_dip(report)
+        candidate = score_buy_the_dip(
+            report,
+            _floor_status_for_report(floor_statuses, report),
+        )
         if candidate["score"] >= threshold:
             candidates.append(candidate)
     return sorted(
@@ -6726,6 +7497,34 @@ def _alerts_today_for_market_data(
     return alerts
 
 
+def _last_manual_shot_quincena_for_market_data(
+    state_path: Path,
+) -> str | None:
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as error:
+        logging.warning(
+            "No se pudo leer el estado de la última aportación manual %s: %s",
+            state_path,
+            error,
+        )
+        return None
+    marker = state.get("last_manual_shot_quincena") if isinstance(state, dict) else None
+    if not isinstance(marker, str):
+        return None
+    try:
+        marker_date = date.fromisoformat(marker)
+    except ValueError:
+        logging.warning("Marcador de quincena de aportación manual no válido.")
+        return None
+    if marker_date.day not in {1, 16}:
+        logging.warning("Marcador de quincena de aportación manual no válido.")
+        return None
+    return marker
+
+
 def _build_quant_summary(
     reports: list[StockReport],
     portfolio: list[PortfolioPosition],
@@ -6829,6 +7628,7 @@ def build_market_data(
     generated_at: datetime | None = None,
     alerts_today: list[dict[str, Any]] | None = None,
     vix: dict[str, float | None] | None = None,
+    floor_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     generated_at = generated_at or datetime.now(TIMEZONE)
     chart_data = chart_data or DashboardCharts()
@@ -6841,6 +7641,11 @@ def build_market_data(
         if report.company.ticker
     }
     reports_by_name = {report.company.name.casefold(): report for report in reports}
+    floor_statuses = floor_statuses or build_floor_statuses(
+        reports,
+        portfolio,
+        generated_at,
+    )
 
     def headline_data(headline: Headline) -> dict[str, Any]:
         label, signal = classify_sentiment(headline.sentiment)
@@ -6890,6 +7695,10 @@ def build_market_data(
                 "target_mean_eur": quote.target_mean_eur,
                 "fundamentals": quote.extra,
                 **fundamental_valuation(quote),
+                "price_floor": _floor_status_for_report(
+                    floor_statuses,
+                    report,
+                ),
                 "warning": quote.warning,
                 "headlines": [
                     headline_data(headline) for headline in report.headlines
@@ -7040,6 +7849,10 @@ def build_market_data(
                     else None
                 ),
                 "warning": position.warning or quote.warning,
+                "price_floor": _floor_status_for_position(
+                    floor_statuses,
+                    position,
+                ),
             }
         )
 
@@ -7161,7 +7974,9 @@ def build_market_data(
             reports,
             portfolio,
             generated_at,
+            floor_statuses=floor_statuses,
         ),
+        "price_floors": floor_statuses,
         "risk_metrics": chart_data.risk_metrics,
         "macro_indicators": {
             "vix": {
@@ -8616,6 +9431,73 @@ def _buy_the_dip_section_html(candidates: list[dict[str, Any]]) -> str:
     )
 
 
+def _floor_status_html(status: dict[str, Any] | None) -> str:
+    if status is None:
+        return ""
+    plan_text = (
+        f'{_format_number(status["plan_floor_eur"])} €'
+        if status.get("plan_floor_eur") is not None
+        else "—"
+    )
+    extreme_text = (
+        f'{_format_number(status["extreme_floor_eur"])} €'
+        if status.get("extreme_floor_eur") is not None
+        else "—"
+    )
+    current_text = (
+        f'{_format_number(status["current_price_eur"])} €'
+        if status.get("current_price_eur") is not None
+        else "—"
+    )
+    zone_labels = {
+        "extreme": "Suelo extremo",
+        "plan": "Suelo plan",
+        "outside": "Fuera de zona",
+        "unavailable": "Sin cotización actual",
+    }
+    zone = zone_labels.get(status.get("zone"), "Sin datos")
+    schedule = (
+        f'{status["next_plan_date"]} ({status["days_to_next_plan_window"]} días)'
+        if status.get("next_plan_date") is not None
+        and status.get("days_to_next_plan_window") is not None
+        else "—"
+    )
+    notes = []
+    if status.get("weight_limit_applied"):
+        notes.append("Candado: peso superior al 5 % por valor o coste.")
+    if status.get("thesis_alert"):
+        notes.append("Alerta de tesis: revisar beneficios antes de actuar.")
+    if status.get("fx_adjustment_applied"):
+        notes.append(
+            "Suelos USD ajustados por EUR/USD "
+            f'{_format_number(status.get("eurusd_current"), 4)} '
+            f'({_format_number(status.get("fx_adjustment_pct"), 2)} %).'
+        )
+    note_html = (
+        f'<p class="floor-status-notes">{_esc(" ".join(notes))}</p>'
+        if notes
+        else ""
+    )
+    return (
+        '<details class="floor-status">'
+        f'<summary>Precios suelo · {_esc(zone)}</summary>'
+        '<dl>'
+        f'<div><dt>Actual</dt><dd>{_esc(current_text)}</dd></div>'
+        f'<div><dt>Plan</dt><dd>{_esc(plan_text)}</dd></div>'
+        f'<div><dt>Extremo</dt><dd>{_esc(extreme_text)}</dd></div>'
+        f'<div><dt>RSI(14) · umbral &lt;35</dt>'
+        f'<dd>{_esc(_format_number(status.get("rsi14"), 1))}'
+        f'{" · pánico" if status.get("rsi_panic") else ""}</dd></div>'
+        f'<div><dt>Próxima aportación 2/16</dt><dd>{_esc(schedule)}</dd></div>'
+        '</dl>'
+        f'<p class="floor-status-action">{_esc(status.get("action") or "")}</p>'
+        f'<p>{_esc(status.get("criteria") or "")}</p>'
+        f"{note_html}"
+        '<p class="floor-status-disclaimer">Señal informativa; no ejecuta órdenes '
+        'ni constituye asesoramiento financiero.</p></details>'
+    )
+
+
 def render_dashboard(
     reports: list[StockReport],
     generated_at: datetime | None = None,
@@ -8625,14 +9507,24 @@ def render_dashboard(
     market_events: list[MarketEvent] | None = None,
     portfolio_activity: list[PortfolioActivity] | None = None,
     vix: dict[str, float | None] | None = None,
+    floor_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now(TIMEZONE)
     portfolio = portfolio or []
     portfolio_activity = portfolio_activity or []
     chart_data = chart_data or DashboardCharts()
     market_events = market_events or []
-    
-    dip_candidates = buy_the_dip_candidates(reports, portfolio, generated_at)
+    floor_statuses = floor_statuses or build_floor_statuses(
+        reports,
+        portfolio,
+        generated_at,
+    )
+    dip_candidates = buy_the_dip_candidates(
+        reports,
+        portfolio,
+        generated_at,
+        floor_statuses=floor_statuses,
+    )
     dip_candidates_html = _buy_the_dip_section_html(dip_candidates)
 
     def quote_is_current(report: StockReport) -> bool:
@@ -8730,6 +9622,8 @@ def render_dashboard(
         pe_text = _format_number(quote.pe_ratio)
         forward_pe_text = _format_number(quote.forward_pe)
         valuation = fundamental_valuation(quote)
+        floor_status = _floor_status_for_report(floor_statuses, report)
+        floor_status_html = _floor_status_html(floor_status)
         valuation_class = (
             "text-bullish"
             if valuation["valuation_category"]
@@ -8843,6 +9737,7 @@ def render_dashboard(
             f'<small>PER usado: {_esc(valuation["valuation_per_type"] or "Sin datos")}</small>'
             f'<details><summary>Interpretación y sector</summary>'
             f'<p>{_esc(valuation["valuation_interpretation"])}</p></details></div>'
+            f'{floor_status_html}'
             f'<div><span title="Variación respecto al máximo de las últimas 52 semanas">Desde máximo 52 sem.</span>'
             f'<strong data-live-high class="{from_high_class}">{_esc(from_high_text)}</strong></div>'
             "</div>"
@@ -9111,6 +10006,7 @@ def render_dashboard(
         f'<th scope="row" data-label="Activo"><div class="portfolio-asset-line">'
         f'<span>{_esc(position.asset.name)}'
         f'<span class="portfolio-asset-ticker">{_esc(position.asset.ticker)}</span></span>'
+        f'{_floor_status_html(_floor_status_for_position(floor_statuses, position))}'
         f'{portfolio_risk_popover(position)}</div></th>'
         f'<td data-label="Posición">{_format_number(position.asset.shares, 6)}</td>'
         f'<td data-label="Inversión base">'
@@ -9493,6 +10389,16 @@ def render_dashboard(
     .valuation-diagnosis details {{ margin-top: 6px; }}
     .valuation-diagnosis summary {{ color: var(--blue); cursor: pointer; font-size: 10px; }}
     .valuation-diagnosis details p {{ margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }}
+    .metrics .floor-status {{ grid-column: 1 / -1; border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 9px; min-width: 0; }}
+    .floor-status summary {{ color: var(--blue); cursor: pointer; font-size: 11px; font-weight: 700; }}
+    .floor-status dl {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; margin: 8px 0; }}
+    .floor-status dl div {{ border: 1px solid var(--line); border-radius: 7px; padding: 6px; }}
+    .floor-status dt {{ color: var(--muted); font-size: 10px; }}
+    .floor-status dd {{ font-size: 11px; margin: 3px 0 0; overflow-wrap: anywhere; }}
+    .floor-status > p {{ color: var(--muted); font-size: 10px; line-height: 1.4; margin: 6px 0 0; }}
+    .floor-status > .floor-status-action {{ color: var(--text); font-weight: 700; }}
+    .floor-status > .floor-status-notes {{ color: var(--orange); }}
+    .floor-status > .floor-status-disclaimer {{ font-style: italic; }}
     .stock-card h3 {{ font-size: 13px; margin: 17px 0 7px; }}
     .headlines {{ margin: 0; padding-left: 17px; }} .headline {{ padding: 0 0 9px 1px; }}
     .headline a {{ font-size: 13px; }} .headline-meta {{ display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }}
@@ -9817,6 +10723,14 @@ def main() -> int:
     enrich_reports_with_rsi14(reports)
     portfolio = fetch_portfolio(assets, reports=reports)
     generated_at = datetime.now(TIMEZONE)
+    floor_statuses = build_floor_statuses(
+        reports,
+        portfolio,
+        generated_at,
+        last_manual_shot_quincena=_last_manual_shot_quincena_for_market_data(
+            AGENT_STATE_FILE,
+        ),
+    )
     chart_data = collect_chart_data(
         reports,
         portfolio,
@@ -9828,7 +10742,9 @@ def main() -> int:
             reports,
             portfolio,
             generated_at,
+            floor_statuses=floor_statuses,
         ),
+        "price_floors": floor_statuses,
         "portfolio_risk_metrics": chart_data.risk_metrics,
     }
     ai_disabled = args.no_ai or os.getenv("AI_ENABLED", "true").strip().lower() in {
@@ -9858,6 +10774,7 @@ def main() -> int:
             market_events=market_events,
             portfolio_activity=portfolio_activity,
             vix=vix,
+            floor_statuses=floor_statuses,
         )
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9879,6 +10796,7 @@ def main() -> int:
                 generated_at,
             ),
             vix=vix,
+            floor_statuses=floor_statuses,
         )
         data_path = Path(args.data_output)
         data_path.parent.mkdir(parents=True, exist_ok=True)

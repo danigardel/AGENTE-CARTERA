@@ -18,6 +18,7 @@ from daily_report import (
     BUY_THE_DIP_SCORE_THRESHOLD,
     CONFIDENCE_HIGH_SESSIONS,
     CONFIDENCE_MEDIUM_SESSIONS,
+    FLOOR_PRICE_CONFIG,
     PEAK_WINDOW,
     REWARD_RISK_RATIO,
     Company,
@@ -64,6 +65,8 @@ from daily_report import (
     _alerts_today_for_market_data,
     _previous_analysis_memory,
     _analysis_inputs,
+    _next_plan_window,
+    limit_floor_manual_shots,
     _reduce_analysis_context,
     _triage_portfolio_events,
     _has_urgent_portfolio_trigger,
@@ -72,6 +75,7 @@ from daily_report import (
     analyze_portfolio,
     build_analysis_prompt,
     build_market_data,
+    build_floor_statuses,
     build_request_body,
     classify_peg,
     classify_sentiment,
@@ -84,6 +88,8 @@ from daily_report import (
     external_ideas_html,
     executive_summary,
     fundamental_valuation,
+    evaluate_floor_status,
+    enrich_reports_with_rsi14,
     parse_external_ideas,
     post_gemini,
     send_telegram_alert,
@@ -846,6 +852,247 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("valuation: document.getElementById('valuation-filter')", html)
         self.assertIn("card.dataset.valuationCategory", html)
 
+    def test_floor_configuration_has_expected_assets_and_aliases(self):
+        self.assertEqual(
+            set(FLOOR_PRICE_CONFIG),
+            {
+                "AAPL",
+                "META",
+                "MSFT",
+                "GOOGL",
+                "AMZN",
+                "IDR.MC",
+                "TSM",
+                "VRT",
+                "ASML",
+                "UBER",
+                "GEV",
+                "VST",
+                "AVGO",
+                "RKLB",
+                "MU",
+                "MOD",
+                "NVDA",
+            },
+        )
+        self.assertEqual(
+            evaluate_floor_status(
+                "NVD.SG",
+                100,
+                now=datetime(2026, 10, 10, 12, 0, tzinfo=TIMEZONE),
+            )["ticker"],
+            "NVDA",
+        )
+        self.assertEqual(
+            evaluate_floor_status(
+                "IDA.SG",
+                60,
+                now=datetime(2026, 10, 10, 12, 0, tzinfo=TIMEZONE),
+            )["ticker"],
+            "IDR.MC",
+        )
+
+    def test_floor_engine_limits_manual_shot_to_deepest_discount_per_fortnight(self):
+        statuses = {
+            "NVDA": {
+                "action_code": "manual_shot",
+                "extreme_distance_pct": -12,
+            },
+            "ASML": {
+                "action_code": "manual_shot",
+                "extreme_distance_pct": -8,
+            },
+        }
+
+        limit_floor_manual_shots(statuses)
+
+        self.assertEqual(statuses["NVDA"]["action_code"], "manual_shot")
+        self.assertEqual(statuses["ASML"]["action_code"], "manual_limit")
+        self.assertIn("NVDA", statuses["ASML"]["action"])
+
+    def test_floor_technical_anchors_fx_threshold_and_cost_limit(self):
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=TIMEZONE)
+        quote = Quote(
+            currency="USD",
+            extra={
+                "pct_vs_sma200": -20,
+                "pct_from_52w_high": -10,
+                "rsi14": 29,
+            },
+        )
+        status = evaluate_floor_status(
+            "APC.SG",
+            100,
+            quote,
+            now=now,
+            eurusd=1.2,
+        )
+        self.assertAlmostEqual(status["technical_components_eur"]["sma200"], 125)
+        self.assertAlmostEqual(
+            status["technical_anchor_eur"],
+            min(125, (100 / 0.9) * 0.85),
+        )
+        self.assertTrue(status["fx_adjustment_applied"])
+        self.assertAlmostEqual(
+            status["configured_plan_floor_eur"],
+            280 * 1.1057 / 1.2,
+        )
+
+        no_fx_change = evaluate_floor_status(
+            "APC.SG",
+            500,
+            now=now,
+            eurusd=1.12,
+        )
+        self.assertFalse(no_fx_change["fx_adjustment_applied"])
+        self.assertEqual(no_fx_change["configured_plan_floor_eur"], 280)
+
+        position = PortfolioPosition(
+            PortfolioAsset("ASML", "ASME.SG", 1, 1000, "EUR"),
+            prices_eur={"Hoy": 850},
+            current_value_eur=850,
+        )
+        concentrated = evaluate_floor_status(
+            "ASML.AS",
+            850,
+            Quote(extra={"rsi14": 29}),
+            [position],
+            now,
+            market_data_current=True,
+        )
+        self.assertTrue(concentrated["weight_limit_applied"])
+        self.assertEqual(concentrated["cost_limit_eur"], 900)
+        self.assertEqual(concentrated["plan_floor_eur"], 900)
+        self.assertTrue(concentrated["purchase_allowed"])
+        self.assertEqual(concentrated["action_code"], "manual_shot")
+
+    def test_floor_schedule_moves_weekend_to_monday_and_thesis_blocks_manual_buy(self):
+        next_date, days = _next_plan_window(
+            datetime(2025, 3, 15, 12, 0, tzinfo=TIMEZONE)
+        )
+        self.assertEqual(next_date, date(2025, 3, 17))
+        self.assertEqual(days, 2)
+
+        status = evaluate_floor_status(
+            "NVDA",
+            100,
+            Quote(
+                forward_pe=-1,
+                extra={"rsi14": 20},
+            ),
+            now=datetime(2026, 10, 10, 12, 0, tzinfo=TIMEZONE),
+        )
+        self.assertTrue(status["thesis_alert"])
+        self.assertFalse(status["purchase_allowed"])
+        self.assertEqual(status["action_code"], "thesis_alert")
+        self.assertIn("No comprar", status["action"])
+
+    def test_floor_thesis_blocks_only_forward_pe_rises_above_twenty_five_percent(self):
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=TIMEZONE)
+        at_threshold = evaluate_floor_status(
+            "NVDA",
+            100,
+            Quote(forward_pe=25, pe_ratio=20, extra={"rsi14": 20}),
+            now=now,
+        )
+        above_threshold = evaluate_floor_status(
+            "NVDA",
+            100,
+            Quote(forward_pe=25.01, pe_ratio=20, extra={"rsi14": 20}),
+            now=now,
+        )
+        value_trap = evaluate_floor_status(
+            "NVDA",
+            100,
+            Quote(pe_ratio=10, peg_ratio=2, extra={"rsi14": 20}),
+            now=now,
+        )
+        self.assertFalse(at_threshold["thesis_alert"])
+        self.assertTrue(above_threshold["thesis_alert"])
+        self.assertTrue(value_trap["thesis_alert"])
+
+    @patch("daily_report.yf.download")
+    def test_floor_support_uses_three_month_low_and_converts_usd_to_eur(
+        self,
+        download_mock,
+    ):
+        closes = pd.Series(range(100, 116), dtype=float)
+        download_mock.return_value = pd.DataFrame(
+            {
+                "Close": closes,
+                "Low": closes - 10,
+            }
+        )
+        report = StockReport(
+            Company("Vertiv", "VRT"),
+            quote=Quote(currency="USD", fx_rate=0.8),
+        )
+
+        enrich_reports_with_rsi14([report])
+
+        self.assertEqual(report.quote.extra["support_3m_eur"], 72)
+        self.assertEqual(report.quote.extra["rsi14"], 100)
+
+    def test_floor_status_is_exported_to_market_data_html_and_analysis_inputs(self):
+        generated_at = datetime(2026, 11, 10, 12, 0, tzinfo=TIMEZONE)
+        report = StockReport(
+            Company("NVIDIA", "NVD.SG", "NVDA"),
+            quote=Quote(
+                current_price_eur=80,
+                market_date=generated_at.date(),
+                market_timezone=TIMEZONE.key,
+                extra={"rsi14": 30},
+            ),
+        )
+        position = PortfolioPosition(
+            PortfolioAsset("NVIDIA", "NVD.SG", 1, 100, "EUR"),
+            prices_eur={"Hoy": 80},
+            current_value_eur=80,
+            price_date=generated_at.date(),
+            market_timezone=TIMEZONE.key,
+        )
+        floor_statuses = build_floor_statuses(
+            [report],
+            [position],
+            generated_at,
+            eurusd=1.1057,
+        )
+        self.assertIn("NVDA", floor_statuses)
+        inputs = _analysis_inputs([report], [position], floor_statuses)
+        self.assertEqual(inputs["portfolio"][0]["price_floor"]["ticker"], "NVDA")
+        self.assertEqual(inputs["watchlist"][0]["price_floor"]["ticker"], "NVDA")
+
+        payload = build_market_data(
+            [report],
+            [position],
+            generated_at=generated_at,
+            floor_statuses=floor_statuses,
+        )
+        self.assertIn("NVDA", payload["price_floors"])
+        self.assertEqual(
+            payload["watchlist"][0]["price_floor"]["plan_floor_eur"],
+            floor_statuses["NVDA"]["plan_floor_eur"],
+        )
+        html = render_dashboard(
+            [report],
+            generated_at=generated_at,
+            portfolio=[position],
+            floor_statuses=floor_statuses,
+        )
+        self.assertIn("Precios suelo", html)
+        self.assertIn("Próxima aportación 2/16", html)
+        self.assertIn("no ejecuta órdenes", html)
+        self.assertIn(
+            '"price_floors"',
+            build_analysis_prompt(
+                {
+                    **inputs,
+                    "deterministic_signals": {"price_floors": floor_statuses},
+                },
+                generated_at,
+            ),
+        )
+
     def test_buy_the_dip_rewards_attractive_and_penalizes_risky_valuations(self):
         base_extra = {
             "pct_from_52w_high": -25,
@@ -885,6 +1132,46 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(trap_score["score"], 2)
         self.assertEqual(trap_score["details"]["valuation_adjustment"], -2)
         self.assertIn("Trampa de Valor", " ".join(trap_score["reasons"]))
+
+    def test_buy_the_dip_uses_floor_signal_and_blocks_thesis_deterioration(self):
+        report = StockReport(
+            Company("Dip candidate", "DIP"),
+            quote=Quote(
+                market_date=date(2026, 11, 10),
+                market_timezone=TIMEZONE.key,
+                forward_pe=10,
+                peg_ratio=0.8,
+                extra={
+                    "pct_from_52w_high": -25,
+                    "rsi14": 30,
+                    "pct_vs_sma200": -8,
+                    "analyst_upside_pct": 20,
+                },
+            ),
+        )
+        floor = {
+            "in_plan_zone": True,
+            "in_extreme_zone": True,
+            "purchase_allowed": True,
+            "thesis_alert": False,
+            "weight_limit_applied": False,
+            "action_code": "manual_shot",
+        }
+        candidate = score_buy_the_dip(report, floor)
+        self.assertEqual(candidate["details"]["floor_adjustment"], 1)
+        self.assertIn("suelo extremo", " ".join(candidate["reasons"]))
+        self.assertEqual(candidate["max_score"], 7)
+
+        floor.update(
+            {
+                "thesis_alert": True,
+                "purchase_allowed": False,
+                "action_code": "thesis_alert",
+            }
+        )
+        warned = score_buy_the_dip(report, floor)
+        self.assertEqual(warned["details"]["floor_adjustment"], -3)
+        self.assertIn("alerta de tesis", " ".join(warned["reasons"]))
 
     def test_buy_the_dip_score_applies_earnings_penalty_and_held_filter(self):
         report = StockReport(

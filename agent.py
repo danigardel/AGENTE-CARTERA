@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,15 +18,19 @@ from daily_report import (
     PORTFOLIO_ACTIVITY_FILE,
     PortfolioPosition,
     StockReport,
+    _telegram_message_chunks,
     _http_status,
+    _floor_config_key,
     _market_data_is_current,
     analyze_portfolio,
+    build_floor_statuses,
     buy_the_dip_candidates,
     collect_reports,
     collect_chart_data,
     enrich_reports_with_rsi14,
     fundamental_valuation,
     fetch_portfolio,
+    limit_floor_manual_shots,
     load_portfolio_activity,
     load_portfolio_transactions,
     portfolio_assets_from_transactions,
@@ -38,8 +42,29 @@ REALERT_STEP_PCT = 1.0
 STATE_FILE = Path(os.getenv("AGENT_STATE_PATH", "agent_state.json"))
 
 
-def _empty_state(local_date: str) -> dict[str, Any]:
-    return {"date": local_date, "alerts": {}, "dip_candidates": {}}
+def _empty_state(
+    local_date: str,
+    last_manual_shot_quincena: str | None = None,
+) -> dict[str, Any]:
+    state = {
+        "date": local_date,
+        "alerts": {},
+        "dip_candidates": {},
+        "floor_alerts_today": {},
+    }
+    if last_manual_shot_quincena:
+        state["last_manual_shot_quincena"] = last_manual_shot_quincena
+    return state
+
+
+def _validated_quincena_marker(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        marker_date = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if marker_date.day in {1, 16} else None
 
 
 def load_agent_state(path: Path, local_date: str) -> dict[str, Any]:
@@ -54,7 +79,13 @@ def load_agent_state(path: Path, local_date: str) -> dict[str, Any]:
         logging.warning("El estado del agente no es un objeto JSON; se reinicia.")
         return _empty_state(local_date)
     if value.get("date") != local_date:
-        return _empty_state(local_date)
+        previous_manual_shot = _validated_quincena_marker(
+            value.get("last_manual_shot_quincena")
+        )
+        return _empty_state(
+            local_date,
+            previous_manual_shot,
+        )
     alerts = value.get("alerts")
     if not isinstance(alerts, dict):
         logging.warning("Las alertas guardadas del agente no son válidas; se reinician.")
@@ -105,10 +136,34 @@ def load_agent_state(path: Path, local_date: str) -> dict[str, Any]:
             "last_score": item["last_score"],
             "sent_at": item.get("sent_at"),
         }
+    floor_alerts_today = value.get("floor_alerts_today", {})
+    if not isinstance(floor_alerts_today, dict):
+        logging.warning("Las alertas de suelo guardadas no son válidas; se reinician.")
+        floor_alerts_today = {}
+    if any(
+        not isinstance(ticker, str) or not isinstance(item, dict)
+        for ticker, item in floor_alerts_today.items()
+    ):
+        logging.warning("Las alertas de suelo guardadas no son válidas; se reinician.")
+        floor_alerts_today = {}
+    normalized_floor_alerts = {
+        ticker: dict(item) for ticker, item in floor_alerts_today.items()
+    }
+    last_manual_shot_quincena = _validated_quincena_marker(
+        value.get("last_manual_shot_quincena")
+    )
+    if value.get("last_manual_shot_quincena") and last_manual_shot_quincena is None:
+        logging.warning("El marcador de quincena de aportación manual no es válido.")
     return {
         "date": local_date,
         "alerts": normalized_alerts,
         "dip_candidates": normalized_dip_candidates,
+        "floor_alerts_today": normalized_floor_alerts,
+        **(
+            {"last_manual_shot_quincena": last_manual_shot_quincena}
+            if last_manual_shot_quincena
+            else {}
+        ),
     }
 
 
@@ -117,6 +172,7 @@ def find_dip_candidate_alerts(
     reports: list[StockReport],
     state: dict[str, Any],
     now: datetime,
+    floor_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     held_tickers = {position.asset.ticker for position in portfolio}
     active_reports = [
@@ -135,6 +191,7 @@ def find_dip_candidate_alerts(
         portfolio,
         now,
         BUY_THE_DIP_SCORE_THRESHOLD,
+        floor_statuses=floor_statuses,
     )
     candidates_by_ticker = {
         candidate["ticker"]: candidate for candidate in candidates
@@ -216,6 +273,7 @@ def find_price_alerts(
     reports: list[StockReport],
     state: dict[str, Any],
     now: datetime,
+    floor_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     state_alerts = state.get("alerts", {})
     alerts: list[dict[str, Any]] = []
@@ -250,6 +308,19 @@ def find_price_alerts(
                 "valuation_verdict",
             )
         }
+
+    def floor_alert_fields(ticker: str, name: str | None = None) -> dict[str, Any]:
+        if not floor_statuses:
+            return {}
+        report = reports_by_ticker.get(ticker) or (
+            reports_by_name.get(name.casefold()) if name else None
+        )
+        canonical = _floor_config_key(
+            ticker,
+            report.company.primary_ticker if report is not None else None,
+        )
+        status = floor_statuses.get(canonical) if canonical else None
+        return {"price_floor": status} if status is not None else {}
 
     def should_alert(ticker: str, daily_change: float) -> bool:
         previous = state_alerts.get(ticker)
@@ -299,6 +370,7 @@ def find_price_alerts(
                     "portfolio_rise" if daily_change > 0 else "portfolio_drop"
                 ),
                 **valuation_alert_fields(ticker, position.asset.name),
+                **floor_alert_fields(ticker, position.asset.name),
             }
         )
     for report in reports:
@@ -329,6 +401,28 @@ def find_price_alerts(
                 "current_price_eur": quote.current_price_eur,
                 "category": "watchlist_rise",
                 **valuation_alert_fields(ticker, report.company.name),
+                **floor_alert_fields(ticker, report.company.name),
+            }
+        )
+    return alerts
+
+
+def find_floor_alerts(
+    floor_statuses: dict[str, dict[str, Any]],
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    tracked = state.setdefault("floor_alerts_today", {})
+    alerts = []
+    for ticker, status in floor_statuses.items():
+        if not status.get("market_data_current") or not status.get("in_plan_zone"):
+            continue
+        if ticker in tracked:
+            continue
+        alerts.append(
+            {
+                **status,
+                "ticker": ticker,
+                "category": "price_floor",
             }
         )
     return alerts
@@ -362,6 +456,7 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
         ("portfolio_rise", "🟢 SUBIDAS EN CARTERA:"),
         ("watchlist_rise", "🚀 SUBIDAS EN SEGUIMIENTO:"),
         ("dip_candidate", "🎯 CANDIDATAS BUY THE DIP:"),
+        ("price_floor", "🧱 PRECIOS SUELO:"),
     )
     lines: list[str] = []
     for category, heading in headings:
@@ -372,6 +467,22 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
             lines.append("")
         lines.append(heading)
         for alert in grouped:
+            if category == "price_floor":
+                current_price = alert.get("current_price_eur")
+                current_text = (
+                    f"{current_price:.2f} €"
+                    if isinstance(current_price, (int, float))
+                    and not isinstance(current_price, bool)
+                    and math.isfinite(current_price)
+                    else "sin precio"
+                )
+                lines.append(
+                    f"- {alert['name']} ({alert['ticker']}): {current_text} · "
+                    f"plan {alert['plan_floor_eur']:.2f} € · "
+                    f"extremo {alert['extreme_floor_eur']:.2f} € · "
+                    f"{alert['action']}"
+                )
+                continue
             if category == "dip_candidate":
                 score = alert["score"]
                 max_score = alert.get("max_score", 6)
@@ -417,25 +528,34 @@ def send_price_alerts(alerts: list[dict[str, Any]]) -> bool:
                 and alert.get("valuation_verdict")
                 else ""
             )
+            floor_status = alert.get("price_floor")
+            floor_label = (
+                f' · Suelo plan {floor_status["plan_floor_eur"]:.2f} €'
+                if isinstance(floor_status, dict)
+                and floor_status.get("in_plan_zone")
+                and isinstance(floor_status.get("plan_floor_eur"), (int, float))
+                else ""
+            )
             lines.append(
                 f"- {alert['name']} ({alert['ticker']}): "
-                f"{daily_change:+.2f}% | {price_text}{valuation_label}"
+                f"{daily_change:+.2f}% | {price_text}{valuation_label}{floor_label}"
             )
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={"chat_id": chat_id, "text": "\n".join(lines)},
-            timeout=(10, 20),
-        )
-        response.raise_for_status()
-    except requests.RequestException as error:
-        status = _http_status(error)
-        logging.warning(
-            "No se pudo enviar el aviso determinista de Telegram (%s%s).",
-            type(error).__name__,
-            f", HTTP {status}" if status is not None else "",
-        )
-        return False
+    for chunk in _telegram_message_chunks("\n".join(lines)):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": chunk},
+                timeout=(10, 20),
+            )
+            response.raise_for_status()
+        except requests.RequestException as error:
+            status = _http_status(error)
+            logging.warning(
+                "No se pudo enviar el aviso determinista de Telegram (%s%s).",
+                type(error).__name__,
+                f", HTTP {status}" if status is not None else "",
+            )
+            return False
     return True
 
 
@@ -493,20 +613,44 @@ def run_agent(
     portfolio = fetch_portfolio(assets)
     enrich_reports_with_rsi14(reports)
     state = load_agent_state(state_path, local_date)
+    floor_statuses = build_floor_statuses(
+        reports,
+        portfolio,
+        now,
+        last_manual_shot_quincena=state.get("last_manual_shot_quincena"),
+    )
+    limit_floor_manual_shots(floor_statuses)
     risk_data = collect_chart_data(
         reports,
         portfolio,
         risk_only=True,
     ).risk_metrics
-    price_alerts = find_price_alerts(portfolio, reports, state, now)
+    price_alerts = find_price_alerts(
+        portfolio,
+        reports,
+        state,
+        now,
+        floor_statuses=floor_statuses,
+    )
     dip_candidates = buy_the_dip_candidates(
         reports,
         portfolio,
         now,
         BUY_THE_DIP_SCORE_THRESHOLD,
+        floor_statuses=floor_statuses,
     )
-    dip_alerts = find_dip_candidate_alerts(portfolio, reports, state, now)
-    alerts = [*price_alerts, *dip_alerts]
+    dip_alerts = find_dip_candidate_alerts(
+        portfolio,
+        reports,
+        state,
+        now,
+        floor_statuses=floor_statuses,
+    )
+    floor_alerts = find_floor_alerts(
+        floor_statuses,
+        state,
+    )
+    alerts = [*price_alerts, *dip_alerts, *floor_alerts]
     if alerts and send_price_alerts(alerts):
         for alert in alerts:
             if alert["category"] == "dip_candidate":
@@ -515,6 +659,15 @@ def run_agent(
                     "sent_at": now.astimezone(TIMEZONE).isoformat(),
                 }
                 continue
+            if alert["category"] == "price_floor":
+                state["floor_alerts_today"][alert["ticker"]] = {
+                    "zone": alert["zone"],
+                    "action_code": alert["action_code"],
+                    "sent_at": now.astimezone(TIMEZONE).isoformat(),
+                }
+                if alert["action_code"] == "manual_shot":
+                    state["last_manual_shot_quincena"] = alert["fortnight_key"]
+                continue
             state["alerts"][alert["ticker"]] = {
                 "last_alerted_pct": alert["daily_change_pct"],
                 "sent_at": now.astimezone(TIMEZONE).isoformat(),
@@ -522,6 +675,19 @@ def run_agent(
                 "current_price_eur": alert["current_price_eur"],
                 "category": alert["category"],
             }
+        floor_statuses = build_floor_statuses(
+            reports,
+            portfolio,
+            now,
+            last_manual_shot_quincena=state.get("last_manual_shot_quincena"),
+        )
+        dip_candidates = buy_the_dip_candidates(
+            reports,
+            portfolio,
+            now,
+            BUY_THE_DIP_SCORE_THRESHOLD,
+            floor_statuses=floor_statuses,
+        )
     save_agent_state(state_path, state)
     analyze_portfolio(
         reports,
@@ -530,6 +696,7 @@ def run_agent(
         send_telegram=True,
         deterministic_signals={
             "dip_candidates": dip_candidates,
+            "price_floors": floor_statuses,
             "portfolio_risk_metrics": risk_data,
         },
     )

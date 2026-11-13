@@ -20,6 +20,8 @@ La página reúne:
 - Un análisis opcional de cartera con una cadena Gemini → Groq → OpenRouter y proveedores adicionales deshabilitados.
 - Alertas de anomalías intradía con niveles ATR y variación diaria.
 - Alertas deterministas de Telegram para caídas/subidas de cartera y subidas de watchlist, sin cotizaciones stale.
+- Motor de Precios Suelo para 17 activos: niveles de plan/extremos con anclas técnicas, ajuste EUR/USD, límite por concentración, RSI y revisión de tesis.
+- Alertas diarias de cruce de suelo y máximo un disparo manual sugerido por quincena; no se ejecutan órdenes.
 - Una consola interactiva Gemini con contexto y memoria de cartera.
 - Una agenda de eventos corporativos y un radar de noticias macroeconómicas.
 
@@ -97,7 +99,8 @@ Flujo de ejecución de alto nivel:
 4. analyze_portfolio() reúne contexto, prueba la cadena configurada, valida la respuesta estructurada y conserva el último análisis correcto en caché.
 5. El agente reactivo analiza triggers urgentes nuevos (soporte ATR cruzado o variación diaria >= 4 %) y fuerza una consulta una vez por ticker y fecha local. La memoria temporal y el triaje de eventos se añaden al prompt; su tamaño puede reducirse sin quitar posiciones ni memoria.
 6. collect_chart_data() reúne las series intradía e históricas para heatmaps, sparklines y gráficos de cartera y referencias.
-7. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
+7. El motor de Precios Suelo integra cotización vigente, SMA200/máximo de 52 semanas o Low de tres meses, conversión EUR/USD y pesos de cartera. Publica el diagnóstico en HTML/JSON, Buy the Dip, análisis IA y Telegram.
+8. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
 
 `agente_interactivo.py` carga claves desde el entorno o el archivo local ignorado `GEMINI_API_KEY.txt`, usa la actividad/cache existentes y permite consultar la cartera, refrescar precios ATR, actualizar el radar y conversar con Gemini conservando hasta 20 turnos.
 
@@ -124,7 +127,7 @@ Agente de consola basado en `cmd.Cmd`, separado del generador del dashboard. Com
 
 tests\test_daily_report.py
 
-Suite unittest para noticias, cartera, Gemini, caché, triggers, Telegram, gráficas, generación HTML, screener, estado stale y datos de alertas.
+Suite unittest para noticias, cartera, Gemini, caché, triggers, Telegram, gráficas, generación HTML, screener, estado stale, datos de alertas y motor de Precios Suelo.
 
 tests\test_ai_providers.py y tests\test_agent.py
 

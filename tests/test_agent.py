@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from agent import (
     find_dip_candidate_alerts,
+    find_floor_alerts,
     find_price_alerts,
     load_agent_state,
     run_agent,
@@ -457,6 +458,71 @@ class AutonomousAgentTests(unittest.TestCase):
         self.assertEqual(state["alerts"]["EX"]["last_alerted_pct"], -2.5)
         self.assertNotIn("last_drop_pct", state["alerts"]["EX"])
 
+    def test_floor_alerts_deduplicate_daily_and_telegram_includes_action(self):
+        state = {"floor_alerts_today": {}}
+        floor = {
+            "ticker": "NVDA",
+            "name": "NVIDIA",
+            "market_data_current": True,
+            "in_plan_zone": True,
+            "zone": "extreme",
+            "action_code": "manual_shot",
+            "action": "DISPARO MANUAL 1 €",
+            "current_price_eur": 120,
+            "plan_floor_eur": 136,
+            "extreme_floor_eur": 126,
+            "fortnight_key": "2026-10-01",
+        }
+        alerts = find_floor_alerts({"NVDA": floor}, state)
+        self.assertEqual([item["category"] for item in alerts], ["price_floor"])
+        state["floor_alerts_today"]["NVDA"] = {"action_code": "manual_shot"}
+        self.assertEqual(find_floor_alerts({"NVDA": floor}, state), [])
+
+        with patch("agent.requests.post") as post_mock, patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"},
+            clear=True,
+        ):
+            post_mock.return_value.raise_for_status.return_value = None
+            price_alert = {
+                "ticker": "NVDA",
+                "name": "NVIDIA",
+                "daily_change_pct": -3.2,
+                "current_price_eur": 120,
+                "category": "portfolio_drop",
+                "price_floor": {
+                    "in_plan_zone": True,
+                    "plan_floor_eur": 136,
+                },
+            }
+            self.assertTrue(send_price_alerts([*alerts, price_alert]))
+        message = post_mock.call_args.kwargs["json"]["text"]
+        self.assertIn("PRECIOS SUELO", message)
+        self.assertIn("NVIDIA (NVDA): 120.00 €", message)
+        self.assertIn("plan 136.00 €", message)
+        self.assertIn("DISPARO MANUAL", message)
+        self.assertIn("Suelo plan 136.00 €", message)
+
+    def test_daily_agent_state_resets_floor_alerts_but_preserves_quincena_shot(self):
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "agent_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "date": "2026-10-25",
+                        "alerts": {},
+                        "dip_candidates": {},
+                        "floor_alerts_today": {"NVDA": {"action_code": "manual_shot"}},
+                        "last_manual_shot_quincena": "2026-10-16",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = load_agent_state(state_path, "2026-10-26")
+
+        self.assertEqual(state["floor_alerts_today"], {})
+        self.assertEqual(state["last_manual_shot_quincena"], "2026-10-16")
+        self.assertEqual(state["alerts"], {})
 
 if __name__ == "__main__":
     unittest.main()
