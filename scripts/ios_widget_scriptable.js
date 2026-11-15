@@ -148,13 +148,14 @@ function addSignal(parent, signal) {
   const row = parent.addStack();
   row.layoutHorizontally();
   row.centerAlignContent();
-  const badge = row.addText(signalLabel(signal));
+  const badgeStack = row.addStack();
+  badgeStack.backgroundColor = COLORS.panel;
+  badgeStack.cornerRadius = 6;
+  badgeStack.setPadding(4, 7, 4, 7);
+  const badge = badgeStack.addText(signalLabel(signal));
   badge.font = Font.boldSystemFont(9);
   badge.textColor = signalColor(signal);
   badge.lineLimit = 1;
-  badge.backgroundColor = COLORS.panel;
-  badge.cornerRadius = 6;
-  badge.setPadding(4, 7, 4, 7);
 }
 
 function addCacheNote(parent, fromCache) {
