@@ -1,15 +1,12 @@
 ESTADO Y ARQUITECTURA DEL PROYECTO
 
-Fecha del informe: 1 de noviembre de 2026
+Fecha del informe: 15 de noviembre de 2026
 Repositorio: danigardel/AGENTE-CARTERA
-Directorio de trabajo: C:\Users\danig\Desktop\agente
-Rama: main
-Último commit publicado observado: 26daa9d - Amplío el radar macro y deduplico titulares.
 
 
 1. PROPÓSITO GENERAL
 
-Este proyecto genera un radar bursátil como página web estática y ofrece dos superficies de agente: un análisis de cartera programado/reactivo y un agente interactivo en consola. Un CronJob externo activa el workflow del agente cada 30 minutos; cuando termina correctamente, se genera sin IA y publica el dashboard. Ambos workflows conservan disparadores manuales y persisten los datos operativos del agente en la rama `data`.
+Este proyecto genera y publica un radar bursátil como página web estática. GitHub Actions ejecuta el análisis de cartera y las alertas; el dashboard se actualiza al finalizar correctamente. El Asistente IA web es un servicio independiente de Cloud Run. El uso normal es desde GitHub Pages en navegador o móvil, sin iniciar procesos en un ordenador personal.
 
 La página reúne:
 
@@ -22,7 +19,7 @@ La página reúne:
 - Alertas deterministas de Telegram para caídas/subidas de cartera y subidas de watchlist, sin cotizaciones stale.
 - Motor de Precios Suelo para 17 activos: niveles de plan/extremos con anclas técnicas, ajuste EUR/USD, límite por concentración, RSI y revisión de tesis.
 - Alertas diarias de cruce de suelo y máximo un disparo manual sugerido por quincena; no se ejecutan órdenes.
-- Una consola interactiva Gemini con contexto y memoria de cartera.
+- Un Asistente IA web con autenticación Google y consultas de solo lectura.
 - Una agenda de eventos corporativos y un radar de noticias macroeconómicas.
 - Un widget nativo opcional para iPhone mediante Scriptable que consume `market_data.json`.
 
@@ -35,26 +32,33 @@ Widget iOS (Scriptable)
 - Instalación: instalar Scriptable desde App Store; crear un script nuevo y pegar el contenido de `scripts/ios_widget_scriptable.js`; ejecutarlo una vez para obtener la caché inicial; añadir el widget Scriptable a la pantalla de inicio; en **Editar widget**, seleccionar el script creado y el tamaño deseado. Al tocarlo abre GitHub Pages.
 - El script solicita actualización cada 15 minutos, pero iOS controla la frecuencia efectiva según batería y actividad.
 
+Asistente web opcional
+
+- El dashboard suma una cuarta pestaña de chat. El frontend estático no contiene claves y conserva las vistas Mercado, Cartera y Seguimiento.
+- `chat_service/` implementa un backend independiente para Cloud Run con Antigravity SDK, streaming SSE, validación de ID tokens de Google y autorización de una dirección de correo exacta.
+- Las herramientas del SDK solo leen campos publicados de `market_data.json`; no habilitan navegación, subagentes, archivos, workspace ni escritura. El mensaje y hasta 12 turnos previos se envían a Gemini; el servicio no persiste el historial en una base de datos propia.
+- La publicación requiere configurar `CHAT_API_URL` y `CHAT_GOOGLE_CLIENT_ID` como variables de Actions, además del proyecto Cloud Run, el cliente OAuth, `CHAT_ALLOWED_EMAIL` y el secreto de Secret Manager `GEMINI_API_KEY`. Sin esos requisitos, la pestaña informa que el servicio no está configurado.
+- La autenticación limita el endpoint de consultas, pero no cambia que la cartera y `market_data.json` ya son públicos en Pages. El despliegue no se ha realizado desde este repositorio.
+
 
 2. STACK TECNOLÓGICO Y CONFIGURACIÓN
 
 Entorno observado
 
-- Sistema operativo de desarrollo: Windows.
-- Python local: 3.14.4.
-- El workflow de GitHub Actions configura Python 3.12.
+- GitHub Actions ejecuta los workflows de generación y análisis con Python 3.12.
+- Cloud Run aloja el backend del Asistente IA web.
 - Zona horaria predeterminada de los informes: Europe/Madrid, configurable con REPORT_TIMEZONE.
 
 Dependencias
 
 Declaradas en requirements.txt:
 
-Paquete             Versión local observada    Uso
-feedparser          6.0.14                     Lectura de feeds RSS.
-requests            2.34.2                     Solicitudes HTTP, traducción y APIs IA compatibles con OpenAI.
-vaderSentiment      3.3.2                      Heurística de sentimiento de titulares.
-yfinance            1.7.0                      Cotizaciones, datos históricos y fundamentales públicos de Yahoo Finance.
-pandas              3.0.6                      Manipulación de series y datos financieros; dependencia utilizada por yfinance.
+Paquete             Uso
+feedparser          Lectura de feeds RSS.
+requests            Solicitudes HTTP, traducción y APIs IA compatibles con OpenAI.
+vaderSentiment      Heurística de sentimiento de titulares.
+yfinance            Cotizaciones, datos históricos y fundamentales públicos de Yahoo Finance.
+pandas              Manipulación de series y datos financieros; dependencia utilizada por yfinance.
 
 En el navegador se carga D3.js 7.9.0 desde CDN para dibujar los SVG. Por tanto, los gráficos requieren conexión para descargar esa biblioteca, aunque el documento HTML ya generado sea estático.
 
@@ -65,12 +69,11 @@ Configuración y credenciales
 - `ai_providers.py` implementa la API OpenAI-compatible con `requests`, JSON estricto, backoff con jitter, `Retry-After`, circuit breaker persistente y salvaguarda gratuita de OpenRouter. GitHub Models fue retirado el 30/07/2026; no es una opción.
 - `ai_config.json` o `AI_CONFIG_PATH` configuran endpoints, modelos, límites TPM, perfiles `full`/`reduced` y el orden de proveedores; nunca guardar secretos allí. Hydrogen usa Interactions API con `thinking_level: high`, `max_output_tokens: 65536` y `store: false`; los fallbacks Gemini conservan `generateContent`. Se mide el prompt con `countTokens`; sobre 200.000 tokens se sintetiza en bloques con un fallback y se espera 65 segundos antes del análisis final. Si falla el conteo, se estima conservadoramente por bytes UTF-8. No se habilita Google Search Grounding. Los límites Free exactos de Groq y el nivel gratuito/modelo de Mistral figuran como sin verificar.
 - El perfil reducido limita inicialmente noticias a 25, titulares macro a 40, watchlist a 15 empresas y resúmenes a 200 caracteres; ante HTTP 413 se reduce una vez más. Los topes de 18.000–20.000 caracteres para respaldos se estiman en 4.500–5.000 tokens (caracteres/4) y no exceden los máximos configurados.
-- OpenRouter Free puede escoger modelos distintos y no tiene contexto o cuota universal. Solo se admiten `openrouter/free` y modelos `:free`, salvo `OPENROUTER_ALLOW_PAID=true` local explícito; no se habilita esa variable en Actions.
+- OpenRouter Free puede escoger modelos distintos y no tiene contexto o cuota universal. Solo se admiten `openrouter/free` y modelos `:free`; no se habilitan modelos de pago en Actions.
 - Los proveedores de respaldo reciben datos de cartera. Revisar términos y privacidad de cada proveedor, en especial la configuración de OpenRouter para modelos gratuitos.
-- La consola puede leer `GEMINI_API_KEY.txt` si `GEMINI_API_KEY` no está definida; el archivo está excluido de Git.
 - `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` son secretos opcionales del bot de análisis IA. `TELEGRAM_ALERTS_BOT_TOKEN` y `TELEGRAM_ALERTS_CHAT_ID` configuran el bot opcional de alertas rápidas; si falta el par secundario, las alertas usan el bot principal. Ambos pares se proporcionan al workflow `portfolio_agent.yml`; nunca se guardan en la caché ni en el dashboard.
 - La narrativa IA guarda en `gemini_cache.json` los IDs de sus fragmentos por fecha local. Una narrativa nueva borra los fragmentos previos del mismo día solo después de enviarse correctamente; las narrativas de días anteriores permanecen en Telegram como historial. Si no hay credenciales o falla el envío, no se borran los mensajes anteriores.
-- REPORT_TIMEZONE permite cambiar la zona horaria y PORTFOLIO_TRANSACTIONS_CSV indicar un CSV de operaciones.
+- REPORT_TIMEZONE permite cambiar la zona horaria de los informes.
 - `.gitignore` excluye cachés, estado del agente, bytecode y archivos locales de credenciales. La rama pública `data` contiene la última narrativa IA y estado de alertas/cortacircuitos; nunca claves.
 - Las librerías y versiones exactas instaladas pueden variar entre máquinas; requirements.txt define rangos, no un lockfile.
 
@@ -102,7 +105,7 @@ Archivo central. Contiene configuración, modelos de datos, obtención de datos,
 
 Flujo de ejecución de alto nivel:
 
-1. `main()` lee los argumentos CLI, carga la cartera fija o un CSV, recopila reportes y construye HTML/JSON. Con `--no-ai` no consulta Gemini y muestra el último análisis válido con aviso de antigüedad.
+1. El workflow del dashboard carga la cartera y el historial de operaciones publicados, recopila reportes y construye HTML/JSON. El análisis programado se ejecuta en el workflow independiente; la generación del dashboard no necesita una nueva llamada IA.
 2. collect_reports() ejecuta en paralelo la descarga de titulares y cotizaciones; luego traduce los titulares secuencialmente con una pausa de 0,2 s entre peticiones reales.
 3. fetch_portfolio() obtiene precios actuales e históricos, calcula cierres y rendimientos por periodo y los valores de la cartera.
 4. analyze_portfolio() reúne contexto, prueba la cadena configurada, valida la respuesta estructurada y conserva el último análisis correcto en caché.
@@ -110,8 +113,6 @@ Flujo de ejecución de alto nivel:
 6. collect_chart_data() reúne las series intradía e históricas para heatmaps, sparklines y gráficos de cartera y referencias.
 7. El motor de Precios Suelo integra cotización vigente, SMA200/máximo de 52 semanas o Low de tres meses, conversión EUR/USD y pesos de cartera. Publica el diagnóstico en HTML/JSON, Buy the Dip, análisis IA y Telegram.
 8. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
-
-`agente_interactivo.py` carga claves desde el entorno o el archivo local ignorado `GEMINI_API_KEY.txt`, usa la actividad/cache existentes y permite consultar la cartera, refrescar precios ATR, actualizar el radar y conversar con Gemini conservando hasta 20 turnos. El modo opcional `--sdk` utiliza Antigravity SDK con streaming y herramientas limitadas a consultas de solo lectura sobre cartera, posiciones, última narrativa válida y radar cargado. No habilita herramientas de sistema, subagentes ni espacios de trabajo y no se usa en los workflows. Es experimental, opera con una clave por sesión y no reproduce los perfiles de payload ni los parámetros de generación del modo habitual; la rotación y el fallback existentes permanecen intactos al ejecutar la consola sin `--sdk`.
 
 `agent.py` ejecuta la automatización reactiva: carga cartera y watchlist, consulta precios y envía un único mensaje con caídas/subidas de cartera y subidas de watchlist cuando superan `ALERT_DROP_PCT`. Ignora datos stale, excluye tickers ya presentes en cartera de la categoría de seguimiento, deduplica por ticker/fecha y reavisa si el movimiento se intensifica en la misma dirección al menos 1 punto porcentual.
 
@@ -130,10 +131,6 @@ Responsabilidades representativas dentro del archivo:
 - SORT_SCRIPT, PORTFOLIO_SCRIPT y CHARTS_SCRIPT: filtros del screener, controles de la cartera, heatmaps y gráficos D3 del cliente.
 - render_dashboard(): serialización segura de datos e integración del HTML, CSS y JavaScript.
 
-agente_interactivo.py
-
-Agente de consola basado en `cmd.Cmd`, separado del generador del dashboard. El modo habitual comparte las funciones de cartera, radar, parseo de claves, rotación y fallback de Gemini de `daily_report.py`. El modo optativo `--sdk` añade streaming y herramientas de consulta con permisos limitados, sin reemplazar el modo habitual ni modificar la publicación estática.
-
 tests\test_daily_report.py
 
 Suite unittest para noticias, cartera, Gemini, caché, triggers, Telegram, gráficas, generación HTML, screener, estado stale, datos de alertas y motor de Precios Suelo.
@@ -144,7 +141,8 @@ Prueban reintentos, Retry-After, circuit breaker, salvaguarda gratuita de OpenRo
 
 README.md
 
-Documenta ejecución del dashboard y de la consola, triggers intradía, alertas, fuentes y límites funcionales.
+Documenta el acceso web/móvil, el despliegue del Asistente IA en Cloud Run,
+triggers intradía, alertas, fuentes y límites funcionales.
 
 requirements.txt
 
@@ -168,8 +166,8 @@ En la raíz existen dashboard.html e index.html. Son resultados generados, no la
 Datos y cartera
 
 - La lista de seguimiento tiene alrededor de 55 activos; su fuente de verdad es COMPANIES en daily_report.py.
-- La cartera fija está en PORTFOLIO. También se admite un CSV local que sustituye la cartera fija; no la complementa.
-- El CSV no conecta con un broker. La reconstrucción por operaciones estima posiciones abiertas usando coste medio, y no calcula impuestos ni ganancias realizadas.
+- La cartera fija está en PORTFOLIO y el historial publicado en `portfolio_activity.json` alimenta la reconstrucción FIFO.
+- El extracto bancario original no debe publicarse. El archivo público de actividad solo debe contener operaciones filtradas necesarias para la cartera.
 - La moneda de visualización de cartera es EUR. Los activos USD se convierten con datos históricos USD/EUR cuando están disponibles.
 - Los periodos comparativos son 1D, 1W, 1M, 6M y 1Y. MAX compara el valor actual con la inversión base configurada.
 - Las curvas históricas de cartera revalorizan las posiciones actuales con precios pasados; no reconstruyen los flujos históricos de entradas y salidas, salvo la estimación CSV independiente.
@@ -188,8 +186,8 @@ Noticias y análisis IA
 - La memoria temporal del prompt solo usa campos estructurados y validados de la caché anterior; no desplaza los datos actuales.
 - Los triggers de análisis ignoran posiciones ya alertadas ese día y no se ejecutan mientras la caché contiene un warning/failure_warning. Los tickers se guardan junto a la fecha local en la caché de Gemini.
 - Las alertas deterministas usan el umbral configurable `ALERT_DROP_PCT`: caídas y subidas de cartera, y solo subidas de watchlist fuera de cartera. Ignoran precios stale, agrupan por categoría y reavisan tras un movimiento adicional de 1 punto porcentual en la misma dirección. `agent_state.json` usa `last_alerted_pct` y migra los registros heredados `last_drop_pct`.
-- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT; la consola/directo puede enviar análisis IA mediante `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, mientras que `agent.py` desactiva esos avisos narrativos para evitar duplicados. Las alertas deterministas usan `TELEGRAM_ALERTS_BOT_TOKEN`/`TELEGRAM_ALERTS_CHAT_ID`, con fallback al par principal si el secundario no está completo.
-- `market_data.json` mantiene compatibilidad con datos antiguos y añade opcionalmente `analysis.provider_used`, `analysis.is_stale` y `alerts_today`; React valida esos campos y muestra avisos de análisis desactualizado.
+- `action_signal` admite HOLD, WATCH, REBALANCE y RISK_ALERT. `agent.py` desactiva los avisos narrativos de Telegram para evitar duplicados. Las alertas deterministas usan `TELEGRAM_ALERTS_BOT_TOKEN`/`TELEGRAM_ALERTS_CHAT_ID`, con fallback al par principal si el secundario no está completo.
+- `market_data.json` mantiene compatibilidad con datos antiguos y añade opcionalmente `analysis.provider_used`, `analysis.is_stale` y `alerts_today`; el dashboard muestra avisos de análisis desactualizado.
 - El prompt incluye `previous_analysis_memory` validada, `portfolio_events` y un límite configurable de caracteres; se eliminan primero titulares y noticias antiguas.
 
 Interfaz y frescura de mercado
@@ -214,9 +212,8 @@ Límites de confianza
 
 5. ESTADO ACTUAL
 
-- El dashboard original generado por Python y sus mapas de calor se mantienen como salida publicada; React continúa como prototipo opcional.
-- El último commit observado antes de estos cambios es `26daa9d`, en `main` y sincronizado con `origin/main`.
-- Se añadieron `ai_providers.py`, `agent.py`, workflows separados de dashboard/agente, alertas deterministas y campos aditivos para datos recientes; cambios locales previos de consola y credenciales siguen fuera de alcance.
+- El dashboard estático generado por el workflow y sus mapas de calor son la interfaz publicada y soportada para navegador y móvil.
+- Los workflows separados de dashboard/agente publican las vistas web y ejecutan el análisis; el Asistente IA se aloja en Cloud Run.
 - La comprobación manual en navegador a 390 px confirmó:
   - Sin desbordamiento horizontal.
   - Las celdas de instrumentos actuales muestran texto.
@@ -225,22 +222,12 @@ Límites de confianza
 
 “Sin errores” se refiere a esas comprobaciones; no implica que todas las fuentes externas estén siempre disponibles ni que las cotizaciones sean tiempo real.
 
-6. PRÓXIMO OBJETIVO O HITO RECOMENDADO
+6. ACTIVACIÓN PENDIENTE DEL ASISTENTE WEB
 
-Antes de habilitar alertas reales en GitHub, configurar los secretos necesarios y comprobar el flujo con respuestas mockeadas:
-
-1. Crear claves de Groq y OpenRouter y guardarlas como secretos `GROQ_API_KEY` y `OPENROUTER_API_KEY`; añadir `GEMINI_API_KEY` y los secretos de Telegram si se van a usar. Nunca incluirlos en el repositorio.
-2. Verificar que el workflow `portfolio_agent.yml` tiene permiso efectivo de escritura en la rama `data` (el YAML declara `contents: write`; comprobar también reglas de protección) y que la rama contiene solo los tres ficheros de estado documentados.
-3. Seguir conservando el dashboard original como la salida publicada; React continúa siendo solo un prototipo opcional.
-
-
-INICIO RÁPIDO PARA EL SIGUIENTE AGENTE
-
-Desde C:\Users\danig\Desktop\agente:
-
-    python -m pip install -r requirements.txt
-    python -m unittest tests.test_daily_report
-    python daily_report.py --no-ai --output dashboard.html
-    python agent.py
-
-Para generar con Gemini, suministrar GEMINI_API_KEY mediante el gestor de secretos apropiado; nunca incluir su valor en prompts, documentación o commits.
+El dashboard y el backend del chat están preparados en el código del proyecto,
+pero el usuario final todavía debe completar la configuración de Cloud Run,
+Secret Manager, OAuth y las variables de GitHub Actions. La guía con los pasos
+y comandos de Cloud Shell está en la sección «Activar el Asistente IA en la
+web» de `README.md`. Tras publicar el código en `main`, desplegar Cloud Run y
+ejecutar `Daily stock report`, se puede usar el asistente desde Pages en
+ordenador o móvil; no se necesita iniciar procesos en un ordenador personal.

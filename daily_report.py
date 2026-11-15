@@ -8857,6 +8857,229 @@ SECTION_NAV_SCRIPT = """<script>
 </script>"""
 
 
+CHAT_SCRIPT = """<script>
+(() => {
+  const configElement = document.getElementById('chat-config');
+  const notice = document.getElementById('chat-config-notice');
+  const signIn = document.getElementById('chat-google-button');
+  const signOut = document.getElementById('chat-signout');
+  const userStatus = document.getElementById('chat-user-status');
+  const form = document.getElementById('chat-form');
+  const input = document.getElementById('chat-input');
+  const sendButton = document.getElementById('chat-send');
+  const clearButton = document.getElementById('chat-clear');
+  const transcript = document.getElementById('chat-transcript');
+  const status = document.getElementById('chat-status');
+  if (!configElement || !notice || !form || !input || !transcript) return;
+
+  const config = JSON.parse(configElement.textContent || '{}');
+  const apiUrl = (config.apiUrl || '').replace(/\\/+$/, '');
+  const clientId = config.googleClientId || '';
+  let credential = '';
+  let messages = [];
+  let isSending = false;
+
+  const setStatus = (message, isError) => {
+    status.textContent = message;
+    status.classList.toggle('chat-error', Boolean(isError));
+  };
+  const setControls = () => {
+    sendButton.disabled = isSending || !credential || !input.value.trim();
+    input.disabled = isSending || !credential;
+    clearButton.disabled = isSending || messages.length === 0;
+  };
+  const appendMessage = (role, content) => {
+    const item = document.createElement('li');
+    item.className = `chat-message chat-message-${role}`;
+    const label = document.createElement('strong');
+    label.textContent = role === 'user' ? 'Tú' : 'Asistente';
+    const text = document.createElement('p');
+    text.textContent = content;
+    item.append(label, text);
+    transcript.appendChild(item);
+    transcript.scrollTop = transcript.scrollHeight;
+    return text;
+  };
+  const clearTranscript = () => {
+    transcript.replaceChildren();
+    messages = [];
+    setStatus('');
+    setControls();
+  };
+
+  if (!apiUrl || !clientId) {
+    notice.textContent =
+      'El asistente online aún no está configurado para esta web.';
+    userStatus.textContent = 'Servicio pendiente de configuración';
+    form.hidden = true;
+    signIn.hidden = true;
+    signOut.hidden = true;
+    clearButton.hidden = true;
+    return;
+  }
+
+  const initializeSignIn = () => {
+    if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+      notice.textContent =
+        'No se pudo cargar el inicio de sesión de Google. Recarga la página para volver a intentarlo.';
+      signIn.hidden = true;
+      return;
+    }
+
+    notice.textContent =
+      'Consultas basadas en los datos públicos publicados del dashboard. No es asesoramiento financiero.';
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+      callback: (response) => {
+        credential = response.credential || '';
+        userStatus.textContent = credential
+          ? 'Sesión autenticada'
+          : 'No se pudo iniciar sesión';
+        signIn.hidden = Boolean(credential);
+        signOut.hidden = !credential;
+        input.disabled = !credential;
+        setControls();
+        if (credential) input.focus();
+      },
+      auto_select: false,
+      cancel_on_tap_outside: true
+    });
+    window.google.accounts.id.renderButton(signIn, {
+      type: 'standard',
+      theme: 'filled_black',
+      size: 'large',
+      text: 'signin_with',
+      shape: 'rectangular'
+    });
+    userStatus.textContent = 'Inicia sesión con tu cuenta autorizada';
+    input.disabled = true;
+  };
+
+  const identityScript = document.getElementById('google-identity-script');
+  if (window.google && window.google.accounts && window.google.accounts.id) {
+    initializeSignIn();
+  } else if (identityScript) {
+    identityScript.addEventListener('load', initializeSignIn, {once: true});
+    identityScript.addEventListener('error', initializeSignIn, {once: true});
+  } else {
+    initializeSignIn();
+  }
+
+  signOut.addEventListener('click', () => {
+    credential = '';
+    if (window.google && window.google.accounts && window.google.accounts.id) {
+      window.google.accounts.id.disableAutoSelect();
+    }
+    clearTranscript();
+    userStatus.textContent = 'Sesión cerrada';
+    signIn.hidden = false;
+    signOut.hidden = true;
+    input.disabled = true;
+    setControls();
+  });
+  clearButton.addEventListener('click', clearTranscript);
+  input.addEventListener('input', setControls);
+
+  const processEvent = (data, assistantText) => {
+    if (data === '[DONE]') return true;
+    const event = JSON.parse(data);
+    if (event.error) throw new Error(event.error);
+    if (typeof event.token === 'string') assistantText.textContent += event.token;
+    return false;
+  };
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const prompt = input.value.trim();
+    if (!prompt || !credential || isSending) return;
+
+    isSending = true;
+    setControls();
+    if (transcript.querySelector('.chat-placeholder')) {
+      transcript.replaceChildren();
+    }
+    messages.push({role: 'user', content: prompt});
+    appendMessage('user', prompt);
+    const assistantText = appendMessage('assistant', '');
+    input.value = '';
+    setStatus('Consultando datos y generando respuesta…');
+
+    try {
+      const response = await fetch(`${apiUrl}/chat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${credential}`,
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
+        },
+        body: JSON.stringify({messages: messages.slice(-12)})
+      });
+      if (!response.ok) {
+        let detail = `El servicio respondió con HTTP ${response.status}.`;
+        try {
+          const errorBody = await response.json();
+          if (typeof errorBody.detail === 'string') detail = errorBody.detail;
+        } catch {
+          // Keep the HTTP status when the server does not return JSON.
+        }
+        if (response.status === 401 || response.status === 403) {
+          credential = '';
+          signIn.hidden = false;
+          signOut.hidden = true;
+          input.disabled = true;
+          userStatus.textContent = 'Sesión caducada o cuenta no autorizada';
+        }
+        throw new Error(detail);
+      }
+      if (!response.body) throw new Error('El navegador no admite respuestas en streaming.');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let dataLines = [];
+      let completed = false;
+      while (true) {
+        const {value, done} = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+        let newline = buffer.indexOf('\\n');
+        while (newline !== -1) {
+          const line = buffer.slice(0, newline).replace(/\\r$/, '');
+          buffer = buffer.slice(newline + 1);
+          if (!line) {
+            if (dataLines.length) {
+              completed = processEvent(dataLines.join('\\n'), assistantText) || completed;
+              dataLines = [];
+            }
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+          newline = buffer.indexOf('\\n');
+        }
+        if (done) break;
+      }
+      if (buffer.startsWith('data:')) {
+        completed = processEvent(buffer.slice(5).trim(), assistantText) || completed;
+      }
+      if (!completed) throw new Error('La respuesta se interrumpió antes de completarse.');
+      if (!assistantText.textContent.trim()) throw new Error('El asistente no devolvió texto.');
+      messages.push({role: 'assistant', content: assistantText.textContent});
+      messages = messages.slice(-12);
+      setStatus('Respuesta completada.');
+    } catch (error) {
+      assistantText.textContent = assistantText.textContent
+        ? `${assistantText.textContent}\\n\\n[Respuesta interrumpida]`
+        : 'No se pudo completar la consulta.';
+      setStatus(error instanceof Error ? error.message : 'Error de conexión con el servicio.', true);
+    } finally {
+      isSending = false;
+      setControls();
+    }
+  });
+  setControls();
+})();
+</script>"""
+
+
 SORT_SCRIPT = """<script>
 (() => {
   const grid = document.getElementById('stock-grid');
@@ -10531,6 +10754,23 @@ def render_dashboard(
         ensure_ascii=False,
         allow_nan=False,
     ).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    chat_config_json = json.dumps(
+        {
+            "apiUrl": os.getenv("CHAT_API_URL", "").strip(),
+            "googleClientId": os.getenv("CHAT_GOOGLE_CLIENT_ID", "").strip(),
+        },
+        ensure_ascii=False,
+    )
+    chat_config_json = (
+        chat_config_json.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+    google_identity_script = (
+        '<script id="google-identity-script" src="https://accounts.google.com/gsi/client" async defer></script>'
+        if os.getenv("CHAT_GOOGLE_CLIENT_ID", "").strip()
+        else ""
+    )
     portfolio_history_chart_html = (
         '<article class="market-chart-card chart-resize-target portfolio-history-card">'
         '<div class="section-heading"><h3>Beneficio neto de la cartera</h3>'
@@ -10806,6 +11046,43 @@ def render_dashboard(
     .analysis-panel h3 {{ margin: 0 0 7px; font-size: 14px; }}
     .analysis-panel p, .analysis-panel li {{ color: var(--text-secondary); font-size: 13px; }}
     .analysis-panel p {{ margin: 0; }}
+    .chat-panel {{ min-width: 0; border: 1px solid var(--border); border-radius: 14px;
+      background: var(--surface); padding: 18px; }}
+    .chat-intro {{ margin-bottom: 14px; }}
+    .chat-intro h3 {{ margin: 0 0 4px; font-size: 16px; }}
+    .chat-intro p, .chat-disclaimer {{ margin: 0; color: var(--text-secondary); font-size: 13px; }}
+    .chat-auth {{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0; }}
+    .chat-auth [hidden], .chat-form[hidden] {{ display: none !important; }}
+    .chat-user-status {{ color: var(--text-secondary); font-size: 12px; }}
+    .chat-button {{ min-height: 42px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--surface-raised); color: var(--text-primary); padding: 8px 13px;
+      font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }}
+    .chat-button:hover:not(:disabled) {{ background: var(--surface-hover); }}
+    .chat-button:focus-visible, .chat-input:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
+    .chat-button:disabled {{ cursor: not-allowed; opacity: .55; }}
+    .chat-transcript {{ display: grid; align-content: start; gap: 10px; min-width: 0;
+      min-height: 180px; max-height: min(56vh, 620px); overflow: auto; overscroll-behavior: contain;
+      margin: 0 0 14px; padding: 12px; border: 1px solid var(--border-subtle);
+      border-radius: 10px; background: var(--bg); list-style: none; }}
+    .chat-placeholder {{ align-self: center; justify-self: center; max-width: 44ch;
+      color: var(--text-muted); font-size: 13px; text-align: center; }}
+    .chat-message {{ width: fit-content; max-width: min(92%, 760px); min-width: 0;
+      border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+      overflow-wrap: anywhere; }}
+    .chat-message-user {{ justify-self: end; background: var(--surface-raised); }}
+    .chat-message-assistant {{ justify-self: start; background: var(--surface); }}
+    .chat-message strong {{ display: block; margin-bottom: 3px; color: var(--text-secondary); font-size: 11px; }}
+    .chat-message p {{ margin: 0; color: var(--text-primary); font-size: 14px; white-space: pre-wrap; }}
+    .chat-form {{ display: grid; gap: 8px; }}
+    .chat-form label {{ color: var(--text-secondary); font-size: 12px; font-weight: 700; }}
+    .chat-input {{ width: 100%; min-width: 0; min-height: 110px; resize: vertical;
+      border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised);
+      color: var(--text-primary); padding: 10px 12px; font: inherit; font-size: 14px; }}
+    .chat-input:disabled {{ cursor: not-allowed; opacity: .7; }}
+    .chat-form-actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }}
+    .chat-status {{ min-height: 1.5em; margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; }}
+    .chat-status.chat-error {{ color: var(--negative); }}
+    .chat-disclaimer {{ margin-top: 12px; font-size: 11px; }}
     .analysis-recommendations, .analysis-risks, .analysis-positions {{ margin-top: 12px; }}
     .analysis-position-grid h4 {{ align-items: flex-start; display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; margin: 0 0 7px; }}
     .position-action {{ color: var(--text-primary); font-size: 11px; }}
@@ -10923,6 +11200,7 @@ def render_dashboard(
       <a href="#market" aria-current="page">Mercado</a>
       <a href="#portfolio">Cartera</a>
       <a href="#watchlist">Seguimiento</a>
+      <a href="#assistant">Asistente IA</a>
     </nav>
     <section id="market" class="dashboard-view" aria-label="Resumen del mercado">
     <section class="market-charts" aria-label="Visualizaciones del mercado">
@@ -11100,13 +11378,45 @@ def render_dashboard(
       <div class="grid" id="stock-grid">{stale_divider_html}{"".join(cards)}</div>
     </section>
     </section>
+    <section id="assistant" class="dashboard-view" aria-label="Consultas al asistente de cartera" hidden>
+      <div class="section-heading"><h2>Asistente de cartera</h2>
+        <span>Consultas sobre los datos publicados</span></div>
+      <div class="chat-panel">
+        <div class="chat-intro">
+          <h3>Pregunta sobre tu cartera y el mercado</h3>
+          <p>El asistente consulta la instantánea pública del dashboard y transmite la respuesta a medida que se genera.</p>
+        </div>
+        <div class="chat-auth" aria-label="Autenticación del asistente">
+          <div id="chat-google-button"></div>
+          <button id="chat-signout" class="chat-button" type="button" hidden>Cerrar sesión</button>
+          <span id="chat-user-status" class="chat-user-status"></span>
+        </div>
+        <p id="chat-config-notice" class="chat-status" role="status" aria-live="polite"></p>
+        <ol id="chat-transcript" class="chat-transcript" aria-label="Conversación" aria-live="polite" aria-relevant="additions text">
+          <li class="chat-placeholder">Inicia sesión con la cuenta autorizada para consultar fechas, posiciones, señales e indicadores.</li>
+        </ol>
+        <form id="chat-form" class="chat-form">
+          <label for="chat-input">Tu consulta</label>
+          <textarea id="chat-input" class="chat-input" maxlength="4000" rows="4" placeholder="Por ejemplo: ¿qué precios tienen la fecha más antigua y por qué?" required></textarea>
+          <div class="chat-form-actions">
+            <button id="chat-send" class="chat-button" type="submit" disabled>Enviar consulta</button>
+            <button id="chat-clear" class="chat-button" type="button" disabled>Limpiar conversación</button>
+          </div>
+          <p id="chat-status" class="chat-status" role="status" aria-live="polite"></p>
+        </form>
+        <p class="chat-disclaimer">Tu consulta y el historial de esta pestaña se envían a Google Gemini junto con los datos públicos. La aplicación no guarda el historial en una base de datos. La respuesta puede contener errores y no constituye una recomendación de inversión.</p>
+      </div>
+    </section>
     <footer>Fuentes: Google News RSS, Google Translate, Yahoo Finance (vía yfinance) y Gemini API. Datos informativos, no asesoramiento financiero.</footer>
   </main>
 <script type="application/json" id="dashboard-chart-data">{chart_payload}</script>
+<script type="application/json" id="chat-config">{chat_config_json}</script>
+{google_identity_script}
 {SORT_SCRIPT}
 {SECTION_NAV_SCRIPT}
 {PORTFOLIO_SCRIPT}
 {CHARTS_SCRIPT}
+{CHAT_SCRIPT}
 </body>
 </html>
 """

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -1592,7 +1593,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('id="watchlist-heatmap"', html)
         self.assertIn('id="portfolio-heatmap"', html)
 
-    def test_dashboard_navigation_groups_content_into_three_views(self):
+    def test_dashboard_navigation_groups_content_into_four_views(self):
         html = render_dashboard(
             [],
             market_events=[
@@ -1604,6 +1605,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('<a href="#market" aria-current="page">Mercado</a>', html)
         self.assertIn('<a href="#portfolio">Cartera</a>', html)
         self.assertIn('<a href="#watchlist">Seguimiento</a>', html)
+        self.assertIn('<a href="#assistant">Asistente IA</a>', html)
         self.assertIn('<section id="market" class="dashboard-view"', html)
         self.assertIn(
             '<section id="portfolio" class="dashboard-view" aria-label="Mi cartera" hidden>',
@@ -1613,10 +1615,48 @@ class SentimentTests(unittest.TestCase):
             '<section id="watchlist" class="dashboard-view" aria-label="Seguimiento de mercado" hidden>',
             html,
         )
+        self.assertIn(
+            '<section id="assistant" class="dashboard-view" aria-label="Consultas al asistente de cartera" hidden>',
+            html,
+        )
         self.assertLess(html.index('id="portfolio-title"'), html.index('id="ai-analysis-title"'))
         self.assertLess(html.index('id="ai-analysis-title"'), html.index('id="market-events-title"'))
         self.assertIn("window.addEventListener('hashchange'", html)
         self.assertIn("window.scrollTo({top: 0, behavior: 'auto'})", html)
+
+    def test_dashboard_chat_is_disabled_until_public_configuration_is_set(self):
+        with patch.dict(
+            os.environ,
+            {"CHAT_API_URL": "", "CHAT_GOOGLE_CLIENT_ID": ""},
+        ):
+            html = render_dashboard([])
+
+        self.assertIn("El asistente online aún no está configurado para esta web.", html)
+        self.assertIn(
+            '<script type="application/json" id="chat-config">'
+            '{"apiUrl": "", "googleClientId": ""}</script>',
+            html,
+        )
+        self.assertNotIn("accounts.google.com/gsi/client", html)
+        self.assertIn("id=\"chat-transcript\"", html)
+        self.assertIn("id=\"chat-input\"", html)
+
+    def test_dashboard_chat_configuration_is_html_safe_and_loads_google_identity(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CHAT_API_URL": "https://chat.example.test/<service>",
+                "CHAT_GOOGLE_CLIENT_ID": "public-client-id",
+            },
+        ):
+            html = render_dashboard([])
+
+        self.assertIn(
+            '{"apiUrl": "https://chat.example.test/\\u003cservice\\u003e", '
+            '"googleClientId": "public-client-id"}',
+            html,
+        )
+        self.assertIn('id="google-identity-script"', html)
 
     def test_dashboard_styles_high_peg_as_bearish_and_missing_peg_as_unavailable(self):
         reports = [

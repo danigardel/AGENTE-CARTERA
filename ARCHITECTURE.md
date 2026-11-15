@@ -27,6 +27,15 @@
   CronJob externo lanza el workflow del agente mediante `workflow_dispatch`;
   el workflow del dashboard se activa al completarse correctamente el agente
   y publica el sitio estático en la rama `gh-pages`.
+- La pestaña opcional «Asistente IA» del dashboard estático puede conectarse a
+  `chat_service/`, un backend independiente para Cloud Run. Este verifica
+  tokens OAuth de Google, autoriza una dirección de correo permitida y limita
+  el SDK a herramientas de solo lectura sobre el `market_data.json` público.
+  La clave Gemini se guarda en Secret Manager, nunca en Pages ni en el
+  navegador. El mensaje y el historial reciente se envían a Gemini; el
+  servicio no mantiene una base de datos de conversaciones. El despliegue
+  requiere configurar Cloud Run, OAuth y las variables de Actions; no se
+  despliega automáticamente desde este repositorio.
 
 ## Datos de mercado y símbolos
 
