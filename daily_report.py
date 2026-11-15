@@ -8989,7 +8989,12 @@ SORT_SCRIPT = """<script>
     });
     sortCards(select.value);
     const focusCard = () => {
-      card.scrollIntoView({behavior: 'smooth', block: 'start'});
+      card.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'auto'
+          : 'smooth',
+        block: 'start',
+      });
       card.focus({preventScroll: true});
     };
     if (window.DashboardOpenPage) {
@@ -9273,7 +9278,9 @@ CHARTS_SCRIPT = """<script>
         .attr('stroke-linecap', 'round')
         .attr('stroke-linejoin', 'round')
         .attr('opacity', 0)
-        .transition().duration(160).attr('opacity', 1);
+        .transition()
+        .duration(window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 160)
+        .attr('opacity', 1);
     });
   }
 
@@ -9370,7 +9377,9 @@ CHARTS_SCRIPT = """<script>
       svg.append('path').datum(item.series).attr('d', line).attr('fill', 'none')
         .attr('stroke', item.color).attr('stroke-width', index === 0 ? 2.5 : 1.8)
         .attr('stroke-linecap', 'round').attr('stroke-dasharray', index ? '4 3' : null)
-        .attr('opacity', 0).transition().duration(180).attr('opacity', 1);
+        .attr('opacity', 0).transition()
+        .duration(window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 180)
+        .attr('opacity', 1);
       const legendX = margin.left + index * Math.max(92, width / sets.length);
       svg.append('line').attr('x1', legendX).attr('x2', legendX + 13).attr('y1', 12).attr('y2', 12)
         .attr('stroke', item.color).attr('stroke-width', 2);
@@ -10546,234 +10555,273 @@ def render_dashboard(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Informe diario de noticias y sentimiento para la lista de seguimiento de acciones.">
+  <meta name="theme-color" content="#0b0f17">
   <title>Radar bursátil · Informe diario</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
   <style>
     :root {{
       color-scheme: dark;
-      --bg: #0a0e17; --panel: #111827; --panel-2: #172033; --line: #253149;
-      --text: #edf2fb; --muted: #95a3b8; --blue: #8cb8ff;
-      --green: #4ade80; --yellow: #facc15; --red: #fb7185; --orange: #fb923c;
+      --bg: #0b0f17;
+      --surface: #111827;
+      --surface-raised: #182131;
+      --surface-hover: #1b2637;
+      --border: #263244;
+      --border-subtle: #1c2635;
+      --text-primary: #f3f6fb;
+      --text-secondary: #9aa8ba;
+      --text-muted: #6d7b8f;
+      --positive: #20d69a;
+      --negative: #ff647c;
+      --focus: #78aaff;
+      --shadow-panel: 0 8px 24px rgb(0 0 0 / 18%);
+      --shadow-overlay: 0 16px 40px rgb(0 0 0 / 32%);
     }}
     * {{ box-sizing: border-box; }}
-    body {{ width: 100%; min-width: 0; margin: 0; background: radial-gradient(ellipse at top, #15223a 0, var(--bg) 52rem);
-      color: var(--text); font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
-    a {{ color: var(--blue); text-decoration: none; }} a:hover {{ text-decoration: underline; }}
-    .shell {{ width: min(100%, 1440px); min-width: 0; margin: 0 auto; padding: 36px 26px 60px; }}
-    header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin-bottom: 26px; }}
-    .eyebrow, .ticker {{ color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }}
-    h1 {{ font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; line-height: 1.1; margin: 7px 0; }}
-    .subtitle, .muted {{ color: var(--muted); }}
-    .updated {{ color: var(--muted); font-size: 13px; text-align: right; }}
+    a, button, select, input, summary {{ touch-action: manipulation;
+      -webkit-tap-highlight-color: rgb(120 170 255 / 18%); }}
+    body {{ width: 100%; min-width: 0; margin: 0; background: var(--bg);
+      color: var(--text-primary); font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
+    a {{ color: var(--focus); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    a:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 3px; }}
+    a:active {{ color: var(--text-primary); }}
+    .skip-link {{ position: fixed; top: 8px; left: 8px; z-index: 100; transform: translateY(calc(-100% - 12px));
+      border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised);
+      color: var(--text-primary); padding: 8px 12px; }}
+    .skip-link:focus-visible {{ transform: translateY(0); }}
+    section[id], h2[id], h3[id], .stock-card {{ scroll-margin-top: 72px; }}
+    .shell {{ width: min(100%, 1440px); min-width: 0; margin: 0 auto; padding: 32px 24px 48px;
+      font-variant-numeric: tabular-nums; }}
+    header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin-bottom: 24px;
+      font-variant-numeric: tabular-nums; }}
+    .eyebrow, .ticker {{ color: var(--focus); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }}
+    h1 {{ font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; line-height: 1.1; margin: 7px 0; text-wrap: balance; }}
+    .subtitle, .muted {{ color: var(--text-secondary); }}
+    .updated {{ color: var(--text-secondary); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }}
     .vix-indicator {{ display: grid; gap: 1px; border: 1px solid currentColor; border-radius: 12px;
-      padding: 8px 12px; color: var(--muted); line-height: 1.35; min-width: 130px; }}
+      padding: 8px 12px; color: var(--text-secondary); line-height: 1.35; min-width: 130px; }}
     .vix-indicator span, .vix-indicator small {{ font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }}
     .vix-indicator strong {{ font-size: 17px; font-variant-numeric: tabular-nums; }}
     .vix-indicator small {{ letter-spacing: 0; text-transform: none; }}
-    .vix-low {{ color: var(--green); }} .vix-normal {{ color: var(--orange); }} .vix-high {{ color: var(--red); }}
+    .vix-low {{ color: var(--positive); }} .vix-normal {{ color: var(--focus); }} .vix-high {{ color: var(--negative); }}
     .section-nav {{ position: sticky; top: 0; z-index: 20; display: flex; gap: 6px; margin: 0 0 20px;
       padding: 7px; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch;
-      border: 1px solid var(--line); border-radius: 13px; background: rgba(10, 14, 23, .94);
-      backdrop-filter: blur(14px); scrollbar-width: none; }}
+      border: 1px solid var(--border); border-radius: 12px; background: var(--bg);
+      scrollbar-width: none; }}
     .section-nav::-webkit-scrollbar {{ display: none; }}
     .section-nav a {{ display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
-      min-height: 42px; padding: 8px 16px; border-radius: 9px; color: var(--muted);
+      min-height: 42px; padding: 8px 16px; border-radius: 8px; color: var(--text-secondary);
       font-size: 13px; font-weight: 700; white-space: nowrap; }}
-    .section-nav a[aria-current="page"] {{ background: var(--panel-2); color: var(--text); }}
-    .section-nav a:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+    .section-nav a:hover {{ background: var(--surface-hover); color: var(--text-primary); }}
+    .section-nav a[aria-current="page"] {{ background: var(--surface-raised); color: var(--text-primary); }}
+    .section-nav a:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
     .dashboard-view[hidden] {{ display: none !important; }}
     .dashboard-view > section + section {{ margin-top: 24px; }}
-    .market-events-details {{ border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }}
+    .market-events-details {{ border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }}
     .market-events-details > summary {{ display: flex; align-items: center; justify-content: space-between;
       gap: 12px; min-height: 54px; padding: 11px 14px; cursor: pointer; list-style: none; }}
+    .market-events-details > summary:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
     .market-events-details > summary::-webkit-details-marker {{ display: none; }}
     .market-events-details > summary > span:first-child {{ display: grid; gap: 2px; }}
     .market-events-details > summary strong {{ font-size: 16px; }}
-    .market-events-details > summary small {{ color: var(--muted); font-size: 11px; }}
-    .events-toggle {{ flex: 0 0 auto; color: var(--blue); font-size: 12px; font-weight: 650; }}
+    .market-events-details > summary small {{ color: var(--text-secondary); font-size: 11px; }}
+    .events-toggle {{ flex: 0 0 auto; color: var(--focus); font-size: 12px; font-weight: 650; }}
     .events-toggle::before {{ content: "+"; margin-right: 6px; font-size: 16px; }}
     .market-events-details[open] .events-toggle {{ font-size: 0; }}
     .market-events-details[open] .events-toggle::before {{ content: "−"; font-size: 16px; }}
     .market-events-details[open] .events-toggle::after {{ content: "Ocultar"; font-size: 12px; }}
     .market-events-details .market-events {{ padding: 0 12px 12px; }}
-    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 10px; margin-bottom: 12px; }}
-    .summary-card {{ background: linear-gradient(140deg, #172238, #111827); border: 1px solid var(--line);
-      border-radius: 16px; padding: 20px; min-height: 130px; }}
-    .summary-label {{ color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }}
-    .summary-value {{ display: flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 750; margin: 9px 0 3px; }}
-    .summary-detail {{ color: var(--muted); font-size: 13px; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 12px; margin-bottom: 16px; }}
+    .summary-card {{ background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px; min-height: 130px; }}
+    .summary-label {{ color: var(--text-secondary); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }}
+    .summary-value {{ display: flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 650; margin: 9px 0 3px;
+      font-variant-numeric: tabular-nums; }}
+    .summary-detail {{ color: var(--text-secondary); font-size: 13px; }}
     .sector-strip {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 9px; margin: 0 0 24px; }}
-    .sector-card {{ display: grid; gap: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 11px 14px; }}
-    .sector-card span, .sector-card small {{ color: var(--muted); font-size: 11px; }}
+    .sector-card {{ display: grid; gap: 3px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 11px 14px; }}
+    .sector-card span, .sector-card small {{ color: var(--text-secondary); font-size: 11px; }}
     .sector-card strong {{ font-size: 17px; font-variant-numeric: tabular-nums; }}
     .dot, .badge i {{ width: 9px; height: 9px; display: inline-block; border-radius: 50%; background: currentColor; }}
-    .bullish {{ color: var(--green); }} .bearish {{ color: var(--red); }} .neutral {{ color: var(--yellow); }}
-    .disclaimer {{ border: 1px solid var(--line); border-radius: 12px; background: #0e1522; color: var(--muted);
+    .bullish {{ color: var(--positive); }} .bearish {{ color: var(--negative); }} .neutral {{ color: var(--text-secondary); }}
+    .disclaimer {{ border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text-secondary);
       padding: 13px 16px; margin: 0 0 25px; font-size: 13px; }}
     .section-heading {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; margin: 32px 0 13px; }}
-    .section-heading h2 {{ margin: 0; font-size: 20px; }}
-    .section-heading span {{ color: var(--muted); font-size: 13px; }}
-    .sort-select {{ appearance: none; -webkit-appearance: none; max-width: 100%; cursor: pointer; font: inherit; font-size: 13px;
-      color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 34px 8px 12px;
-      background: var(--panel-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none' stroke='%2395a3b8' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M1 1.5l5 5 5-5'/%3E%3C/svg%3E") no-repeat right 12px center; }}
-    .sort-select:hover {{ border-color: #3a4a6b; }}
-    .sort-select:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
-    .sort-select option {{ background: var(--panel); color: var(--text); }}
+    .section-heading h2 {{ margin: 0; font-size: 20px; text-wrap: balance; }}
+    .section-heading span {{ color: var(--text-secondary); font-size: 13px; }}
+    .sort-select {{ max-width: 100%; cursor: pointer; font: inherit; font-size: 13px;
+      color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+      background: var(--surface-raised); }}
+    .sort-select:hover {{ border-color: var(--surface-hover); background-color: var(--surface-hover); }}
+    .sort-select:active {{ background-color: var(--surface); }}
+    .sort-select:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
+    .sort-select:disabled {{ opacity: .55; cursor: not-allowed; }}
+    .sort-select option {{ background: var(--surface); color: var(--text-primary); }}
     .key-headlines {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; padding: 0; list-style: none; }}
-    .key-headlines li {{ background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }}
-    .key-headlines span {{ display: block; color: var(--muted); margin-top: 7px; font-size: 12px; }}
-    .portfolio-panel {{ min-width: 0; border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 15px; }}
-    .portfolio-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }}
-    .portfolio-controls label {{ color: var(--muted); font-size: 12px; }}
+    .key-headlines li {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }}
+    .key-headlines span {{ display: block; color: var(--text-secondary); margin-top: 7px; font-size: 12px; }}
+    .portfolio-panel {{ min-width: 0; border: 1px solid var(--border); background: var(--surface); border-radius: 16px; padding: 16px;
+      font-variant-numeric: tabular-nums; }}
+    .portfolio-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0;
+      font-variant-numeric: tabular-nums; }}
+    .portfolio-controls label {{ color: var(--text-secondary); font-size: 12px; }}
     .portfolio-controls .sort-select {{ min-width: 125px; }}
-    .portfolio-total {{ color: var(--muted); font-size: 13px; margin: 0 0 12px; }}
+    .portfolio-total {{ color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; font-variant-numeric: tabular-nums; }}
     .portfolio-table-wrap {{ overflow-x: auto; }}
-    .portfolio-table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
-    .portfolio-table th, .portfolio-table td {{ border-bottom: 1px solid var(--line); padding: 9px 10px; text-align: right; }}
-    .portfolio-table thead th {{ color: var(--muted); font-size: 10px; line-height: 1.35; position: sticky; top: 0; background: var(--panel); }}
+    table {{ font-variant-numeric: tabular-nums; }}
+    .portfolio-table {{ border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }}
+    .portfolio-table th, .portfolio-table td {{ border-bottom: 1px solid var(--border-subtle); padding: 9px 10px; text-align: right; }}
+    .portfolio-table thead th {{ color: var(--text-secondary); font-size: 10px; line-height: 1.35; position: sticky; top: 0; background: var(--surface); }}
     .portfolio-table th:first-child, .portfolio-table td:first-child {{ text-align: left; }}
     .portfolio-table tbody th {{ font-weight: 650; }}
     .portfolio-table [hidden] {{ display: none; }}
     .portfolio-table tbody th > .portfolio-asset-line > span {{ display: block; }}
     .portfolio-asset-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
-    .portfolio-asset-line > span {{ color: var(--text); font-size: 12px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }}
-    .portfolio-asset-ticker {{ display: block; color: var(--muted) !important; font-size: 10px !important; font-weight: 500 !important; }}
+    .portfolio-asset-line > span {{ color: var(--text-primary); font-size: 12px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }}
+    .portfolio-asset-ticker {{ display: block; color: var(--text-secondary) !important; font-size: 10px !important; font-weight: 500 !important; }}
     .portfolio-risk-trigger {{ display: inline-grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px;
-      border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--muted); cursor: pointer; }}
-    .portfolio-risk-trigger:hover {{ border-color: var(--blue); }}
-    .portfolio-risk-trigger:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+      border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: var(--text-secondary); cursor: pointer; }}
+    .portfolio-risk-trigger:hover {{ border-color: var(--focus); background: var(--surface-hover); }}
+    .portfolio-risk-trigger:active {{ background: var(--surface); }}
+    .portfolio-risk-trigger:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
+    .portfolio-risk-trigger:disabled {{ opacity: .55; cursor: not-allowed; }}
     .portfolio-risk-trigger svg {{ width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8;
       stroke-linecap: round; stroke-linejoin: round; }}
-    .portfolio-risk-trigger.is-no-data {{ color: var(--muted); }}
+    .portfolio-risk-trigger.is-no-data {{ color: var(--text-secondary); }}
     .portfolio-risk-popover:popover-open {{ position: fixed; inset: auto; margin: 0; z-index: 20; }}
     .portfolio-risk-popover {{ box-sizing: border-box; max-width: calc(100vw - 24px); max-height: min(70vh, 500px);
-      overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 12px;
-      background: var(--panel); color: var(--text); font-weight: 400;
-      box-shadow: 0 12px 36px rgba(0, 0, 0, .45); }}
+      overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); color: var(--text-primary); font-weight: 400;
+      box-shadow: var(--shadow-panel); }}
     .portfolio-risk-heading {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }}
     .portfolio-risk-popover h3 {{ margin: 0; font-size: 14px; font-weight: 600; }}
     .portfolio-risk-popover strong {{ font-weight: 500; }}
     .portfolio-risk-confidence {{ flex: 0 0 auto; border: 1px solid currentColor; border-radius: 999px;
       padding: 3px 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; }}
-    .portfolio-risk-confidence.confidence-high {{ color: var(--green); }}
-    .portfolio-risk-confidence.confidence-medium {{ color: var(--yellow); }}
-    .portfolio-risk-confidence.confidence-low {{ color: var(--muted); }}
-    .portfolio-risk-status {{ margin: 0 0 9px; color: var(--green); font-size: 12px; font-weight: 700; }}
-    .portfolio-risk-status.is-crossed, .portfolio-risk-state.is-crossed {{ color: var(--red); }}
-    .portfolio-risk-status.is-no-data, .portfolio-risk-state.is-no-data {{ color: var(--yellow); }}
+    .portfolio-risk-confidence.confidence-high {{ color: var(--positive); }}
+    .portfolio-risk-confidence.confidence-medium {{ color: var(--text-secondary); }}
+    .portfolio-risk-confidence.confidence-low {{ color: var(--text-secondary); }}
+    .portfolio-risk-status {{ margin: 0 0 9px; color: var(--positive); font-size: 12px; font-weight: 700; }}
+    .portfolio-risk-status.is-crossed, .portfolio-risk-state.is-crossed {{ color: var(--negative); }}
+    .portfolio-risk-status.is-no-data, .portfolio-risk-state.is-no-data {{ color: var(--focus); }}
     .portfolio-risk-state {{ margin: 7px 0; font-size: 12px; }}
     .portfolio-risk-levels {{ display: grid; gap: 6px; margin: 0; }}
     .portfolio-risk-level {{ display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }}
-    .portfolio-risk-level dt {{ color: var(--muted); }}
+    .portfolio-risk-level dt {{ color: var(--text-secondary); }}
     .portfolio-risk-level dd {{ margin: 0; font-variant-numeric: tabular-nums; text-align: right; }}
     .portfolio-risk-cards {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 11px 0; }}
     .portfolio-risk-card {{ display: grid; align-content: start; gap: 5px; min-width: 0; padding: 10px;
-      border: 1px solid var(--line); border-radius: 9px; }}
+      border: 1px solid var(--border); border-radius: 9px; }}
     .portfolio-risk-card h4 {{ margin: 0; font-size: 11px; font-weight: 600; }}
     .portfolio-risk-card strong {{ font-size: 15px; font-variant-numeric: tabular-nums; }}
     .portfolio-risk-card > span {{ font-size: 11px; font-variant-numeric: tabular-nums; }}
-    .portfolio-risk-card p {{ margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }}
-    .portfolio-risk-card-review {{ border-color: rgba(248, 113, 113, .55); background: rgba(127, 29, 29, .2); }}
-    .portfolio-risk-card-review h4, .portfolio-risk-card-review strong, .portfolio-risk-card-review > span {{ color: #fca5a5; }}
-    .portfolio-risk-card-target {{ border-color: rgba(74, 222, 128, .45); background: rgba(20, 83, 45, .2); }}
-    .portfolio-risk-card-target h4, .portfolio-risk-card-target strong, .portfolio-risk-card-target > span {{ color: #86efac; }}
-    .portfolio-risk-secondary {{ margin: 9px 0; padding: 8px 9px; border: 1px solid var(--line);
-      border-radius: 8px; color: var(--muted); font-size: 11px; line-height: 1.45; }}
-    .portfolio-risk-secondary.is-crossed {{ border-color: rgba(248, 113, 113, .55); background: rgba(127, 29, 29, .12); }}
-    .portfolio-risk-secondary strong {{ color: var(--text); }}
-    .portfolio-risk-secondary-state {{ margin: 5px 0 0; color: var(--red); }}
+    .portfolio-risk-card p {{ margin: 3px 0 0; color: var(--text-secondary); font-size: 10px; line-height: 1.4; }}
+    .portfolio-risk-card-review {{ border-color: var(--border); background: var(--surface-raised); }}
+    .portfolio-risk-card-review h4, .portfolio-risk-card-review strong, .portfolio-risk-card-review > span {{ color: var(--negative); }}
+    .portfolio-risk-card-target {{ border-color: var(--border); background: var(--surface-raised); }}
+    .portfolio-risk-card-target h4, .portfolio-risk-card-target strong, .portfolio-risk-card-target > span {{ color: var(--positive); }}
+    .portfolio-risk-secondary {{ margin: 9px 0; padding: 8px 9px; border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }}
+    .portfolio-risk-secondary.is-crossed {{ border-color: var(--border); background: var(--surface-raised); }}
+    .portfolio-risk-secondary strong {{ color: var(--text-primary); }}
+    .portfolio-risk-secondary-state {{ margin: 5px 0 0; color: var(--negative); }}
     .portfolio-risk-secondary-state[hidden] {{ display: none; }}
-    .portfolio-risk-meta {{ border-top: 1px solid var(--line); padding-top: 9px; }}
-    .portfolio-risk-explanation {{ border-top: 1px solid var(--line); padding-top: 8px; }}
-    .portfolio-risk-explanation summary {{ cursor: pointer; color: var(--blue); font-size: 12px; }}
-    .portfolio-risk-explanation p {{ margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }}
-    .portfolio-risk-disclaimer {{ margin: 10px 0 0; color: var(--yellow); font-size: 11px; font-weight: 500; }}
-    .portfolio-note {{ color: var(--muted); font-size: 11px; margin: 11px 0 0; }}
+    .portfolio-risk-meta {{ border-top: 1px solid var(--border); padding-top: 9px; }}
+    .portfolio-risk-explanation {{ border-top: 1px solid var(--border); padding-top: 8px; }}
+    .portfolio-risk-explanation summary {{ cursor: pointer; color: var(--focus); font-size: 12px; }}
+    .portfolio-risk-explanation p {{ margin: 7px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }}
+    .portfolio-risk-disclaimer {{ margin: 10px 0 0; color: var(--focus); font-size: 11px; font-weight: 500; }}
+    .portfolio-note {{ color: var(--text-secondary); font-size: 11px; margin: 11px 0 0; }}
     .portfolio-activity-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin-top: 17px; }}
-    .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; }}
-    .portfolio-activity-summary span {{ color: var(--muted); font-size: 11px; }}
+    .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 11px; }}
+    .portfolio-activity-summary span {{ color: var(--text-secondary); font-size: 11px; }}
     .portfolio-activity-summary strong {{ font-size: 15px; font-variant-numeric: tabular-nums; }}
-    .portfolio-activity-details {{ margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }}
+    .portfolio-activity-details {{ margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }}
     .portfolio-activity-details summary {{ cursor: pointer; padding: 12px; font-size: 13px; font-weight: 650; }}
-    .portfolio-activity-details summary:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
+    .portfolio-activity-details summary:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
     .portfolio-activity-wrap {{ max-height: 520px; overflow: auto; }}
-    .portfolio-activity-table {{ border-collapse: collapse; min-width: 950px; width: 100%; font-size: 11px; }}
-    .portfolio-activity-table th, .portfolio-activity-table td {{ border-bottom: 1px solid var(--line); padding: 8px 9px; text-align: right; white-space: nowrap; }}
-    .portfolio-activity-table th {{ position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel); }}
+    .portfolio-activity-table {{ border-collapse: collapse; min-width: 950px; width: 100%; font-size: 11px; font-variant-numeric: tabular-nums; }}
+    .portfolio-activity-table th, .portfolio-activity-table td {{ border-bottom: 1px solid var(--border-subtle); padding: 8px 9px; text-align: right; white-space: nowrap; }}
+    .portfolio-activity-table th {{ position: sticky; top: 0; z-index: 1; color: var(--text-secondary); background: var(--surface); }}
     .portfolio-activity-table th:nth-child(-n+4), .portfolio-activity-table td:nth-child(-n+4) {{ text-align: left; }}
     .portfolio-activity-table td:nth-child(3) {{ font-weight: 650; }}
     .market-events {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 9px;
       list-style: none; padding: 0; margin: 0; }}
     .market-events li {{ display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; align-items: baseline;
-      border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px; min-width: 0; }}
-    .market-events time {{ color: var(--blue); font-size: 12px; font-variant-numeric: tabular-nums; }}
+      border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 11px; min-width: 0; }}
+    .market-events time {{ color: var(--focus); font-size: 12px; font-variant-numeric: tabular-nums; }}
     .market-events strong {{ min-width: 0; overflow-wrap: anywhere; }}
-    .market-events span {{ grid-column: 2; color: var(--muted); font-size: 11px; }}
-    .screener-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 12px; }}
+    .market-events span {{ grid-column: 2; color: var(--text-secondary); font-size: 11px; }}
+    .screener-controls {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px;
+      font-variant-numeric: tabular-nums; }}
     .screener-controls .sort-select {{ min-width: 130px; flex: 1 1 145px; }}
     .screener-controls .stock-search {{ min-width: min(100%, 220px); flex: 2 1 220px; }}
-    .stock-search {{ appearance: none; font: inherit; font-size: 13px; color: var(--text);
-      border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel-2); }}
-    .stock-search:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
-    .screener-count {{ flex: 0 0 auto; color: var(--muted); font-size: 12px; }}
+    .stock-search {{ font: inherit; font-size: 13px; color: var(--text-primary);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--surface-raised); }}
+    .stock-search:hover {{ border-color: var(--surface-hover); background-color: var(--surface-hover); }}
+    .stock-search:active {{ background-color: var(--surface); }}
+    .stock-search:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
+    .stock-search:disabled {{ opacity: .55; cursor: not-allowed; }}
+    .screener-count {{ flex: 0 0 auto; color: var(--text-secondary); font-size: 12px; }}
     .market-charts {{ margin: 0 0 28px; }}
     .market-visualization-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 340px); gap: 12px; }}
-    .market-chart-card {{ border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 14px; min-width: 0; overflow: hidden; }}
+    .market-chart-card {{ border: 1px solid var(--border); background: var(--surface); border-radius: 12px; padding: 16px; min-width: 0; overflow: hidden; }}
     .market-chart-card h3 {{ margin: 0 0 4px; font-size: 14px; }}
-    .chart-subtitle, .chart-status {{ color: var(--muted); font-size: 11px; margin: 0 0 9px; }}
+    .chart-subtitle, .chart-status {{ color: var(--text-secondary); font-size: 11px; margin: 0 0 9px; }}
     .chart-status {{ font-variant-numeric: tabular-nums; }}
     .heatmap-chart {{ display: block; width: 100%; max-width: 100%; min-height: 240px; overflow: hidden; }}
     .average-chart {{ display: block; width: 100%; max-width: 100%; height: auto; overflow: hidden; }}
-    .heatmap-name, .heatmap-return {{ fill: #000; stroke: #fff; stroke-width: 2px; paint-order: stroke;
+    .heatmap-name, .heatmap-return {{ fill: var(--text-primary); stroke: var(--bg); stroke-width: 2px; paint-order: stroke;
       stroke-linejoin: round; pointer-events: none; }}
     .heatmap-name {{ font-size: 10px; font-weight: 750; }}
     .heatmap-return {{ font-size: 10px; font-variant-numeric: tabular-nums; }}
-    .chart-empty {{ fill: var(--muted); font-size: 12px; }}
-    .chart-time {{ fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }}
+    .chart-empty {{ fill: var(--text-secondary); font-size: 12px; }}
+    .chart-time {{ fill: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }}
     .portfolio-visualizations {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 300px); gap: 12px; margin: 0 0 14px; }}
     .portfolio-history-card {{ margin-top: 12px; }}
-    .analysis-panel {{ min-width: 0; border: 1px solid var(--line); background: rgba(17, 24, 39, .94); border-radius: 14px; padding: 16px; overflow-wrap: anywhere; }}
-    .analysis-warning {{ border: 1px solid #fb923c66; border-radius: 10px; background: #fb923c12; color: #fdba74; padding: 12px; }}
-    .analysis-stale-note {{ margin: 0 0 12px; color: var(--muted); font-size: 12px; }}
-    .recommendation-panel {{ min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); padding: 14px; }}
+    .analysis-panel {{ min-width: 0; border: 1px solid var(--border); background: var(--surface); border-radius: 16px; padding: 16px; overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums; }}
+    .analysis-warning {{ border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); color: var(--focus); padding: 12px; }}
+    .analysis-stale-note {{ margin: 0 0 12px; color: var(--text-secondary); font-size: 12px; }}
+    .recommendation-panel {{ min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); padding: 14px; }}
     .recommendation-panel h3 {{ margin: 0 0 8px; font-size: 14px; }}
-    .recommendation-panel p, .recommendation-panel li {{ color: var(--muted); font-size: 12px; line-height: 1.55; }}
+    .recommendation-panel p, .recommendation-panel li {{ color: var(--text-secondary); font-size: 12px; line-height: 1.55; }}
     .recommendation-panel ul {{ padding-left: 18px; }}
     .recommendation-panel li + li {{ margin-top: 7px; }}
     .recommendation-panel li span {{ display: block; }}
     .recommendation-table {{ width: 100%; border-collapse: collapse; font-size: 11px; }}
-    .recommendation-table th, .recommendation-table td {{ border-bottom: 1px solid var(--line); padding: 6px; text-align: left; }}
+    .recommendation-table th, .recommendation-table td {{ border-bottom: 1px solid var(--border); padding: 6px; text-align: left; }}
     .table-scroll {{ max-width: 100%; overflow-x: auto; }}
-    .analysis-provider {{ display: block; color: var(--muted); font-size: 11px; }}
+    .analysis-provider {{ display: block; color: var(--text-secondary); font-size: 11px; }}
     .analysis-narrative {{ margin-top: 16px; }}
-    .analysis-unavailable {{ border-left: 2px solid var(--muted); padding-left: 10px; }}
+    .analysis-unavailable {{ border-left: 2px solid var(--text-secondary); padding-left: 10px; }}
     .quant-summary {{ margin-bottom: 16px; }}
     .quant-summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 9px; }}
-    .quant-summary-grid article {{ border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); padding: 10px; }}
+    .quant-summary-grid article {{ border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); padding: 10px; }}
     .quant-summary-grid h4 {{ margin: 0 0 6px; font-size: 12px; }}
     .quant-summary-grid ul {{ margin: 0; padding-left: 18px; }}
     .quant-summary-grid li + li {{ margin-top: 4px; }}
     .analysis-grid, .analysis-recommendations {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; }}
-    .analysis-grid article, .analysis-recommendations > div, .analysis-risks {{ border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 13px; }}
+    .analysis-grid article, .analysis-recommendations > div, .analysis-risks {{ border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); padding: 13px; }}
     .analysis-panel h3 {{ margin: 0 0 7px; font-size: 14px; }}
-    .analysis-panel p, .analysis-panel li {{ color: var(--muted); font-size: 13px; }}
+    .analysis-panel p, .analysis-panel li {{ color: var(--text-secondary); font-size: 13px; }}
     .analysis-panel p {{ margin: 0; }}
     .analysis-recommendations, .analysis-risks, .analysis-positions {{ margin-top: 12px; }}
     .analysis-position-grid h4 {{ align-items: flex-start; display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; margin: 0 0 7px; }}
-    .position-action {{ color: var(--text); font-size: 11px; }}
+    .position-action {{ color: var(--text-primary); font-size: 11px; }}
     .analysis-recommendations ol, .analysis-recommendations ul, .analysis-risks ul {{ margin: 0; padding-left: 20px; }}
     .analysis-recommendations li + li, .analysis-risks li + li {{ margin-top: 9px; }}
-    .analysis-recommendations strong {{ color: var(--text); }}
+    .analysis-recommendations strong {{ color: var(--text-primary); }}
     .analysis-recommendations li p {{ margin-top: 3px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 15px; }}
     .grid, .market-visualization-grid, .portfolio-visualizations, .summary, .analysis-grid,
     .analysis-recommendations {{ min-width: 0; }}
-    .stock-stale-divider {{ grid-column: 1 / -1; border-top: 1px dashed var(--muted); color: var(--muted);
+    .stock-stale-divider {{ grid-column: 1 / -1; border-top: 1px dashed var(--text-secondary); color: var(--text-secondary);
       font-size: 12px; padding-top: 10px; }}
     .stock-stale-divider[hidden] {{ display: none; }}
-    .quote-stale-note {{ border-left: 2px solid var(--yellow); color: var(--muted); font-size: 11px;
+    .quote-stale-note {{ border-left: 2px solid var(--focus); color: var(--text-secondary); font-size: 11px;
       margin: 10px 0 0; padding-left: 8px; }}
-    .stock-card {{ border: 1px solid var(--line); border-radius: 16px; background: rgba(17, 24, 39, .94); padding: 18px; min-width: 0; overflow-wrap: anywhere; }}
+    .stock-card {{ border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 18px; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }}
     .card-top {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
     .card-top > div {{ min-width: 0; }}
     .card-identity {{ display: grid; grid-template-columns: minmax(0, 1fr) 96px; align-items: center; gap: 0 9px; }}
@@ -10782,39 +10830,41 @@ def render_dashboard(
     .stock-sparkline[hidden] {{ display: none; }}
     .ticker {{ margin: 0 0 3px; }} .stock-card h2 {{ font-size: 17px; line-height: 1.3; margin: 0; }}
     .badge {{ flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; border-radius: 99px;
-      background: #ffffff0c; padding: 5px 10px; font-size: 12px; font-weight: 750; }}
+      background: var(--surface-raised); padding: 5px 10px; font-size: 12px; font-weight: 750; }}
     .badge i {{ width: 7px; height: 7px; }}
-    .sentiment-note {{ color: var(--muted); font-size: 12px; margin: 12px 0; }}
+    .sentiment-note {{ color: var(--text-secondary); font-size: 12px; margin: 12px 0; }}
     .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr)); gap: 8px; }}
-    .metrics div {{ border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 9px; min-width: 0; }}
-    .metrics span {{ color: var(--muted); display: block; font-size: 10px; line-height: 1.3; min-height: 26px; }}
+    .metrics div {{ border: 1px solid var(--border); background: var(--surface-raised); border-radius: 10px; padding: 9px; min-width: 0; }}
+    .metrics span {{ color: var(--text-secondary); display: block; font-size: 10px; line-height: 1.3; min-height: 26px; }}
     .metrics strong {{ display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }}
     .metrics .valuation-diagnosis {{ grid-column: 1 / -1; }}
     .valuation-diagnosis > strong {{ font-size: 13px; }}
-    .valuation-diagnosis > small {{ display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }}
+    .valuation-diagnosis > small {{ display: block; margin-top: 5px; color: var(--text-secondary); font-size: 10px; }}
     .valuation-diagnosis details {{ margin-top: 6px; }}
-    .valuation-diagnosis summary {{ color: var(--blue); cursor: pointer; font-size: 10px; }}
-    .valuation-diagnosis details p {{ margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }}
-    .metrics .floor-status {{ grid-column: 1 / -1; border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 9px; min-width: 0; }}
-    .floor-status summary {{ color: var(--blue); cursor: pointer; font-size: 11px; font-weight: 700; }}
+    .valuation-diagnosis summary {{ color: var(--focus); cursor: pointer; font-size: 10px; }}
+    .valuation-diagnosis summary:focus-visible, .floor-status summary:focus-visible,
+    .portfolio-risk-explanation summary:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
+    .valuation-diagnosis details p {{ margin: 6px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }}
+    .metrics .floor-status {{ grid-column: 1 / -1; border: 1px solid var(--border); background: var(--surface-raised); border-radius: 10px; padding: 9px; min-width: 0; }}
+    .floor-status summary {{ color: var(--focus); cursor: pointer; font-size: 11px; font-weight: 700; }}
     .floor-status dl {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; margin: 8px 0; }}
-    .floor-status dl div {{ border: 1px solid var(--line); border-radius: 7px; padding: 6px; }}
-    .floor-status dt {{ color: var(--muted); font-size: 10px; }}
+    .floor-status dl div {{ border: 1px solid var(--border); border-radius: 7px; padding: 6px; }}
+    .floor-status dt {{ color: var(--text-secondary); font-size: 10px; }}
     .floor-status dd {{ font-size: 11px; margin: 3px 0 0; overflow-wrap: anywhere; }}
-    .floor-status > p {{ color: var(--muted); font-size: 10px; line-height: 1.4; margin: 6px 0 0; }}
-    .floor-status > .floor-status-action {{ color: var(--text); font-weight: 700; }}
-    .floor-status > .floor-status-notes {{ color: var(--orange); }}
+    .floor-status > p {{ color: var(--text-secondary); font-size: 10px; line-height: 1.4; margin: 6px 0 0; }}
+    .floor-status > .floor-status-action {{ color: var(--text-primary); font-weight: 700; }}
+    .floor-status > .floor-status-notes {{ color: var(--focus); }}
     .floor-status > .floor-status-disclaimer {{ font-style: italic; }}
     .stock-card h3 {{ font-size: 13px; margin: 17px 0 7px; }}
     .headlines {{ margin: 0; padding-left: 17px; }} .headline {{ padding: 0 0 9px 1px; }}
-    .headline a {{ font-size: 13px; }} .headline-meta {{ display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }}
-    .headline-original {{ display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }}
-    .text-bullish {{ color: var(--green); }} .text-bearish {{ color: var(--red); }} .text-neutral {{ color: var(--yellow); }} .text-orange {{ color: var(--orange); }}
-    .empty {{ color: var(--muted); font-size: 13px; list-style: none; margin-left: -17px; }}
-    .warnings {{ border-top: 1px solid var(--line); color: #fbbf24; font-size: 11px; margin: 10px 0 0; padding: 9px 0 0 16px; }}
-    .private-note {{ color: #fbbf24; font-size: 11px; margin: 10px 0 0; }}
-    footer {{ border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; margin-top: 34px; padding-top: 16px; }}
-    @media (max-width: 720px) {{ .shell {{ padding: 25px 15px 40px; }} header {{ display: block; }}
+    .headline a {{ font-size: 13px; }} .headline-meta {{ display: block; color: var(--text-secondary); font-size: 11px; margin-top: 2px; }}
+    .headline-original {{ display: block; color: var(--text-secondary); font-size: 11px; margin-top: 2px; }}
+    .text-bullish {{ color: var(--positive); }} .text-bearish {{ color: var(--negative); }} .text-neutral {{ color: var(--text-secondary); }} .text-orange {{ color: var(--focus); }}
+    .empty {{ color: var(--text-secondary); font-size: 13px; list-style: none; margin-left: -17px; }}
+    .warnings {{ border-top: 1px solid var(--border); color: var(--focus); font-size: 11px; margin: 10px 0 0; padding: 9px 0 0 16px; }}
+    .private-note {{ color: var(--focus); font-size: 11px; margin: 10px 0 0; }}
+    footer {{ border-top: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; margin-top: 34px; padding-top: 16px; }}
+    @media (max-width: 720px) {{ .shell {{ padding: 24px 16px 40px; }} header {{ display: block; }}
       .updated {{ text-align: left; margin-top: 12px; }} .vix-indicator {{ width: fit-content; margin-top: 12px; }}
       .section-nav {{ margin: 0 -3px 16px; }}
       .summary {{ grid-template-columns: 1fr; gap: 9px; }}
@@ -10822,20 +10872,20 @@ def render_dashboard(
       .metrics div {{ padding: 8px; }} .sort-select {{ width: 100%; }}
       .portfolio-controls .sort-select {{ width: auto; }}
       .market-visualization-grid, .portfolio-visualizations {{ grid-template-columns: minmax(0, 1fr); }}
-      .market-chart-card {{ padding: 11px; }}
+      .market-chart-card {{ padding: 12px; }}
       .portfolio-table-wrap {{ overflow: visible; }}
       .portfolio-table, .portfolio-table tbody {{ display: block; width: 100%; }}
       .portfolio-table thead {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
-      .portfolio-table tbody tr {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 8px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-2); margin: 0 0 10px; padding: 8px; }}
+      .portfolio-table tbody tr {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); margin: 0 0 10px; padding: 8px; }}
       .portfolio-table tbody th, .portfolio-table tbody td {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; border: 0; padding: 7px 3px; text-align: right; font-size: 11px; min-width: 0; overflow-wrap: anywhere; }}
-      .portfolio-table tbody th[data-label="Activo"] {{ display: block; grid-column: 1 / -1; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }}
-      .portfolio-table tbody td::before {{ content: attr(data-label); color: var(--muted); text-align: left; font-size: 10px; }}
+      .portfolio-table tbody th[data-label="Activo"] {{ display: block; grid-column: 1 / -1; border-bottom: 1px solid var(--border); text-align: left; font-size: 13px; }}
+      .portfolio-table tbody td::before {{ content: attr(data-label); color: var(--text-secondary); text-align: left; font-size: 10px; }}
       .portfolio-asset-ticker {{ font-size: 9px !important; }} }}
     @media (max-width: 420px) {{
       .shell {{ padding: 20px 12px 32px; }}
       .summary-card, .analysis-panel {{ padding: 12px; }}
-      .market-chart-card {{ padding: 9px; }}
-      .portfolio-panel {{ padding: 10px; }}
+      .market-chart-card {{ padding: 12px; }}
+      .portfolio-panel {{ padding: 12px; }}
       .section-nav {{ margin-right: -2px; margin-left: -2px; padding: 5px; }}
       .section-nav a {{ min-height: 44px; padding: 8px 13px; }}
       .portfolio-controls {{ align-items: stretch; }}
@@ -10845,10 +10895,19 @@ def render_dashboard(
       .stock-sparkline {{ width: 76px; height: 30px; }}
       .badge {{ padding: 5px 7px; font-size: 11px; }}
     }}
+    @media (prefers-reduced-motion: reduce) {{
+      html {{ scroll-behavior: auto !important; }}
+      *, *::before, *::after {{
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+      }}
+    }}
   </style>
 </head>
 <body>
-  <main class="shell">
+  <a class="skip-link" href="#main-content">Saltar al contenido principal</a>
+  <main id="main-content" class="shell">
     <header>
       <div><div class="eyebrow">Mercados · seguimiento diario</div>
         <h1>Radar bursátil</h1>
@@ -10956,8 +11015,7 @@ def render_dashboard(
           </table>
         </div>
         <p class="portfolio-note">Selecciona periodo y métrica para ver cierres históricos, rendimiento porcentual o ganancia MAX. Cierres históricos de Yahoo Finance; los tickers estadounidenses se convierten a EUR con el cambio USD/EUR de cada fecha.</p>
-        {_portfolio_activity_section(portfolio_activity)}
-        {portfolio_warning_html}
+{_portfolio_activity_section(portfolio_activity)}{portfolio_warning_html}
       </div>
     </section>
     {_analysis_section(analysis, _build_quant_summary(reports, portfolio, market_events, generated_at))}
@@ -10982,7 +11040,7 @@ def render_dashboard(
           <option value="sentiment">Sentimiento de noticias</option>
         </select></div>
       <div class="screener-controls" aria-label="Filtros del screener">
-        <input id="stock-search" class="stock-search" type="search" placeholder="Buscar empresa o ticker…" aria-label="Buscar por nombre o ticker" autocomplete="off">
+        <input id="stock-search" class="stock-search" name="stock-search" type="search" placeholder="Buscar empresa o ticker…" aria-label="Buscar por nombre o ticker" autocomplete="off">
         <select id="sector-filter" class="sort-select" aria-label="Filtrar por sector">
           <option value="">Todos los sectores</option>{sector_options_html}
         </select>

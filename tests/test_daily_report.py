@@ -3625,9 +3625,18 @@ class SentimentTests(unittest.TestCase):
         self.assertIn(".attr('class', 'heatmap-name')", html)
         self.assertIn("Number(item.weight_pct)", html)
         self.assertIn("'var(--bg)'", html)
-        self.assertIn(".heatmap-name, .heatmap-return { fill: #000;", html)
+        self.assertIn(
+            ".heatmap-name, .heatmap-return { fill: var(--text-primary); "
+            "stroke: var(--bg);",
+            html,
+        )
         self.assertIn("const nameLabels = groups.filter((item) => item.data.current_day)", html)
-        self.assertIn("card.scrollIntoView({behavior: 'smooth', block: 'start'})", html)
+        self.assertIn(
+            "behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches",
+            html,
+        )
+        self.assertIn("@media (prefers-reduced-motion: reduce)", html)
+        self.assertIn('<a class="skip-link" href="#main-content">', html)
         self.assertIn(".attr('role', 'link')", html)
         self.assertIn("window.DashboardPortfolioHeatmapSelect?.(period)", html)
         self.assertIn("d3.scaleThreshold().domain(scale.thresholds).range(scale.colors)", html)
@@ -3795,7 +3804,11 @@ class SentimentTests(unittest.TestCase):
         )
         html = render_dashboard([], portfolio=[position])
 
-        self.assertIn("background: var(--panel); color: var(--text); font-weight: 400;", html)
+        self.assertIn(
+            "background: var(--surface); color: var(--text-primary); "
+            "font-weight: 400;",
+            html,
+        )
         self.assertIn(
             ".portfolio-table tbody th > .portfolio-asset-line > span { display: block; }",
             html,
