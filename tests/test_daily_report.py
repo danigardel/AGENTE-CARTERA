@@ -6547,6 +6547,8 @@ class SentimentTests(unittest.TestCase):
         )
         analysis = PortfolioAnalysis(
             portfolio_assessment="Mantener la diversificación.",
+            action_signal="WATCH",
+            telegram_summary="Revisar exposición tecnológica.",
             risks=["Riesgo de concentración."],
             last_updated_utc="2026-10-26T11:00:00+00:00",
         )
@@ -6585,6 +6587,54 @@ class SentimentTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["schema_version"], 1)
+        widget_script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "ios_widget_scriptable.js"
+        )
+        self.assertTrue(widget_script.is_file())
+        widget_source = widget_script.read_text(encoding="utf-8")
+        for field_name in (
+            "portfolio.totals",
+            "current_value_eur",
+            "daily_change_eur",
+            'returns_pct["1D"]',
+            'returns_pct["MAX"]',
+            "portfolio.positions",
+            "quote_is_stale",
+            "day_delta_pct",
+            "current_price_eur",
+            "analysis.action_signal",
+            "analysis.telegram_summary",
+            "quant_summary.atr_crossed",
+            "price_floors",
+            "in_plan_zone",
+            "in_extreme_zone",
+            "macro_indicators",
+            "vix",
+            "generated_at",
+        ):
+            with self.subTest(widget_field=field_name):
+                self.assertIn(field_name, widget_source)
+        self.assertIn("returns_pct", payload["portfolio"]["totals"])
+        self.assertIn("1D", payload["portfolio"]["totals"]["returns_pct"])
+        self.assertIn("MAX", payload["portfolio"]["totals"]["returns_pct"])
+        self.assertIn("current_value_eur", payload["portfolio"]["totals"])
+        self.assertIn("daily_change_eur", payload["portfolio"]["totals"])
+        self.assertIn("positions", payload["portfolio"])
+        widget_position = payload["portfolio"]["positions"][0]
+        for field_name in ("quote_is_stale", "day_delta_pct", "current_price_eur"):
+            with self.subTest(widget_position_field=field_name):
+                self.assertIn(field_name, widget_position)
+        self.assertIn("price_floors", payload)
+        self.assertIn("atr_crossed", payload["quant_summary"])
+        self.assertEqual(payload["analysis"]["action_signal"], "WATCH")
+        self.assertEqual(
+            payload["analysis"]["telegram_summary"],
+            "Revisar exposición tecnológica.",
+        )
+        self.assertEqual(payload["macro_indicators"]["vix"]["price"], 18.5)
+        self.assertIn("generated_at", payload)
         self.assertNotIn("contribution_plan", payload)
         self.assertEqual(
             payload["risk_metrics"],
@@ -6610,6 +6660,15 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(payload["market_summary"]["sentiment_label"], "Alcista")
         self.assertEqual(payload["market_summary"]["current_quote_count"], 1)
         self.assertEqual(payload["portfolio"]["positions"][0]["asset_class"], "fund")
+        self.assertIs(payload["portfolio"]["positions"][0]["quote_is_stale"], False)
+        self.assertEqual(
+            payload["portfolio"]["positions"][0]["day_delta_pct"],
+            10,
+        )
+        self.assertEqual(
+            payload["portfolio"]["positions"][0]["current_price_eur"],
+            11,
+        )
         self.assertEqual(payload["portfolio"]["positions"][0]["avg_cost_eur"], 10)
         self.assertEqual(payload["portfolio"]["positions"][0]["day_delta_eur"], 1)
         self.assertEqual(payload["portfolio"]["positions"][0]["invested_cost_eur"], 20)

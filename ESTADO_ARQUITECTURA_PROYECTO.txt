@@ -24,8 +24,16 @@ La página reúne:
 - Alertas diarias de cruce de suelo y máximo un disparo manual sugerido por quincena; no se ejecutan órdenes.
 - Una consola interactiva Gemini con contexto y memoria de cartera.
 - Una agenda de eventos corporativos y un radar de noticias macroeconómicas.
+- Un widget nativo opcional para iPhone mediante Scriptable que consume `market_data.json`.
 
 El dashboard se construye como HTML estático: no tiene backend propio ni una base de datos de mercado. Usa fuentes públicas; no inicia sesión en Trade Republic ni reutiliza sus tokens, sesiones o identificadores de cuenta, y no depende de endpoints privados del broker.
+
+Widget iOS (Scriptable)
+
+- El script `scripts/ios_widget_scriptable.js` consulta el `market_data.json` público de GitHub Pages con un parámetro anti-caché y guarda la última respuesta válida en `FileManager.local()`.
+- Adapta el resumen a `small`, `medium` y `large`; muestra cartera, movimientos vigentes, señal y narrativa IA, VIX y alertas ATR/precios suelo. Si no hay conexión usa la copia local e indica que está desactualizada.
+- Instalación: instalar Scriptable desde App Store; crear un script nuevo y pegar el contenido de `scripts/ios_widget_scriptable.js`; ejecutarlo una vez para obtener la caché inicial; añadir el widget Scriptable a la pantalla de inicio; en **Editar widget**, seleccionar el script creado y el tamaño deseado. Al tocarlo abre GitHub Pages.
+- El script solicita actualización cada 15 minutos, pero iOS controla la frecuencia efectiva según batería y actividad.
 
 
 2. STACK TECNOLÓGICO Y CONFIGURACIÓN

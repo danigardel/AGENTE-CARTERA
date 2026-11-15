@@ -13,6 +13,16 @@ El motor de **Precios Suelo** vigila 17 activos configurados y resuelve sus tick
 
 El panel y `market_data.json` muestran niveles, fecha de la próxima aportación 2/16, RSI, cotización actual y posibles candados. Una señal manual solo puede sugerirse con cotización vigente, precio en la zona extrema, RSI(14) inferior a 35 y sin alerta de deterioro de tesis; la alerta por Forward PE negativo, subida superior al 25 % frente al PER TTM o trampa de valor bloquea esa señal. Se mueve la ventana 2/16 al lunes si cae en fin de semana. El estado limita a un disparo manual por quincena y las alertas de suelo se deduplican por día. La aplicación no ejecuta compras ni órdenes; todas las señales son informativas y requieren revisión manual.
 
+### Widget nativo para iPhone (Scriptable)
+
+1. Instala **Scriptable** desde App Store.
+2. En Scriptable crea un script nuevo, copia el contenido de [`scripts/ios_widget_scriptable.js`](./scripts/ios_widget_scriptable.js) y guárdalo, por ejemplo, como **Cartera**.
+3. Ejecuta el script una vez desde Scriptable para comprobar la conexión y guardar la primera copia local de `market_data.json`.
+4. En la pantalla de inicio del iPhone, mantén pulsado un espacio vacío, toca **Añadir widget**, busca **Scriptable** y elige el tamaño pequeño, mediano o grande.
+5. Mantén pulsado el widget añadido, selecciona **Editar widget** y asigna el script **Cartera**.
+
+El widget descarga el JSON público de Pages con un parámetro anti-caché, conserva el último JSON válido localmente para uso sin conexión y abre el dashboard al tocarlo. Solicita una actualización a los 15 minutos; iOS decide cuándo ejecutarla realmente y puede espaciarla para ahorrar batería.
+
 `collect_market_radar()` deduplica títulos normalizados y admite hasta 400 titulares únicos; `MAX_GEMINI_NEWS_ITEMS` permite hasta 200 noticias de empresa y `MAX_HEADLINES` hasta 8 titulares por empresa. Las fuentes macro incluyen Yahoo Finance, CNBC, MarketWatch, Seeking Alpha, WSJ, Bloomberg e Investing.com España. Los límites reales de prompt, cuotas y disponibilidad dependen del proveedor y del plan.
 
 ### Proveedores IA y cuotas consultadas
