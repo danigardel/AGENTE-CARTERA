@@ -36,6 +36,18 @@
   servicio no mantiene una base de datos de conversaciones. El despliegue
   requiere configurar Cloud Run, OAuth y las variables de Actions; no se
   despliega automáticamente desde este repositorio.
+- La herramienta `get_company_news` resuelve nombres y tickers solo contra las
+  empresas publicadas, reutiliza sus titulares de `market_data.json` si alguno
+  tiene menos de seis horas y consulta Google News RSS únicamente cuando faltan
+  titulares recientes. No guarda otra copia de noticias ni habilita Google
+  Search Grounding. El fallback limita el feed a 512 KiB, cinco resultados,
+  dos consultas por petición de chat y 15 minutos de caché en memoria; los
+  enlaces externos deben ser HTTPS. Los fallos del feed se registran y devuelven
+  un estado explícito junto con los titulares guardados que estén disponibles.
+- La RSS pública no añade un cargo de herramienta Google Search; las respuestas
+  siguen consumiendo la cuota/tokens normales del modelo y su coste depende de
+  la clave y facturación configuradas. En el chat, las URLs HTTPS de fuentes se
+  convierten en enlaces accesibles sin interpretar HTML ni Markdown del modelo.
 
 ## Datos de mercado y símbolos
 

@@ -70,6 +70,20 @@ encendido. La integración debe estar publicada en la rama `main` antes de
 desplegarla. **No añadas el extracto bancario original ni archivos con datos
 privados al repositorio.**
 
+Para las consultas de noticias, el chat reutiliza los titulares por empresa ya
+incluidos en `market_data.json` y solo consulta Google News RSS si no encuentra
+titulares recientes (menos de 6 horas). No genera un segundo archivo de noticias
+ni usa Google Search Grounding. La consulta se limita a empresas de la
+instantánea, 5 titulares, 2 consultas RSS por petición de chat, 15 minutos de
+caché en memoria y 512 KiB por feed; requiere timeout y solo acepta enlaces HTTPS.
+Si RSS falla, el servicio informa del estado y conserva los titulares publicados
+disponibles. Las URLs HTTPS citadas se muestran como enlaces seguros en el chat.
+
+RSS no añade un cargo de herramienta Google Search; Gemini sigue consumiendo
+tokens y cuota del proveedor. Esta integración evita cargos adicionales de
+grounding, pero no puede garantizar un coste total de 0 € si la clave o el
+proyecto tienen facturación habilitada.
+
 1. **Prepara Google Cloud.** En <https://console.cloud.google.com/>, crea o
    selecciona un proyecto, vincula facturación y configura un presupuesto con
    alertas. Habilita Cloud Run, Cloud Build, Artifact Registry y Secret Manager.

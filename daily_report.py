@@ -8900,6 +8900,41 @@ CHAT_SCRIPT = """<script>
     transcript.scrollTop = transcript.scrollHeight;
     return text;
   };
+  const linkifyAssistantUrls = (node) => {
+    const content = node.textContent || '';
+    const urlPattern = /https:\\/\\/[^\\s<>"']+/g;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let match;
+    while ((match = urlPattern.exec(content)) !== null) {
+      let candidate = match[0];
+      let suffix = '';
+      while (/[.,;:!?)}\\]]/.test(candidate.slice(-1))) {
+        suffix = candidate.slice(-1) + suffix;
+        candidate = candidate.slice(0, -1);
+      }
+      fragment.append(document.createTextNode(content.slice(cursor, match.index)));
+      let url;
+      try {
+        url = new URL(candidate);
+      } catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+      }
+      if (url && url.protocol === 'https:' && url.hostname) {
+        const link = document.createElement('a');
+        link.href = url.href;
+        link.textContent = candidate;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        fragment.append(link, document.createTextNode(suffix));
+      } else {
+        fragment.append(document.createTextNode(match[0]));
+      }
+      cursor = match.index + match[0].length;
+    }
+    fragment.append(document.createTextNode(content.slice(cursor)));
+    node.replaceChildren(fragment);
+  };
   const clearTranscript = () => {
     transcript.replaceChildren();
     messages = [];
@@ -9064,11 +9099,13 @@ CHAT_SCRIPT = """<script>
       if (!assistantText.textContent.trim()) throw new Error('El asistente no devolvió texto.');
       messages.push({role: 'assistant', content: assistantText.textContent});
       messages = messages.slice(-12);
+      linkifyAssistantUrls(assistantText);
       setStatus('Respuesta completada.');
     } catch (error) {
       assistantText.textContent = assistantText.textContent
         ? `${assistantText.textContent}\\n\\n[Respuesta interrumpida]`
         : 'No se pudo completar la consulta.';
+      linkifyAssistantUrls(assistantText);
       setStatus(error instanceof Error ? error.message : 'Error de conexión con el servicio.', true);
     } finally {
       isSending = false;
@@ -11072,7 +11109,8 @@ def render_dashboard(
     .chat-message-user {{ justify-self: end; background: var(--surface-raised); }}
     .chat-message-assistant {{ justify-self: start; background: var(--surface); }}
     .chat-message strong {{ display: block; margin-bottom: 3px; color: var(--text-secondary); font-size: 11px; }}
-    .chat-message p {{ margin: 0; color: var(--text-primary); font-size: 14px; white-space: pre-wrap; }}
+    .chat-message p {{ margin: 0; color: var(--text-primary); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .chat-message a {{ color: var(--focus); text-decoration: underline; text-underline-offset: 2px; }}
     .chat-form {{ display: grid; gap: 8px; }}
     .chat-form label {{ color: var(--text-secondary); font-size: 12px; font-weight: 700; }}
     .chat-input {{ width: 100%; min-width: 0; min-height: 110px; resize: vertical;

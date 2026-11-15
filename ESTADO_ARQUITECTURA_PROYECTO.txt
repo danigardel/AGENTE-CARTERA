@@ -36,7 +36,9 @@ Asistente web opcional
 
 - El dashboard suma una cuarta pestaña de chat. El frontend estático no contiene claves y conserva las vistas Mercado, Cartera y Seguimiento.
 - `chat_service/` implementa un backend independiente para Cloud Run con Antigravity SDK, streaming SSE, validación de ID tokens de Google y autorización de una dirección de correo exacta.
-- Las herramientas del SDK solo leen campos publicados de `market_data.json`; no habilitan navegación, subagentes, archivos, workspace ni escritura. El mensaje y hasta 12 turnos previos se envían a Gemini; el servicio no persiste el historial en una base de datos propia.
+- Las herramientas del SDK solo leen campos publicados de `market_data.json`, salvo la consulta acotada de Google News RSS para empresas de la instantánea; no habilitan navegación general, subagentes, archivos, workspace ni escritura. El mensaje y hasta 12 turnos previos se envían a Gemini; el servicio no persiste el historial en una base de datos propia.
+- `get_company_news` reutiliza titulares publicados si alguno tiene menos de seis horas; en caso contrario consulta RSS en vivo. Limita la respuesta a 5 titulares, 2 consultas RSS por petición de chat, feed de 512 KiB y caché en memoria de 15 minutos. No guarda un archivo redundante ni usa Google Search Grounding. Los errores RSS se reportan explícitamente.
+- RSS no añade un cargo de herramienta Google Search; Gemini sigue usando tokens/cuota del proveedor y su coste depende de la clave y la facturación configuradas. Las URLs HTTPS citadas se convierten en enlaces seguros en la interfaz.
 - La publicación requiere configurar `CHAT_API_URL` y `CHAT_GOOGLE_CLIENT_ID` como variables de Actions, además del proyecto Cloud Run, el cliente OAuth, `CHAT_ALLOWED_EMAIL` y el secreto de Secret Manager `GEMINI_API_KEY`. Sin esos requisitos, la pestaña informa que el servicio no está configurado.
 - La autenticación limita el endpoint de consultas, pero no cambia que la cartera y `market_data.json` ya son públicos en Pages. El despliegue no se ha realizado desde este repositorio.
 
