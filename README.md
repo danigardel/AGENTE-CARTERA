@@ -122,6 +122,24 @@ termina la sesión. Cualquier otra línea se envía a Gemini junto con el contex
 actual y un historial acotado a 20 turnos. Las consultas de chat envían a Google
 el contexto de cartera cargado en memoria; no se envían automáticamente.
 
+Como alternativa, `python agente_interactivo.py --sdk` inicia un modo opcional
+con Google Antigravity SDK. Instala sus dependencias con
+`python -m pip install -r requirements-sdk.txt`. Este modo transmite la
+respuesta progresivamente y ofrece herramientas de solo lectura para consultar
+la cartera cargada, una posición, la última narrativa válida y el radar ya
+cargado. `/cartera`, `/vivo`, `/radar`, `/telegram` y `/salir` siguen disponibles;
+el agente no puede ejecutar comandos ni modificar archivos. El radar solo se
+actualiza al usar `/radar`.
+
+El modo SDK es una alternativa local y experimental: usa una clave por sesión
+y no aplica la rotación de claves ni el fallback de proveedores por consulta.
+Aunque selecciona el modelo primario configurado, este modo no reutiliza los
+perfiles de payload de la cadena actual ni permite fijar aquí sus mismos
+parámetros de generación de Hydrogen. Para conservar exactamente la cadena
+Gemini, sus payloads, la rotación y el fallback actuales, ejecuta
+`python agente_interactivo.py` sin `--sdk`. El agente programado, Telegram,
+`daily_report.py`, el dashboard y GitHub Actions no usan el modo SDK.
+
 ### Importar operaciones de cartera (opcional)
 
 Se puede sustituir la cartera fija por un CSV local de operaciones, sin iniciar sesión ni conectar con el broker:

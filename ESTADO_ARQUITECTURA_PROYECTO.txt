@@ -111,7 +111,7 @@ Flujo de ejecución de alto nivel:
 7. El motor de Precios Suelo integra cotización vigente, SMA200/máximo de 52 semanas o Low de tres meses, conversión EUR/USD y pesos de cartera. Publica el diagnóstico en HTML/JSON, Buy the Dip, análisis IA y Telegram.
 8. render_dashboard() genera la página HTML completa con tarjetas, controles y scripts de navegador.
 
-`agente_interactivo.py` carga claves desde el entorno o el archivo local ignorado `GEMINI_API_KEY.txt`, usa la actividad/cache existentes y permite consultar la cartera, refrescar precios ATR, actualizar el radar y conversar con Gemini conservando hasta 20 turnos.
+`agente_interactivo.py` carga claves desde el entorno o el archivo local ignorado `GEMINI_API_KEY.txt`, usa la actividad/cache existentes y permite consultar la cartera, refrescar precios ATR, actualizar el radar y conversar con Gemini conservando hasta 20 turnos. El modo opcional `--sdk` utiliza Antigravity SDK con streaming y herramientas limitadas a consultas de solo lectura sobre cartera, posiciones, última narrativa válida y radar cargado. No habilita herramientas de sistema, subagentes ni espacios de trabajo y no se usa en los workflows. Es experimental, opera con una clave por sesión y no reproduce los perfiles de payload ni los parámetros de generación del modo habitual; la rotación y el fallback existentes permanecen intactos al ejecutar la consola sin `--sdk`.
 
 `agent.py` ejecuta la automatización reactiva: carga cartera y watchlist, consulta precios y envía un único mensaje con caídas/subidas de cartera y subidas de watchlist cuando superan `ALERT_DROP_PCT`. Ignora datos stale, excluye tickers ya presentes en cartera de la categoría de seguimiento, deduplica por ticker/fecha y reavisa si el movimiento se intensifica en la misma dirección al menos 1 punto porcentual.
 
@@ -132,7 +132,7 @@ Responsabilidades representativas dentro del archivo:
 
 agente_interactivo.py
 
-Agente de consola basado en `cmd.Cmd`, separado del generador del dashboard. Comparte las funciones de cartera, radar, parseo de claves, rotación y fallback de Gemini de `daily_report.py`. No reemplaza ni modifica la publicación estática.
+Agente de consola basado en `cmd.Cmd`, separado del generador del dashboard. El modo habitual comparte las funciones de cartera, radar, parseo de claves, rotación y fallback de Gemini de `daily_report.py`. El modo optativo `--sdk` añade streaming y herramientas de consulta con permisos limitados, sin reemplazar el modo habitual ni modificar la publicación estática.
 
 tests\test_daily_report.py
 
