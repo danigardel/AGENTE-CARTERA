@@ -296,11 +296,29 @@ class PortfolioConsole(cmd.Cmd):
         )
 
     def sdk_tools(self) -> list[Callable[..., str]]:
+        console = self
+
+        def sdk_get_portfolio_snapshot() -> str:
+            """Return the in-memory portfolio snapshot with dates and risk levels."""
+            return console.sdk_get_portfolio_snapshot()
+
+        def sdk_get_position_details(ticker: str) -> str:
+            """Return one position by its exact ticker, ignoring letter case."""
+            return console.sdk_get_position_details(ticker)
+
+        def sdk_get_latest_analysis() -> str:
+            """Return the last cached analysis only when it passes cache validation."""
+            return console.sdk_get_latest_analysis()
+
+        def sdk_get_market_radar() -> str:
+            """Return the radar already loaded in this session without fetching feeds."""
+            return console.sdk_get_market_radar()
+
         return [
-            self.sdk_get_portfolio_snapshot,
-            self.sdk_get_position_details,
-            self.sdk_get_latest_analysis,
-            self.sdk_get_market_radar,
+            sdk_get_portfolio_snapshot,
+            sdk_get_position_details,
+            sdk_get_latest_analysis,
+            sdk_get_market_radar,
         ]
 
     @classmethod

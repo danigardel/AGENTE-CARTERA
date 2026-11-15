@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import importlib.util
 import json
 import tempfile
@@ -125,9 +126,12 @@ class PortfolioConsoleTests(unittest.TestCase):
             console = self.create_console(temp_dir)
             config = _build_sdk_config(console)
 
+        sdk_agent = importlib.import_module("google.antigravity").Agent(config)
+
         self.assertEqual(config.capabilities.enabled_tools, [])
         self.assertFalse(config.capabilities.enable_subagents)
         self.assertEqual(config.workspaces, [])
+        self.assertIsNotNone(sdk_agent)
         self.assertEqual(
             config.model.name,
             "gemini-4-hydrogen",
