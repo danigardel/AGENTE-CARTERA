@@ -51,6 +51,7 @@ class LiveQuotesDashboardTests(unittest.TestCase):
             config["maxTickersPerRequest"],
             LIVE_QUOTES_MAX_TICKERS_PER_REQUEST,
         )
+        self.assertEqual(LIVE_QUOTES_POLL_INTERVAL_MS, 15_000)
         self.assertEqual(config["pollIntervalMs"], LIVE_QUOTES_POLL_INTERVAL_MS)
 
     @patch.dict(

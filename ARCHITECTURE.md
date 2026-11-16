@@ -50,7 +50,7 @@
   convierten en enlaces accesibles sin interpretar HTML ni Markdown del modelo.
 - La integración opcional de cotizaciones casi en vivo usa un Worker de
   Cloudflare como proxy limitado del endpoint `mid` no documentado de L&S.
-  Cuando está configurado, el navegador consulta cada 30 segundos mientras la
+  Cuando está configurado, el navegador consulta cada 15 segundos mientras la
   pestaña está visible y dentro del horario de mercado; prioriza posiciones y
   activos visibles. El proxy solo acepta tickers permitidos, procesa hasta 10
   por solicitud, limita la concurrencia a seis y usa caché local de 15 segundos

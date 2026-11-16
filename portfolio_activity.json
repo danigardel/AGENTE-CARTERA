@@ -804,5 +804,44 @@
     "amount_eur": -1.91,
     "fee_eur": 0.0,
     "tax_eur": 0.0
+  },
+  {
+    "date": "2026-11-16",
+    "action": "BUY",
+    "ticker": "EUNL.DE",
+    "name": "Core MSCI World USD (Acc)",
+    "asset_class": "FUND",
+    "currency": "EUR",
+    "shares": 1.155898,
+    "price_eur": 129.7692,
+    "amount_eur": -150.0,
+    "fee_eur": 0.0,
+    "tax_eur": 0.0
+  },
+  {
+    "date": "2026-11-16",
+    "action": "BUY",
+    "ticker": "NVD.SG",
+    "name": "NVIDIA",
+    "asset_class": "STOCK",
+    "currency": "EUR",
+    "shares": 0.345208,
+    "price_eur": 144.84,
+    "amount_eur": -50.0,
+    "fee_eur": 0.0,
+    "tax_eur": 0.0
+  },
+  {
+    "date": "2026-11-16",
+    "action": "BUY",
+    "ticker": "FB2A.SG",
+    "name": "Meta Platforms (A)",
+    "asset_class": "STOCK",
+    "currency": "EUR",
+    "shares": 0.088198,
+    "price_eur": 566.9,
+    "amount_eur": -50.0,
+    "fee_eur": 0.0,
+    "tax_eur": 0.0
   }
 ]

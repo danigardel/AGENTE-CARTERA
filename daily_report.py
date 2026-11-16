@@ -120,7 +120,7 @@ MAX_HEADLINES = 8
 MAX_GEMINI_NEWS_ITEMS = 200
 MAX_MARKET_RADAR_ITEMS = 400
 MAX_WORKERS = 8
-LIVE_QUOTES_POLL_INTERVAL_MS = 30_000
+LIVE_QUOTES_POLL_INTERVAL_MS = 15_000
 LIVE_QUOTES_MAX_TICKERS_PER_REQUEST = 10
 LS_QUOTE_URL = "https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument"
 LS_TIMEZONE = ZoneInfo("Europe/Berlin")
@@ -436,21 +436,23 @@ class DashboardCharts:
 
 
 PORTFOLIO = (
-    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 2.944716, 373.52, "EUR"),
+    PortfolioAsset("Core MSCI World USD (Acc)", "EUNL.DE", 4.100614, 523.52, "EUR"),
     PortfolioAsset("ASML", "ASME.SG", 0.049265, 65.45, "EUR"),
     PortfolioAsset("Vistra", "0V6.SG", 0.407497, 50.00, "EUR"),
     PortfolioAsset("GE Vernova", "Y5C.SG", 0.038649, 30.00, "EUR"),
     PortfolioAsset("MSCI World Information Tech.", "XDWT.DE", 0.218023, 30.00, "EUR"),
     PortfolioAsset("Broadcom", "1YD.SG", 0.084104, 25.00, "EUR"),
-    PortfolioAsset("NVIDIA", "NVD.SG", 0.271323, 48.91, "EUR"),
+    PortfolioAsset("NVIDIA", "NVD.SG", 0.616531, 98.91, "EUR"),
     PortfolioAsset("Alphabet (A)", "ABEA.SG", 0.357767, 102.00, "EUR"),
     PortfolioAsset("MercadoLibre", "MLB1.SG", 0.002776, 5.00, "EUR"),
     PortfolioAsset("Amazon.com", "AMZ.SG", 0.187863, 42.49, "EUR"),
+    PortfolioAsset("Meta Platforms (A)", "FB2A.SG", 0.088198, 50.00, "EUR"),
 )
 
 PORTFOLIO_TICKER_CURRENCIES = {
     "NVD.SG": "EUR",
     "ABEA.SG": "EUR",
+    "FB2A.SG": "EUR",
     "AMZ.SG": "EUR",
     "EUNL.DE": "EUR",
     "ASME.SG": "EUR",
@@ -10083,7 +10085,7 @@ CHARTS_SCRIPT = """<script>
 
     const supportedTickers = new Set(liveQuotesConfig.tickers || []);
     const maxTickersPerRequest = liveQuotesConfig.maxTickersPerRequest || 10;
-    const pollIntervalMs = liveQuotesConfig.pollIntervalMs || 30000;
+    const pollIntervalMs = liveQuotesConfig.pollIntervalMs || 15000;
     let timer = null;
     let polling = false;
 

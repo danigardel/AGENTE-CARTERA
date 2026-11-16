@@ -2466,7 +2466,7 @@ class SentimentTests(unittest.TestCase):
             "tax_eur",
         }
 
-        self.assertEqual(len(activities), 62)
+        self.assertEqual(len(activities), 65)
         self.assertTrue(all(set(row) == public_fields for row in raw_activities))
         self.assertTrue(all(item.currency == "EUR" for item in activities))
         self.assertTrue(all(item.ticker in configured_tickers for item in activities))
@@ -2484,12 +2484,28 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("NKE.SG", configured_tickers)
         self.assertIn("NVO", configured_tickers)
         dashboard = render_dashboard([], portfolio_activity=activities)
-        self.assertIn("Historial de inversión · 62 movimientos", dashboard)
-        self.assertEqual(dashboard.count('data-label="Movimiento"'), 62)
+        self.assertIn("Historial de inversión · 65 movimientos", dashboard)
+        self.assertEqual(dashboard.count('data-label="Movimiento"'), 65)
         self.assertIn("AMZ.SG", assets_by_ticker)
         self.assertAlmostEqual(assets_by_ticker["AMZ.SG"].shares, 0.187863)
-        self.assertAlmostEqual(assets_by_ticker["NVD.SG"].shares, 0.271323)
-        self.assertAlmostEqual(assets_by_ticker["NVD.SG"].investment_eur, 48.91)
+        self.assertAlmostEqual(assets_by_ticker["NVD.SG"].shares, 0.616531)
+        self.assertAlmostEqual(
+            assets_by_ticker["NVD.SG"].investment_eur,
+            98.91,
+            places=2,
+        )
+        self.assertAlmostEqual(assets_by_ticker["EUNL.DE"].shares, 4.100614)
+        self.assertAlmostEqual(
+            assets_by_ticker["EUNL.DE"].investment_eur,
+            523.52,
+            places=2,
+        )
+        self.assertAlmostEqual(assets_by_ticker["FB2A.SG"].shares, 0.088198)
+        self.assertAlmostEqual(
+            assets_by_ticker["FB2A.SG"].investment_eur,
+            50.00,
+            places=2,
+        )
 
         nov_2_activities = [
             item for item in activities if item.trade_date == date(2026, 11, 2)
@@ -2517,6 +2533,33 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(purchase.price_eur, 159.48)
         self.assertEqual(purchase.amount_eur, -1.91)
         self.assertEqual(purchase.fee_eur, 0)
+
+        todays_purchases = [
+            item for item in activities if item.trade_date == date(2026, 11, 16)
+        ]
+        self.assertEqual(
+            {
+                item.ticker: (
+                    item.name,
+                    item.shares,
+                    item.price_eur,
+                    item.amount_eur,
+                    item.fee_eur,
+                )
+                for item in todays_purchases
+            },
+            {
+                "EUNL.DE": (
+                    "Core MSCI World USD (Acc)",
+                    1.155898,
+                    129.7692,
+                    -150.0,
+                    0.0,
+                ),
+                "NVD.SG": ("NVIDIA", 0.345208, 144.84, -50.0, 0.0),
+                "FB2A.SG": ("Meta Platforms (A)", 0.088198, 566.9, -50.0, 0.0),
+            },
+        )
 
     def test_dashboard_renders_filtered_portfolio_activity(self):
         activities = [
@@ -2992,6 +3035,7 @@ class SentimentTests(unittest.TestCase):
                 "1YD.SG": "EUR",
                 "NVD.SG": "EUR",
                 "ABEA.SG": "EUR",
+                "FB2A.SG": "EUR",
                 "MLB1.SG": "EUR",
                 "AMZ.SG": "EUR",
             },
@@ -3002,6 +3046,7 @@ class SentimentTests(unittest.TestCase):
             {
                 "NVD.SG",
                 "ABEA.SG",
+                "FB2A.SG",
                 "AMZ.SG",
                 "EUNL.DE",
                 "ASME.SG",
@@ -3023,8 +3068,8 @@ class SentimentTests(unittest.TestCase):
         google = portfolio_by_ticker["ABEA.SG"]
         amazon = portfolio_by_ticker["AMZ.SG"]
 
-        self.assertEqual(world_etf.shares, 2.944716)
-        self.assertAlmostEqual(world_etf.investment_eur, 373.52)
+        self.assertEqual(world_etf.shares, 4.100614)
+        self.assertAlmostEqual(world_etf.investment_eur, 523.52)
         self.assertEqual(google.shares, 0.357767)
         self.assertEqual(google.investment_eur, 102.00)
         self.assertEqual(amazon.shares, 0.187863)
