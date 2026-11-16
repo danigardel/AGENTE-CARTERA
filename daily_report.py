@@ -8459,6 +8459,12 @@ def _format_number(value: float | None, decimals: int = 2) -> str:
     return f"{value:,.{decimals}f}"
 
 
+def _format_live_number(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:,.2f}"
+
+
 def _headline_html(headline: Headline) -> str:
     label, signal = classify_sentiment(headline.sentiment)
     display_title = headline.title_es or headline.title
@@ -9812,6 +9818,10 @@ CHARTS_SCRIPT = """<script>
       payload.live = {};
     }
     payload.live ||= {};
+    const formatLiveNumber = (value) => new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(value);
     const todayInZone = (zone) => {
       const parts = new Intl.DateTimeFormat('en', {
         timeZone: zone,
@@ -9864,8 +9874,9 @@ CHARTS_SCRIPT = """<script>
         if (card.dataset.ticker !== ticker) return;
         card.dataset.currentDay = String(currentDay);
         if (daily !== null) card.dataset.daily = String(daily);
-        const priceNode = card.querySelector('[data-live-price]');
-        if (priceNode) priceNode.textContent = `${price.toFixed(2)} €`;
+        card.querySelectorAll('[data-live-price]').forEach((priceNode) => {
+          priceNode.textContent = `${formatLiveNumber(price)} €`;
+        });
         const changeNode = card.querySelector('[data-live-change]');
         if (changeNode && daily !== null) {
           const sign = daily > 0 ? '+' : '';
@@ -9897,15 +9908,13 @@ CHARTS_SCRIPT = """<script>
       });
       document.querySelectorAll('.portfolio-table tr[data-ticker]').forEach((row) => {
         if (row.dataset.ticker !== ticker) return;
-        const priceNode = row.querySelector('[data-live-price]');
-        if (priceNode) priceNode.textContent = `${price.toFixed(2)} €`;
+        row.querySelectorAll('[data-live-price]').forEach((priceNode) => {
+          priceNode.textContent = `${formatLiveNumber(price)} €`;
+        });
         const riskPanel = row.querySelector('.portfolio-risk-popover');
         const riskButton = row.querySelector('.portfolio-risk-trigger');
         if (riskPanel) {
-          const formatRiskNumber = (value) => new Intl.NumberFormat('en-US', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          }).format(value);
+          const formatRiskNumber = formatLiveNumber;
           const formatSignedPercent = (value) =>
             `${value > 0 ? '+' : ''}${formatRiskNumber(value)}%`;
           const riskPrice = riskPanel.querySelector('[data-risk-current-price]');
@@ -9961,13 +9970,13 @@ CHARTS_SCRIPT = """<script>
         const investment = Number(row.dataset.investment);
         const value = Number.isFinite(quantity) ? price * quantity : null;
         const valueNode = row.querySelector('[data-live-value]');
-        if (valueNode && value !== null) valueNode.textContent = `${value.toFixed(2)} €`;
+        if (valueNode && value !== null) valueNode.textContent = `${formatLiveNumber(value)} €`;
         if (value !== null && Number.isFinite(investment) && investment > 0) {
           row.querySelectorAll('[data-portfolio-period="MAX"]').forEach((cell) => {
             const change = cell.dataset.portfolioKind === 'profit'
               ? value - investment
               : (value / investment - 1) * 100;
-            cell.textContent = `${cell.dataset.portfolioKind === 'profit' ? change.toFixed(2) + ' €' : (change > 0 ? '+' : '') + change.toFixed(2) + '%'}`;
+            cell.textContent = `${cell.dataset.portfolioKind === 'profit' ? formatLiveNumber(change) + ' €' : (change > 0 ? '+' : '') + formatLiveNumber(change) + '%'}`;
           });
         }
       });
@@ -9988,11 +9997,11 @@ CHARTS_SCRIPT = """<script>
         const totalValueNode = document.querySelector('[data-portfolio-total-value]');
         const totalProfitNode = document.querySelector('[data-portfolio-total-profit]');
         const totalReturnNode = document.querySelector('[data-portfolio-total-return]');
-        if (totalValueNode) totalValueNode.textContent = `${totalValue.toFixed(2)} €`;
-        if (totalProfitNode) totalProfitNode.textContent = `${(totalValue - totalInvested).toFixed(2)} €`;
+        if (totalValueNode) totalValueNode.textContent = `${formatLiveNumber(totalValue)} €`;
+        if (totalProfitNode) totalProfitNode.textContent = `${formatLiveNumber(totalValue - totalInvested)} €`;
         if (totalReturnNode && totalInvested > 0) {
           const totalReturn = (totalValue / totalInvested - 1) * 100;
-          totalReturnNode.textContent = `${totalReturn > 0 ? '+' : ''}${totalReturn.toFixed(2)}%`;
+          totalReturnNode.textContent = `${totalReturn > 0 ? '+' : ''}${formatLiveNumber(totalReturn)}%`;
         }
       }
       payload.watchlist?.forEach((item) => {
@@ -10058,6 +10067,31 @@ CHARTS_SCRIPT = """<script>
       (sum, item) => sum + item.value, 0
     );
     if (livePortfolioTotal > 0) {
+      const formatShares = new Intl.NumberFormat('en-US', {
+        minimumFractionDigits: 6,
+        maximumFractionDigits: 6,
+      });
+      document.querySelectorAll('.portfolio-table tr[data-ticker]').forEach((row) => {
+        const summary = row.querySelector('[data-risk-current-summary]');
+        const livePrice = Number(payload.live[row.dataset.ticker]?.priceEur);
+        const quantity = Number(row.dataset.quantity);
+        const investment = Number(row.dataset.investment);
+        if (
+          !summary
+          || !Number.isFinite(livePrice)
+          || !Number.isFinite(quantity)
+          || quantity <= 0
+          || !Number.isFinite(investment)
+          || investment <= 0
+        ) {
+          return;
+        }
+        const value = livePrice * quantity;
+        const averagePrice = investment / quantity;
+        const returnOnCost = (livePrice / averagePrice - 1) * 100;
+        const weight = value / livePortfolioTotal * 100;
+        summary.textContent = `Tienes ${formatShares.format(quantity)} acciones con coste medio ${formatLiveNumber(averagePrice)} €, valor actual ${formatLiveNumber(value)} € (${returnOnCost > 0 ? '+' : ''}${formatLiveNumber(returnOnCost)}% sobre coste); pesa ${formatLiveNumber(weight)} % de tu cartera.`;
+      });
       payload.portfolio?.forEach((item) => {
         const position = livePortfolioValues.find((value) => value.ticker === item.ticker);
         if (position) item.weight_pct = position.value / livePortfolioTotal * 100;
@@ -10255,7 +10289,7 @@ def _floor_status_html(status: dict[str, Any] | None) -> str:
         else "—"
     )
     current_text = (
-        f'{_format_number(status["current_price_eur"])} €'
+        f'{_format_live_number(status["current_price_eur"])} €'
         if status.get("current_price_eur") is not None
         else "—"
     )
@@ -10292,7 +10326,7 @@ def _floor_status_html(status: dict[str, Any] | None) -> str:
         '<details class="floor-status">'
         f'<summary>Precios suelo · {_esc(zone)}</summary>'
         '<dl>'
-        f'<div><dt>Actual</dt><dd>{_esc(current_text)}</dd></div>'
+        f'<div><dt>Actual</dt><dd data-live-price>{_esc(current_text)}</dd></div>'
         f'<div><dt>Plan</dt><dd>{_esc(plan_text)}</dd></div>'
         f'<div><dt>Extremo</dt><dd>{_esc(extreme_text)}</dd></div>'
         f'<div><dt>RSI(14) · umbral &lt;35</dt>'
@@ -10401,7 +10435,7 @@ def render_dashboard(
         ticker_text = company.ticker or "Sin ticker"
         
         price_text = (
-            f'{_format_number(quote.current_price_eur)} €'
+            f'{_format_live_number(quote.current_price_eur)} €'
             if quote.current_price_eur is not None
             else "—"
         )
@@ -10674,6 +10708,7 @@ def render_dashboard(
             else None
         )
         explanation_sentences = []
+        current_summary_index = None
         if risk.atr_pct is not None and down_margin is not None and up_margin is not None:
             explanation_sentences.append(
                 f"Los dos niveles salen del ATR de {risk.atr_days} sesiones "
@@ -10691,10 +10726,11 @@ def render_dashboard(
             and return_on_cost is not None
             and weight_pct is not None
         ):
+            current_summary_index = len(explanation_sentences)
             explanation_sentences.append(
                 f"Tienes {_format_number(position.asset.shares, 6)} acciones con "
                 f"coste medio {_portfolio_cell(average_price, ' €')}, valor actual "
-                f"{_portfolio_cell(current_value, ' €')} "
+                f"{_format_live_number(current_value)} € "
                 f"({signed_percent(return_on_cost)} sobre coste); pesa "
                 f"{_format_number(weight_pct)} % de tu cartera."
             )
@@ -10739,11 +10775,26 @@ def render_dashboard(
                 f"Confianza {risk.confidence} según las {risk.sessions_used} "
                 "sesiones de histórico usadas en el cálculo."
             )
-        explanation = " ".join(explanation_sentences)
-        primary_review_value = _portfolio_cell(risk.primary_review_eur, " €")
-        primary_target_value = _portfolio_cell(risk.primary_target_eur, " €")
+        explanation = " ".join(
+            (
+                f'<span data-risk-current-summary>{_esc(sentence)}</span>'
+                if index == current_summary_index
+                else _esc(sentence)
+            )
+            for index, sentence in enumerate(explanation_sentences)
+        )
+        primary_review_value = (
+            f'{_format_live_number(risk.primary_review_eur)} €'
+            if risk.primary_review_eur is not None
+            else "—"
+        )
+        primary_target_value = (
+            f'{_format_live_number(risk.primary_target_eur)} €'
+            if risk.primary_target_eur is not None
+            else "—"
+        )
         secondary_value = (
-            _portfolio_cell(risk.review_eur, " €")
+            f'{_format_live_number(risk.review_eur)} €'
             if risk.review_eur is not None
             else "—"
         )
@@ -10771,7 +10822,7 @@ def render_dashboard(
             f'{no_data_note}'
             '<dl class="portfolio-risk-levels">'
             '<div class="portfolio-risk-level"><dt>Precio actual</dt>'
-            f'<dd data-risk-current-price>{_portfolio_cell(current_price, " €")}</dd></div>'
+            f'<dd data-risk-current-price>{_format_live_number(current_price)} €</dd></div>'
             '<div class="portfolio-risk-level"><dt>Precio medio</dt>'
             f'<dd>{_portfolio_cell(average_price, " €")}</dd></div>'
             '</dl>'
@@ -10800,7 +10851,7 @@ def render_dashboard(
             '</dl>'
             '<details class="portfolio-risk-explanation">'
             '<summary>¿Por qué estos niveles?</summary>'
-            f'<p>{_esc(explanation)}</p></details>'
+            f'<p>{explanation}</p></details>'
             '<p class="portfolio-risk-disclaimer">Niveles educativos, no órdenes '
             'de compra/venta.</p></div>'
         )
@@ -10821,9 +10872,9 @@ def render_dashboard(
         f'<td data-label="Posición">{_format_number(position.asset.shares, 6)}</td>'
         f'<td data-label="Inversión base">'
         f"{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
-        f'<td data-label="Precio actual"><span data-live-price>{_portfolio_cell(position.prices_eur.get("Hoy"), " €")}</span></td>'
+        f'<td data-label="Precio actual"><span data-live-price>{_format_live_number(position.prices_eur.get("Hoy"))} €</span></td>'
         f'<td data-label="Valor actual" data-live-value>'
-        f"{_portfolio_cell(position.current_value_eur, ' €')}</td>"
+        f'{_format_live_number(position.current_value_eur)} €</td>'
         + "".join(
             _portfolio_value(position.returns_pct.get(period), "return").replace(
                 "<td",
@@ -10884,10 +10935,10 @@ def render_dashboard(
         total_profit = total_value - total_invested
         total_return = (total_value / total_invested - 1) * 100
         portfolio_total = (
-            f'<p class="portfolio-total">Valor actual: <strong data-portfolio-total-value>{_portfolio_cell(total_value, " €")}</strong>'
+            f'<p class="portfolio-total">Valor actual: <strong data-portfolio-total-value>{_format_live_number(total_value)} €</strong>'
             f' · Inversión base: {_portfolio_cell(total_invested, " €")}'
-            f' · Ganancia MAX: <strong data-portfolio-total-profit>{_portfolio_cell(total_profit, " €")}</strong> '
-            f'(<span data-portfolio-total-return>{_portfolio_cell(total_return, "%")}</span>)</p>'
+            f' · Ganancia MAX: <strong data-portfolio-total-profit>{_format_live_number(total_profit)} €</strong> '
+            f'(<span data-portfolio-total-return>{_format_live_number(total_return)}%</span>)</p>'
         )
     elif portfolio:
         portfolio_total = (
@@ -11226,10 +11277,9 @@ def render_dashboard(
     .chart-status {{ font-variant-numeric: tabular-nums; }}
     .heatmap-chart {{ display: block; width: 100%; max-width: 100%; min-height: 240px; overflow: hidden; }}
     .average-chart {{ display: block; width: 100%; max-width: 100%; height: auto; overflow: hidden; }}
-    .heatmap-name, .heatmap-return {{ fill: var(--text-primary); stroke: var(--bg); stroke-width: 2px; paint-order: stroke;
-      stroke-linejoin: round; pointer-events: none; }}
-    .heatmap-name {{ font-size: 10px; font-weight: 750; }}
-    .heatmap-return {{ font-size: 10px; font-variant-numeric: tabular-nums; }}
+    .heatmap-name, .heatmap-return {{ fill: #d7e0eb; stroke: none; pointer-events: none; }}
+    .heatmap-name {{ font-family: inherit; font-size: 10px; font-weight: 600; }}
+    .heatmap-return {{ font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }}
     .chart-empty {{ fill: var(--text-secondary); font-size: 12px; }}
     .chart-time {{ fill: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }}
     .portfolio-visualizations {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 300px); gap: 12px; margin: 0 0 14px; }}

@@ -1049,7 +1049,7 @@ class SentimentTests(unittest.TestCase):
         report = StockReport(
             Company("NVIDIA", "NVD.SG", "NVDA"),
             quote=Quote(
-                current_price_eur=80,
+                current_price_eur=80.1234,
                 market_date=generated_at.date(),
                 market_timezone=TIMEZONE.key,
                 extra={"rsi14": 30},
@@ -1057,8 +1057,8 @@ class SentimentTests(unittest.TestCase):
         )
         position = PortfolioPosition(
             PortfolioAsset("NVIDIA", "NVD.SG", 1, 100, "EUR"),
-            prices_eur={"Hoy": 80},
-            current_value_eur=80,
+            prices_eur={"Hoy": 80.1234},
+            current_value_eur=80.1234,
             price_date=generated_at.date(),
             market_timezone=TIMEZONE.key,
         )
@@ -1080,6 +1080,11 @@ class SentimentTests(unittest.TestCase):
             floor_statuses=floor_statuses,
         )
         self.assertIn("NVDA", payload["price_floors"])
+        self.assertEqual(payload["watchlist"][0]["current_price_eur"], 80.1234)
+        self.assertEqual(
+            payload["portfolio"]["positions"][0]["current_price_eur"],
+            80.1234,
+        )
         self.assertEqual(
             payload["watchlist"][0]["price_floor"]["plan_floor_eur"],
             floor_statuses["NVDA"]["plan_floor_eur"],
@@ -1093,6 +1098,18 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Precios suelo", html)
         self.assertIn("Próxima aportación 2/16", html)
         self.assertIn("no ejecuta órdenes", html)
+        self.assertIn('<strong data-live-price>80.12 €</strong>', html)
+        self.assertIn('<dd data-live-price>80.12 €</dd>', html)
+        self.assertIn('<span data-live-price>80.12 €</span>', html)
+        self.assertIn('<dd data-risk-current-price>80.12 €</dd>', html)
+        self.assertIn(
+            '<td data-label="Valor actual" data-live-value>80.12 €</td>',
+            html,
+        )
+        self.assertIn("data-risk-current-summary", html)
+        self.assertIn("card.querySelectorAll('[data-live-price]')", html)
+        self.assertIn("row.querySelectorAll('[data-live-price]')", html)
+        self.assertIn("maximumFractionDigits: 2", html)
         self.assertIn(
             '"price_floors"',
             build_analysis_prompt(
@@ -3711,10 +3728,14 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Number(item.weight_pct)", html)
         self.assertIn("'var(--bg)'", html)
         self.assertIn(
-            ".heatmap-name, .heatmap-return { fill: var(--text-primary); "
-            "stroke: var(--bg);",
+            ".heatmap-name, .heatmap-return { fill: #d7e0eb; stroke: none;",
             html,
         )
+        self.assertIn(
+            ".heatmap-name { font-family: inherit; font-size: 10px; font-weight: 600; }",
+            html,
+        )
+        self.assertIn(".heatmap-return { font-size: 10px; font-weight: 500;", html)
         self.assertIn("const nameLabels = groups.filter((item) => item.data.current_day)", html)
         self.assertIn(
             "behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches",
