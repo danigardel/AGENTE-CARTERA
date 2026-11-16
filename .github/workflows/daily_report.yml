@@ -61,6 +61,7 @@ jobs:
           AGENT_STATE_PATH: agent_state.json
           CHAT_API_URL: ${{ vars.CHAT_API_URL }}
           CHAT_GOOGLE_CLIENT_ID: ${{ vars.CHAT_GOOGLE_CLIENT_ID }}
+          LIVE_QUOTES_API_URL: ${{ vars.LIVE_QUOTES_API_URL }}
         run: |
           mkdir -p public
           python daily_report.py --no-ai --output public/index.html --data-output public/market_data.json

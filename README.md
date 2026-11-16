@@ -155,6 +155,43 @@ El workflow `.github/workflows/daily_report.yml` instala Python, ejecuta la suit
 
 El workflow publica `public/` en la rama `gh-pages` usando un commit huérfano para mantener pequeño el historial de publicación. Para la primera publicación, espera a que el workflow cree esa rama y configura una vez **Settings → Pages → Build and deployment → Source: Deploy from a branch**, seleccionando `gh-pages` y `/(root)`. Después, cada ejecución correcta publica el contenido actualizado en esa rama. La concurrencia evita despliegues simultáneos y no cancela una ejecución que ya está en curso. La hora del informe usa `Europe/Madrid`. Cada tarjeta muestra el último precio que los proveedores devuelven durante esa generación; puede haber retrasos o no cambiar cuando el mercado está cerrado.
 
+### Activar las cotizaciones casi en vivo (opcional)
+
+Esta función no requiere cambiar la frecuencia del agente ni dejar un ordenador
+encendido. El cron y Pages siguen generando la instantánea estática y el proxy
+actualiza precios directamente en las pestañas abiertas.
+
+1. Crea una cuenta gratuita de Cloudflare y activa el subdominio `workers.dev`
+   en **Workers & Pages**.
+2. En **Manage Account → API Tokens**, crea un token con la plantilla
+   **Edit Cloudflare Workers**, limitado a la cuenta donde se desplegará el
+   Worker. Copia también el **Account ID** de esa cuenta. No compartas ni
+   publiques el token.
+3. En GitHub abre **Settings → Secrets and variables → Actions → Secrets** y
+   crea los secretos `CLOUDFLARE_API_TOKEN` y `CLOUDFLARE_ACCOUNT_ID`.
+4. Cuando la implementación esté publicada en `main`, ejecuta manualmente
+   **Actions → Deploy live quotes proxy → Run workflow**.
+   Comprueba que termine correctamente y copia la URL `workers.dev` que aparece
+   en el resultado; debe responder en `/healthz`.
+5. En **Settings → Secrets and variables → Actions → Variables**, crea
+   `LIVE_QUOTES_API_URL` con la URL del Worker terminada en `/quotes`, por
+   ejemplo `https://agente-cartera-live-quotes.<tu-subdominio>.workers.dev/quotes`.
+6. Ejecuta **Actions → Daily stock report → Run workflow** para regenerar y
+   publicar el HTML con la conexión. Abre Pages en horario de mercado; el
+   estado «L&S» del encabezado indica cuándo se consultaron los últimos precios.
+
+El endpoint público del Worker permite CORS desde
+`https://danigardel.github.io` y tickers de la lista permitida generada desde
+`COMPANIES`; CORS no es autenticación y no impide llamadas directas al endpoint.
+Solo devuelve cotizaciones públicas, no cantidades ni datos de cartera. Según la
+[documentación de límites de Cloudflare Workers](https://developers.cloudflare.com/workers/platform/limits/)
+consultada el 16/11/2026, Workers Free publica 100.000 solicitudes al día y 50
+subpeticiones por solicitud; cada llamada de este Worker está limitada a 10
+instrumentos. La caché en memoria es local a la instancia y no se comparte entre
+centros de datos. Los límites y condiciones del endpoint no documentado de L&S
+pueden cambiar, así que no se garantiza que el servicio siga siendo gratuito ni
+que cada cotización sea de tiempo real estricto.
+
 Al finalizar correctamente `portfolio_agent.yml`, `daily_report.yml` vuelve a
 generar y publicar el dashboard después de que el agente persiste el nuevo
 análisis en `data`. Los fallos del agente no disparan esta publicación; se
@@ -202,7 +239,8 @@ El análisis IA recibe métricas cuantitativas de riesgo calculadas con cierres 
 - El proveedor de IA activo recibe la cartera, las empresas de `COMPANIES` y el nodo `global_market_radar`; el contexto sectorial solo se incluye para empresas con sector devuelto por Yahoo Finance. La respuesta se valida y se descartan recomendaciones con tickers que no están en la lista de seguimiento o en la cartera correspondiente. El análisis puede equivocarse, no conoce el horizonte ni la tolerancia al riesgo del usuario y no es asesoramiento financiero personalizado.
 - Se resume el consenso por empresa. La cartera publicada usa `PORTFOLIO` y el historial filtrado de `portfolio_activity.json`; no se consulta la cuenta del broker. El look-through de fondos, cuando Yahoo Finance lo ofrece, se limita a sus holdings y sectores publicados y no representa necesariamente toda la exposición del fondo.
 - El screener permite filtrar por búsqueda instantánea de nombre/ticker, sector, PEG, PER, diagnóstico de valoración, capitalización, dividendo, beta, variación diaria, consenso y retroceso de 52 semanas; también puede ordenar por rendimiento diario, PEG, PER, capitalización, dividendo, beta, consenso o sentimiento. Funciona en el navegador sobre los datos ya incluidos en el informe.
-- La interfaz publica `window.DashboardMarketData.applySnapshot([...])` y `window.DashboardMarketData.applyDelta([...])` para integrar en el futuro un proveedor autorizado del lado cliente. Cada actualización acepta `ticker`, `priceEur`, `previousCloseEur`, `marketDate` (`AAAA-MM-DD`), `marketTimezone` y, opcionalmente, `timestamp` ISO 8601. El controlador calcula el cambio porcentual, actualiza tarjetas, tabla, heatmaps, sparklines y curvas 1D, y vuelve a aplicar la separación stale/fresh. Es solo una interfaz de integración: no abre conexiones, no consulta Trade Republic y no convierte por sí sola el HTML estático en streaming en tiempo real.
+- La interfaz publica `window.DashboardMarketData.applySnapshot([...])` y `window.DashboardMarketData.applyDelta([...])`. Cada actualización acepta `ticker`, `priceEur`, `previousCloseEur`, `marketDate` (`AAAA-MM-DD`), `marketTimezone` y, opcionalmente, `timestamp` ISO 8601. El controlador calcula el cambio porcentual, actualiza tarjetas, tabla, heatmaps, sparklines y curvas 1D, y vuelve a aplicar la separación stale/fresh. La capa opcional de Lang & Schwarz descrita abajo usa `applyDelta`; por sí sola, esta interfaz no abre conexiones ni transforma el HTML estático en streaming.
+- La capa opcional de cotizaciones casi en vivo usa un Worker de Cloudflare como proxy limitado del endpoint intradía `mid` de Lang & Schwarz. La página consulta cada 30 segundos, solo mientras la pestaña está visible y de lunes a viernes entre 07:30 y 23:00 hora de Madrid; prioriza posiciones y tarjetas visibles. El proxy acepta únicamente tickers configurados, hasta 10 por petición, limita a seis las consultas simultáneas y usa una caché en memoria de 15 segundos por instancia. Si el proxy falla, se mantienen los datos publicados. Es sondeo, no un feed push ni una garantía de tiempo real; L&S no ofrece aquí una API documentada y el precio `mid` puede diferir de Trade Republic. El modo queda desactivado hasta configurar `LIVE_QUOTES_API_URL` y desplegar el Worker.
 - En la tabla de cartera, los selectores cambian entre rendimientos 1D, 1W, 1M, 6M y 1Y, precios de cierre históricos en euros, o ganancia/rendimiento MAX. Activo, posición, inversión base, precio actual y valor actual permanecen siempre visibles. El gráfico comparativo de cartera sincroniza su periodo con el selector, junto con S&P 500 y MSCI World.
 - En la celda de cada activo de «Mi cartera», el botón de escudo abre un panel accesible con el precio actual y medio, dos niveles ATR, volatilidad y explicación personalizada. Se reutiliza el histórico diario que ya carga la cartera, sin llamadas adicionales a Yahoo Finance. El ATR(14) es la media simple de 14 rangos verdaderos. El campo `atr_pct` guarda el ATR dividido por el último cierre y expresado en puntos porcentuales (por ejemplo, `2` representa `2 %`). Los niveles principales parten siempre del precio actual en euros: revisión = `precio_eur × (1 − 2.5 × atr_pct / 100)` y toma de beneficios = `precio_eur × (1 + 2 × 2.5 × atr_pct / 100)`, con variaciones respectivas de −2.5 × `atr_pct` y +5 × `atr_pct`. El ATR porcentual se calcula en la divisa nativa y luego se aplica al precio en euros, por lo que la conversión de divisa no altera la volatilidad relativa. Como referencia secundaria se conserva el nivel desde máximos: `(máximo de las últimas 22 sesiones / último cierre − 2.5 × atr_pct / 100) × precio_eur`. El bloque secundario y su mensaje se resaltan cuando el precio actual está en o por debajo de ese nivel; el escudo permanece neutro salvo cuando faltan datos, y el nivel puede bajar cuando un máximo antiguo sale de la ventana móvil. Con menos de 15 sesiones válidas, el panel marca «Sin datos» y no inventa niveles. La confianza es una etiqueta según las sesiones válidas del histórico usadas: «high» desde 100, «medium» desde 30 y «low» por debajo de 30; no es una probabilidad estadística. Son distancias basadas en volatilidad, no predicciones, stops automáticos ni órdenes de compra/venta; no alteran precios, rentabilidades ni totales. El campo opcional `risk_zones` de `market_data.json` es aditivo para mantener la compatibilidad con datos previos.
 - Cada tarjeta de seguimiento incluye un sparkline SVG sin ejes ni etiquetas, usando los cierres intradía de 5 minutos limitados a la fecha local de la sesión bursátil; no representa una ventana móvil de 24 horas y se oculta cuando la cotización no pertenece a la sesión actual.

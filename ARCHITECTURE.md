@@ -48,6 +48,18 @@
   siguen consumiendo la cuota/tokens normales del modelo y su coste depende de
   la clave y facturación configuradas. En el chat, las URLs HTTPS de fuentes se
   convierten en enlaces accesibles sin interpretar HTML ni Markdown del modelo.
+- La integración opcional de cotizaciones casi en vivo usa un Worker de
+  Cloudflare como proxy limitado del endpoint `mid` no documentado de L&S.
+  Cuando está configurado, el navegador consulta cada 30 segundos mientras la
+  pestaña está visible y dentro del horario de mercado; prioriza posiciones y
+  activos visibles. El proxy solo acepta tickers permitidos, procesa hasta 10
+  por solicitud, limita la concurrencia a seis y usa caché local de 15 segundos
+  por instancia. La interfaz existente `DashboardMarketData.applyDelta()` actualiza
+  la página sin regenerar el HTML. El cron y el snapshot estático siguen como
+  respaldo; no se habilitan streaming real, alertas nuevas ni autenticación.
+  La activación requiere los secretos de despliegue de Cloudflare y la variable
+  de Actions `LIVE_QUOTES_API_URL`. El proveedor puede cambiar o limitar el
+  endpoint y sus datos pueden diferir de Trade Republic.
 
 ## Datos de mercado y símbolos
 

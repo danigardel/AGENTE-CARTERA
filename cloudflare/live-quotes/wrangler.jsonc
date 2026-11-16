@@ -1,0 +1,10 @@
+{
+  "name": "agente-cartera-live-quotes",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-11-16",
+  "workers_dev": true,
+  "vars": {
+    "ALLOWED_ORIGIN": "https://danigardel.github.io",
+    "CACHE_TTL_SECONDS": "15"
+  }
+}

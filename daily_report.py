@@ -120,6 +120,8 @@ MAX_HEADLINES = 8
 MAX_GEMINI_NEWS_ITEMS = 200
 MAX_MARKET_RADAR_ITEMS = 400
 MAX_WORKERS = 8
+LIVE_QUOTES_POLL_INTERVAL_MS = 30_000
+LIVE_QUOTES_MAX_TICKERS_PER_REQUEST = 10
 LS_QUOTE_URL = "https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument"
 LS_TIMEZONE = ZoneInfo("Europe/Berlin")
 LS_CONCURRENT_REQUESTS = threading.BoundedSemaphore(3)
@@ -9330,6 +9332,7 @@ PORTFOLIO_SCRIPT = """<script>
 CHARTS_SCRIPT = """<script>
 (() => {
   const payloadNode = document.getElementById('dashboard-chart-data');
+  const liveQuotesConfigNode = document.getElementById('live-quotes-config');
   const portfolioRiskPopovers = Array.from(
     document.querySelectorAll('.portfolio-risk-popover[popover]')
   );
@@ -9377,6 +9380,9 @@ CHARTS_SCRIPT = """<script>
 
   if (!payloadNode || !window.d3) return;
   const payload = JSON.parse(payloadNode.textContent);
+  const liveQuotesConfig = liveQuotesConfigNode
+    ? JSON.parse(liveQuotesConfigNode.textContent)
+    : {};
   const d3 = window.d3;
 
   function returnColor(value, period) {
@@ -10069,6 +10075,133 @@ CHARTS_SCRIPT = """<script>
     applySnapshot: (updates) => updateLivePrices(updates, true),
     applyDelta: (updates) => updateLivePrices(updates, false),
   });
+
+  function startLiveQuotes() {
+    const endpoint = liveQuotesConfig.apiUrl;
+    const status = document.getElementById('live-quotes-status');
+    if (!endpoint || !status) return;
+
+    const supportedTickers = new Set(liveQuotesConfig.tickers || []);
+    const maxTickersPerRequest = liveQuotesConfig.maxTickersPerRequest || 10;
+    const pollIntervalMs = liveQuotesConfig.pollIntervalMs || 30000;
+    let timer = null;
+    let polling = false;
+
+    status.hidden = false;
+
+    const setStatus = (message, state) => {
+      status.textContent = message;
+      status.dataset.state = state;
+    };
+
+    const isMarketSession = () => {
+      const parts = new Intl.DateTimeFormat('en', {
+        timeZone: 'Europe/Madrid',
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(new Date()).reduce((result, part) => {
+        if (part.type !== 'literal') result[part.type] = part.value;
+        return result;
+      }, {});
+      const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+      return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(parts.weekday)
+        && minutes >= 450
+        && minutes <= 1380;
+    };
+
+    const requestedTickers = () => {
+      const tickers = new Set(
+        (payload.portfolio || []).map((item) => item.ticker)
+      );
+      document.querySelectorAll('.stock-card').forEach((card) => {
+        const bounds = card.getBoundingClientRect();
+        if (bounds.height > 0 && bounds.bottom > 0 && bounds.top < window.innerHeight) {
+          tickers.add(card.dataset.ticker);
+        }
+      });
+      return Array.from(tickers).filter((ticker) => supportedTickers.has(ticker));
+    };
+
+    const scheduleNextPoll = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(poll, pollIntervalMs);
+    };
+
+    async function poll() {
+      if (polling) return;
+      if (document.visibilityState !== 'visible') {
+        setStatus('L&S · sondeo pausado con la pestaña oculta', 'idle');
+        return;
+      }
+      if (!isMarketSession()) {
+        setStatus('L&S · sondeo en pausa fuera del horario de mercado', 'idle');
+        scheduleNextPoll();
+        return;
+      }
+
+      const tickers = requestedTickers();
+      if (!tickers.length) {
+        setStatus('L&S · no hay instrumentos compatibles visibles', 'idle');
+        scheduleNextPoll();
+        return;
+      }
+
+      polling = true;
+      let updated = 0;
+      let failed = 0;
+      try {
+        for (let index = 0; index < tickers.length; index += maxTickersPerRequest) {
+          const batch = tickers.slice(index, index + maxTickersPerRequest);
+          const url = new URL(endpoint);
+          url.searchParams.set('tickers', batch.join(','));
+          const response = await fetch(url, {
+            headers: {Accept: 'application/json'},
+            cache: 'no-store',
+            credentials: 'omit',
+          });
+          const result = await response.json();
+          if (!response.ok || !Array.isArray(result.quotes)) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+          }
+          updated += window.DashboardMarketData.applyDelta(result.quotes)
+            ? result.quotes.length
+            : 0;
+          failed += Array.isArray(result.unavailableTickers)
+            ? result.unavailableTickers.length
+            : 0;
+        }
+        const time = new Intl.DateTimeFormat('es-ES', {
+          timeZone: 'Europe/Madrid',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hourCycle: 'h23',
+        }).format(new Date());
+        setStatus(
+          `L&S · ${updated} cotizaciones consultadas · ${time}${failed ? ` · ${failed} no disponibles` : ''}`,
+          failed ? 'partial' : 'success'
+        );
+      } catch (error) {
+        console.warn('No se pudieron actualizar las cotizaciones de L&S.', error);
+        setStatus('L&S · sin conexión; se conservan los datos publicados', 'error');
+      } finally {
+        polling = false;
+        scheduleNextPoll();
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState === 'visible') poll();
+      else setStatus('L&S · sondeo pausado con la pestaña oculta', 'idle');
+    });
+    window.addEventListener('online', poll);
+    poll();
+  }
+
+  startLiveQuotes();
 
   renderAll();
   if ('ResizeObserver' in window) {
@@ -10803,6 +10936,44 @@ def render_dashboard(
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
+    live_quotes_url = os.getenv("LIVE_QUOTES_API_URL", "").strip()
+    if live_quotes_url:
+        live_quotes_parts = urlsplit(live_quotes_url)
+        if (
+            live_quotes_parts.scheme != "https"
+            or not live_quotes_parts.netloc
+            or live_quotes_parts.username
+            or live_quotes_parts.password
+            or live_quotes_parts.query
+            or live_quotes_parts.fragment
+            or live_quotes_parts.path.rstrip("/") != "/quotes"
+        ):
+            raise ValueError(
+                "LIVE_QUOTES_API_URL debe ser una URL HTTPS terminada en /quotes."
+            )
+    live_quotes_config_json = json.dumps(
+        {
+            "apiUrl": live_quotes_url,
+            "tickers": (
+                [
+                    company.ticker
+                    for company in COMPANIES
+                    if company.ticker and company.ls_id is not None
+                ]
+                if live_quotes_url
+                else []
+            ),
+            "maxTickersPerRequest": LIVE_QUOTES_MAX_TICKERS_PER_REQUEST,
+            "pollIntervalMs": LIVE_QUOTES_POLL_INTERVAL_MS,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    live_quotes_config_json = (
+        live_quotes_config_json.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
     google_identity_script = (
         '<script id="google-identity-script" src="https://accounts.google.com/gsi/client" async defer></script>'
         if os.getenv("CHAT_GOOGLE_CLIENT_ID", "").strip()
@@ -10875,6 +11046,11 @@ def render_dashboard(
     h1 {{ font-size: clamp(28px, 4vw, 42px); letter-spacing: -.04em; line-height: 1.1; margin: 7px 0; text-wrap: balance; }}
     .subtitle, .muted {{ color: var(--text-secondary); }}
     .updated {{ color: var(--text-secondary); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }}
+    .live-quotes-status {{ display: block; margin-top: 5px; font-size: 11px; }}
+    .live-quotes-status[hidden] {{ display: none; }}
+    .live-quotes-status[data-state="success"] {{ color: var(--positive); }}
+    .live-quotes-status[data-state="partial"] {{ color: #fbbf24; }}
+    .live-quotes-status[data-state="error"] {{ color: var(--negative); }}
     .vix-indicator {{ display: grid; gap: 1px; border: 1px solid currentColor; border-radius: 12px;
       padding: 8px 12px; color: var(--text-secondary); line-height: 1.35; min-width: 130px; }}
     .vix-indicator span, .vix-indicator small {{ font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }}
@@ -11232,7 +11408,9 @@ def render_dashboard(
         <strong>{vix_price_text} <small>{vix_change_text}</small></strong>
         <small>{vix_mood}</small>
       </div>
-      <div class="updated">Actualizado<br><strong>{_esc(generated_at.strftime("%d/%m/%Y · %H:%M %Z"))}</strong></div>
+      <div class="updated">Actualizado<br><strong>{_esc(generated_at.strftime("%d/%m/%Y · %H:%M %Z"))}</strong>
+        <span id="live-quotes-status" class="live-quotes-status" role="status" aria-live="polite" hidden></span>
+      </div>
     </header>
     <nav class="section-nav" aria-label="Navegación principal">
       <a href="#market" aria-current="page">Mercado</a>
@@ -11449,6 +11627,7 @@ def render_dashboard(
   </main>
 <script type="application/json" id="dashboard-chart-data">{chart_payload}</script>
 <script type="application/json" id="chat-config">{chat_config_json}</script>
+<script type="application/json" id="live-quotes-config">{live_quotes_config_json}</script>
 {google_identity_script}
 {SORT_SCRIPT}
 {SECTION_NAV_SCRIPT}
