@@ -433,6 +433,7 @@ class DashboardCharts:
     risk_metrics: dict[str, Any] = field(default_factory=dict)
     portfolio_value_eur: float = 0.0
     timezone: str = TIMEZONE.key
+    as_of: str | None = None
 
 
 PORTFOLIO = (
@@ -2060,9 +2061,10 @@ def _dated_closes(history: Any) -> list[tuple[date, float]]:
     closes = []
     for timestamp, value in close_values:
         close = _finite_float(value)
-        if close is None or close <= 0:
+        session_date = timestamp.date()
+        if close is None or close <= 0 or session_date.weekday() >= 5:
             continue
-        closes.append((timestamp.date(), close))
+        closes.append((session_date, close))
     return sorted(closes)
 
 
@@ -2833,7 +2835,18 @@ def _portfolio_transaction_chart_data(
     activities = activities or []
     first_trade_date = min(item.trade_date for item in transactions)
     currencies = {item.ticker: item.currency for item in transactions}
-    closes_by_ticker = historical_closes
+    closes_by_ticker = (
+        {
+            ticker: [
+                (day, close)
+                for day, close in closes
+                if day.weekday() < 5
+            ]
+            for ticker, closes in historical_closes.items()
+        }
+        if historical_closes is not None
+        else None
+    )
     if closes_by_ticker is None:
         tickers = list(
             dict.fromkeys(
@@ -2878,7 +2891,7 @@ def _portfolio_transaction_chart_data(
             for ticker, closes in closes_by_ticker.items()
             if ticker in currencies
             for day, _ in closes
-            if day >= first_trade_date
+            if day >= first_trade_date and day.weekday() < 5
         }
     )
     if not sample_dates:
@@ -3783,9 +3796,16 @@ def fetch_portfolio(
             )
             logging.warning("No se pudo obtener el histórico de %s: %s", source_ticker, error)
 
-        targets = {"Hoy": as_of}
+        targets = {
+            "Hoy": as_of,
+            "1D": as_of - timedelta(days=1),
+        }
         targets.update(
-            {period: as_of - timedelta(days=days) for period, days in PORTFOLIO_PERIODS}
+            {
+                period: as_of - timedelta(days=days - 1)
+                for period, days in PORTFOLIO_PERIODS
+                if period != "1D"
+            }
         )
         for label, target in targets.items():
             if label == "Hoy" and quote.current_price_eur is not None:
@@ -3811,6 +3831,26 @@ def fetch_portfolio(
 
         if quote.previous_close_eur is not None:
             position.prices_eur["1D"] = quote.previous_close_eur
+        elif position.price_date is not None:
+            previous_close = next(
+                (
+                    (day, close)
+                    for day, close in reversed(closes)
+                    if day < position.price_date
+                ),
+                None,
+            )
+            if previous_close is not None:
+                previous_date, previous_price = previous_close
+                if source_currency == "USD":
+                    dated_fx_rate = _close_on_or_before(fx_closes, previous_date)
+                    if dated_fx_rate is not None:
+                        previous_price *= dated_fx_rate[1]
+                    else:
+                        previous_price = 0
+                position.prices_eur["1D"] = (
+                    previous_price if previous_price > 0 else None
+                )
 
         current_price = position.prices_eur["Hoy"]
         risk_history = (
@@ -7149,7 +7189,7 @@ def collect_chart_data(
         )
     )
 
-    chart_data = DashboardCharts()
+    chart_data = DashboardCharts(as_of=datetime.now(TIMEZONE).date().isoformat())
     if not tickers:
         return chart_data
 
@@ -7497,7 +7537,21 @@ def collect_chart_data(
                         else None
                     )
                 else:
+                    ytd_price_eur = None
                     period_returns["YTD"] = None
+                period_prices = {
+                    period: _finite_float(position.prices_eur.get(period))
+                    for period, _ in PORTFOLIO_PERIODS
+                }
+                period_prices["YTD"] = ytd_price_eur
+                period_prices["MAX"] = (
+                    position.asset.investment_eur / position.asset.shares
+                    if position.asset.shares > 0
+                    else None
+                )
+                chart_item["prices_eur_by_period"] = period_prices
+                chart_item["current_price_eur"] = current_price_eur
+                chart_item["shares"] = position.asset.shares
                 chart_item["returns_pct_by_period"] = period_returns
             if allocation_value is not None and portfolio_value > 0:
                 chart_item["weight_pct"] = (
@@ -7538,6 +7592,8 @@ def collect_chart_data(
                 date_time = timestamp.to_pydatetime() if hasattr(timestamp, "to_pydatetime") else timestamp
                 if date_time.tzinfo is None:
                     date_time = date_time.replace(tzinfo=timezone.utc)
+                if date_time.weekday() >= 5:
+                    continue
                 date_time = date_time.astimezone(timezone.utc)
                 timestamp_key = date_time.isoformat()
                 watchlist_samples.setdefault(timestamp_key, []).append(
@@ -7607,6 +7663,8 @@ def collect_chart_data(
                 )
                 if date_time.tzinfo is None:
                     date_time = date_time.replace(tzinfo=timezone.utc)
+                if date_time.weekday() >= 5:
+                    continue
                 timestamp_key = date_time.astimezone(timezone.utc).isoformat()
                 if currency == "USD":
                     fx_value = _finite_float(fx_series.get(timestamp))
@@ -7659,6 +7717,8 @@ def collect_chart_data(
             )
             if date_time.tzinfo is None:
                 date_time = date_time.replace(tzinfo=timezone.utc)
+            if date_time.weekday() >= 5:
+                continue
             series.append(
                 {
                     "timestamp": date_time.astimezone(timezone.utc).isoformat(),
@@ -7672,11 +7732,21 @@ def collect_chart_data(
 
     chart_data.portfolio_period_series["1D"] = chart_data.portfolio_series
     chart_data.benchmark_period_series["1D"] = chart_data.benchmark_series
-    period_days = dict(PORTFOLIO_PERIODS)
-    period_days.pop("1D", None)
     today = datetime.now(TIMEZONE).date()
-    for period, days in period_days.items():
-        target_date = today - timedelta(days=days)
+    period_targets = {
+        period: today - timedelta(days=days - 1)
+        for period, days in PORTFOLIO_PERIODS
+        if period != "1D"
+    }
+    period_targets["YTD"] = today.replace(month=1, day=1)
+    portfolio_closes = [
+        historical_closes.get(position.asset.ticker, [])
+        for position in portfolio
+    ]
+    if portfolio and all(portfolio_closes):
+        period_targets["MAX"] = max(closes[0][0] for closes in portfolio_closes)
+
+    for period, target_date in period_targets.items():
         base_prices: dict[str, float] = {}
         for position in portfolio:
             base = _close_on_or_before(
@@ -7699,7 +7769,7 @@ def collect_chart_data(
                 day
                 for position in portfolio
                 for day, _ in historical_closes.get(position.asset.ticker, [])
-                if day >= target_date
+                if day >= target_date and day.weekday() < 5
             }
         )
         total_base_value = sum(
@@ -7743,7 +7813,11 @@ def collect_chart_data(
                             break
                         sample_price *= fx[1]
                     value += position.asset.shares * sample_price
-                if complete and sample_date >= baseline_date:
+                if (
+                    complete
+                    and sample_date >= target_date
+                    and sample_date >= baseline_date
+                ):
                     portfolio_points.append(
                         {
                             "timestamp": datetime.combine(
@@ -7772,7 +7846,7 @@ def collect_chart_data(
                     "value": (price / base[1] - 1) * 100,
                 }
                 for sample_date, price in closes
-                if sample_date >= base[0]
+                if sample_date >= target_date and sample_date.weekday() < 5
             ]
             if points:
                 benchmark_points.append(
@@ -9327,7 +9401,7 @@ PORTFOLIO_SCRIPT = """<script>
       cell.hidden = cell.dataset.portfolioPeriod !== period
         || cell.dataset.portfolioKind !== kind;
     });
-    window.DashboardPortfolioChartSelect?.(period === 'MAX' ? 'TOTAL' : period);
+    window.DashboardPortfolioChartSelect?.(period);
     window.DashboardPortfolioHeatmapSelect?.(period);
   }
 
@@ -9721,7 +9795,7 @@ CHARTS_SCRIPT = """<script>
       [],
       '€'
     );
-    const activePeriod = document.getElementById('portfolio-history-period')?.value || 'TOTAL';
+    const activePeriod = document.getElementById('portfolio-period')?.value || '1D';
     window.DashboardPortfolioChartSelect(activePeriod);
   }
 
@@ -9729,14 +9803,14 @@ CHARTS_SCRIPT = """<script>
     renderHeatmap('portfolio-heatmap', payload.portfolio, true, period);
   };
 
-  function periodStart(period, lastPoint) {
-    const lastDate = new Date(lastPoint);
-    if (period === 'TOTAL') return new Date(-8640000000000000);
+  function periodStart(period, referenceDate) {
+    const lastDate = new Date(referenceDate);
+    if (period === 'MAX' || period === 'TOTAL') return new Date(-8640000000000000);
     if (period === 'YTD') return new Date(Date.UTC(lastDate.getUTCFullYear(), 0, 1));
     const days = {'1W': 7, '1M': 30, '6M': 180, '1Y': 365}[period];
     if (!days) return new Date(-8640000000000000);
     const start = new Date(lastDate);
-    start.setUTCDate(start.getUTCDate() - days);
+    start.setUTCDate(start.getUTCDate() - (days - 1));
     return start;
   }
 
@@ -9754,19 +9828,20 @@ CHARTS_SCRIPT = """<script>
   }
 
   window.DashboardPortfolioChartSelect = (period) => {
-    const historyPeriod = document.getElementById('portfolio-history-period');
-    if (historyPeriod && historyPeriod.value !== period) historyPeriod.value = period;
-    const fullReturns = payload.portfolio_return_series || [];
     const fullProfit = payload.portfolio_profit_series || [];
-    const lastPoint = fullReturns[fullReturns.length - 1]?.timestamp
-      || fullProfit[fullProfit.length - 1]?.timestamp
-      || new Date().toISOString();
+    const fullReturns = payload.portfolio_return_series || [];
+    const referenceDate = payload.as_of
+      ? `${payload.as_of}T00:00:00.000Z`
+      : new Date().toISOString();
     const startDate = period === '1D'
-      ? new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`)
-      : periodStart(period, lastPoint);
+      ? new Date(`${payload.as_of || new Date().toISOString().slice(0, 10)}T00:00:00.000Z`)
+      : periodStart(period, referenceDate);
+    const profitPeriod = period === 'MAX' ? 'TOTAL' : period;
     const selectedProfit = period === '1D'
       ? payload.portfolio_intraday_profit_series || []
-      : fullProfit.filter((point) => new Date(point.timestamp) >= startDate);
+      : profitPeriod === 'TOTAL'
+        ? fullProfit
+        : fullProfit.filter((point) => new Date(point.timestamp) >= startDate);
     renderAverageLine(
       'portfolio-history-chart',
       selectedProfit,
@@ -9779,34 +9854,25 @@ CHARTS_SCRIPT = """<script>
 
     const selectedPortfolioReturn = period === '1D'
       ? payload.portfolio_series || []
-      : normalizeSeries(fullReturns, startDate);
+      : period === 'MAX' && fullReturns.length
+        ? normalizeSeries(fullReturns, startDate)
+        : payload.portfolio_period_series?.[period] || [];
     const selectedBenchmarks = period === '1D'
       ? payload.benchmark_series || []
-      : (payload.benchmark_history_series || []).map((benchmark) => ({
-        ...benchmark,
-        series: normalizeSeries(benchmark.series || [], startDate),
-      }));
+      : period === 'MAX' && payload.benchmark_history_series?.length
+        ? payload.benchmark_history_series.map((benchmark) => ({
+          ...benchmark,
+          series: normalizeSeries(benchmark.series || [], startDate),
+        }))
+        : payload.benchmark_period_series?.[period] || [];
     renderAverageLine(
       'portfolio-average-chart',
-      selectedPortfolioReturn.length
-        ? selectedPortfolioReturn
-        : payload.portfolio_period_series?.[period]
-          || payload.portfolio_period_series?.[period === 'TOTAL' || period === 'YTD' ? '1Y' : period]
-          || [],
-      selectedBenchmarks.length
-        ? selectedBenchmarks
-        : payload.benchmark_period_series?.[period]
-          || payload.benchmark_period_series?.[period === 'TOTAL' || period === 'YTD' ? '1Y' : period]
-          || [],
+      selectedPortfolioReturn,
+      selectedBenchmarks,
       false,
       period !== '1D'
     );
   };
-
-  document.getElementById('portfolio-history-period')
-    ?.addEventListener('change', (event) => {
-      window.DashboardPortfolioChartSelect(event.target.value);
-    });
 
   function updateLivePrices(updates, replace = false) {
     if (!Array.isArray(updates)) updates = updates && typeof updates === 'object' ? [updates] : [];
@@ -9822,6 +9888,15 @@ CHARTS_SCRIPT = """<script>
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(value);
+    const updateReturnCell = (cell, change) => {
+      const kind = cell.dataset.portfolioKind;
+      cell.textContent = kind === 'profit'
+        ? `${formatLiveNumber(change)} €`
+        : `${change > 0 ? '+' : ''}${formatLiveNumber(change)}%`;
+      cell.className = change > 0
+        ? 'text-bullish'
+        : change < 0 ? 'text-bearish' : 'text-neutral';
+    };
     const todayInZone = (zone) => {
       const parts = new Intl.DateTimeFormat('en', {
         timeZone: zone,
@@ -9971,12 +10046,22 @@ CHARTS_SCRIPT = """<script>
         const value = Number.isFinite(quantity) ? price * quantity : null;
         const valueNode = row.querySelector('[data-live-value]');
         if (valueNode && value !== null) valueNode.textContent = `${formatLiveNumber(value)} €`;
+        for (const period of ['1D', '1W', '1M', '6M', '1Y', 'YTD']) {
+          const basis = Number(row.getAttribute(`data-basis-${period.toLowerCase()}`));
+          if (!Number.isFinite(basis) || basis <= 0) continue;
+          const change = period === '1D' && daily !== null
+            ? daily
+            : (price / basis - 1) * 100;
+          row.querySelectorAll(
+            `[data-portfolio-period="${period}"][data-portfolio-kind="return"]`
+          ).forEach((cell) => updateReturnCell(cell, change));
+        }
         if (value !== null && Number.isFinite(investment) && investment > 0) {
           row.querySelectorAll('[data-portfolio-period="MAX"]').forEach((cell) => {
             const change = cell.dataset.portfolioKind === 'profit'
               ? value - investment
               : (value / investment - 1) * 100;
-            cell.textContent = `${cell.dataset.portfolioKind === 'profit' ? formatLiveNumber(change) + ' €' : (change > 0 ? '+' : '') + formatLiveNumber(change) + '%'}`;
+            updateReturnCell(cell, change);
           });
         }
       });
@@ -10013,6 +10098,16 @@ CHARTS_SCRIPT = """<script>
         if (item.ticker !== ticker) return;
         item.current_day = currentDay;
         item.change_pct = currentDay ? daily : null;
+        item.current_price_eur = price;
+        item.returns_pct_by_period ||= {};
+        const periodPrices = item.prices_eur_by_period || {};
+        for (const period of ['1D', '1W', '1M', '6M', '1Y', 'YTD', 'MAX']) {
+          const basis = Number(periodPrices[period]);
+          if (!Number.isFinite(basis) || basis <= 0) continue;
+          item.returns_pct_by_period[period] = period === '1D' && daily !== null
+            ? daily
+            : (price / basis - 1) * 100;
+        }
       });
 
       if (currentDay && daily !== null) {
@@ -10856,10 +10951,25 @@ def render_dashboard(
             'de compra/venta.</p></div>'
         )
 
+    portfolio_chart_by_ticker = {
+        item.get("ticker"): item
+        for item in chart_data.portfolio
+        if item.get("ticker")
+    }
+
+    def portfolio_period_basis_attributes(position: PortfolioPosition) -> str:
+        chart_item = portfolio_chart_by_ticker.get(position.asset.ticker, {})
+        prices = chart_item.get("prices_eur_by_period", {})
+        return " ".join(
+            f'data-basis-{period.lower()}="{_num_attr(prices.get(period))}"'
+            for period in ("1D", "1W", "1M", "6M", "1Y", "YTD", "MAX")
+        )
+
     portfolio_rows = "".join(
         f'<tr data-ticker="{_esc(position.asset.ticker)}" '
         f'data-quantity="{_num_attr(position.asset.shares)}" '
         f'data-investment="{_num_attr(position.asset.investment_eur)}" '
+        f'{portfolio_period_basis_attributes(position)} '
         f'data-risk-atr-pct="{_num_attr(position.risk_zones.atr_pct if position.risk_zones else None)}" '
         f'data-risk-secondary-level="{_num_attr(position.risk_zones.review_eur if position.risk_zones else None)}" '
         f'data-risk-atr-multiplier="{ATR_MULTIPLIER}" '
@@ -11034,13 +11144,7 @@ def render_dashboard(
     )
     portfolio_history_chart_html = (
         '<article class="market-chart-card chart-resize-target portfolio-history-card">'
-        '<div class="section-heading"><h3>Beneficio neto de la cartera</h3>'
-        '<label for="portfolio-history-period">Periodo</label>'
-        '<select id="portfolio-history-period" class="sort-select" aria-label="Periodo del gráfico de beneficio">'
-        '<option value="1D">1D</option><option value="1W">1W</option>'
-        '<option value="1M">1M</option><option value="6M">6M</option>'
-        '<option value="YTD">YTD</option><option value="1Y">1Y</option>'
-        '<option value="TOTAL">Total</option></select></div>'
+        '<div class="section-heading"><h3>Beneficio neto de la cartera</h3></div>'
         '<p id="portfolio-history-chart-status" class="chart-status" aria-live="polite">Calculando histórico…</p>'
         '<svg id="portfolio-history-chart" class="average-chart" role="img" '
         'aria-label="Beneficio neto histórico de la cartera basado en el extracto de movimientos"></svg>'
@@ -11277,7 +11381,7 @@ def render_dashboard(
     .chart-status {{ font-variant-numeric: tabular-nums; }}
     .heatmap-chart {{ display: block; width: 100%; max-width: 100%; min-height: 240px; overflow: hidden; }}
     .average-chart {{ display: block; width: 100%; max-width: 100%; height: auto; overflow: hidden; }}
-    .heatmap-name, .heatmap-return {{ fill: #d7e0eb; stroke: none; pointer-events: none; }}
+    .heatmap-name, .heatmap-return {{ fill: #000000; stroke: none; pointer-events: none; }}
     .heatmap-name {{ font-family: inherit; font-size: 10px; font-weight: 600; }}
     .heatmap-return {{ font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }}
     .chart-empty {{ fill: var(--text-secondary); font-size: 12px; }}
@@ -11520,7 +11624,7 @@ def render_dashboard(
     <section aria-labelledby="portfolio-title">
       <div class="section-heading"><h2 id="portfolio-title">Mi cartera</h2>
         <div class="portfolio-controls">
-          <label for="portfolio-period">Periodo</label>
+          <label for="portfolio-period">Rango</label>
           <select id="portfolio-period" class="sort-select">
             <option value="1D" selected>1D</option><option value="1W">1W</option>
             <option value="1M">1M</option><option value="6M">6M</option>
@@ -11538,13 +11642,13 @@ def render_dashboard(
         <div class="portfolio-visualizations">
           <article class="market-chart-card chart-resize-target">
             <h3>Mapa de calor · Mi cartera</h3>
-            <p class="chart-subtitle">Tamaño proporcional al peso actual de cada posición · rendimiento del periodo seleccionado; MAX desde compra</p>
+            <p class="chart-subtitle">Tamaño proporcional al peso actual · días naturales; solo sesiones con cotización, sin fines de semana ni festivos sin negociación · MAX desde compra</p>
             <svg id="portfolio-heatmap" class="heatmap-chart" role="img" aria-label="Mapa de calor de rendimientos del periodo seleccionado de la cartera"></svg>
           </article>
           <article class="market-chart-card chart-resize-target">
             <h3>Cartera vs. referencias</h3>
             <p id="portfolio-average-chart-status" class="chart-status" aria-live="polite">Calculando media…</p>
-            <svg id="portfolio-average-chart" class="average-chart" role="img" aria-label="Evolución intradía ponderada de la cartera frente al S&P 500 y MSCI World"></svg>
+            <svg id="portfolio-average-chart" class="average-chart" role="img" aria-label="Rendimiento de las posiciones en el rango seleccionado frente al S&P 500 y MSCI World"></svg>
           </article>
         </div>
         {portfolio_history_chart_html}

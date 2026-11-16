@@ -1930,10 +1930,24 @@ class SentimentTests(unittest.TestCase):
 
         self.assertEqual(
             set(charts.portfolio_period_series),
-            {"1D", "1W", "1M", "6M", "1Y"},
+            {"1D", "1W", "1M", "6M", "1Y", "YTD", "MAX"},
         )
         self.assertTrue(charts.portfolio_period_series["1Y"])
         self.assertTrue(charts.benchmark_period_series["1Y"])
+        self.assertEqual(charts.as_of, today.isoformat())
+        self.assertTrue(charts.portfolio_period_series["YTD"])
+        self.assertTrue(charts.portfolio_period_series["MAX"])
+        for points in charts.portfolio_period_series.values():
+            for point in points:
+                session_date = date.fromisoformat(point["timestamp"][:10])
+                self.assertLess(session_date.weekday(), 5)
+        week_start = today - timedelta(days=6)
+        self.assertTrue(
+            all(
+                date.fromisoformat(point["timestamp"][:10]) >= week_start
+                for point in charts.portfolio_period_series["1W"]
+            )
+        )
 
     def test_dashboard_separates_stale_market_quotes_after_fresh_quotes(self):
         generated_at = datetime(2026, 10, 9, 10, 0, tzinfo=TIMEZONE)
@@ -2000,14 +2014,14 @@ class SentimentTests(unittest.TestCase):
 
     @patch("daily_report.yf.Ticker")
     def test_fetch_portfolio_converts_historical_prices_and_calculates_returns(self, ticker_mock):
-        as_of = date(2025, 1, 11)
+        as_of = date(2025, 1, 13)
         asset = PortfolioAsset("Example", "EX", 2, 100, "USD")
-        dates = pd.date_range("2024-01-01", "2025-01-12", freq="D")
+        dates = pd.date_range("2024-01-01", "2025-01-14", freq="D")
         closes = [
             100.0
             if day.date() == date(2025, 1, 10)
             else 1000.0
-            if day.date() == date(2025, 1, 12)
+            if day.date() == date(2025, 1, 14)
             else 110.0
             for day in dates
         ]
@@ -2038,6 +2052,7 @@ class SentimentTests(unittest.TestCase):
         position = positions[0]
         self.assertAlmostEqual(position.prices_eur["Hoy"], 99.0)
         self.assertAlmostEqual(position.prices_eur["1D"], 90.0)
+        self.assertAlmostEqual(position.prices_eur["1W"], 99.0)
         self.assertAlmostEqual(position.returns_pct["1D"], 10.0)
         self.assertAlmostEqual(position.current_value_eur, 198.0)
         self.assertAlmostEqual(position.max_profit_eur, 98.0)
@@ -2342,7 +2357,7 @@ class SentimentTests(unittest.TestCase):
                 gross_amount_eur=20,
             ),
             PortfolioTransaction(
-                date(2026, 1, 3), "EX", "Example", "SELL", 1, 30, "EUR",
+                date(2026, 1, 5), "EX", "Example", "SELL", 1, 30, "EUR",
                 gross_amount_eur=30,
             ),
         ]
@@ -2370,7 +2385,7 @@ class SentimentTests(unittest.TestCase):
                     "EX": [
                         (date(2026, 1, 1), 10),
                         (date(2026, 1, 2), 20),
-                        (date(2026, 1, 3), 30),
+                        (date(2026, 1, 5), 30),
                     ]
                 },
             )
@@ -2645,17 +2660,19 @@ class SentimentTests(unittest.TestCase):
 
     @patch("daily_report.yf.download")
     def test_portfolio_history_replays_imported_buys_and_sells(self, download_mock):
-        index = pd.date_range("2026-01-01", periods=3, freq="D")
+        index = pd.date_range("2026-01-01", periods=5, freq="D")
         columns = pd.MultiIndex.from_tuples([("EX", "Close")])
         download_mock.return_value = pd.DataFrame(
-            [[10.0], [11.0], [12.0]], index=index, columns=columns
+            [[10.0], [11.0], [11.0], [11.0], [12.0]],
+            index=index,
+            columns=columns,
         )
         transactions = [
             PortfolioTransaction(
                 date(2026, 1, 1), "EX", "Example", "BUY", 2, 9, "EUR"
             ),
             PortfolioTransaction(
-                date(2026, 1, 3), "EX", "Example", "SELL", 1, 12, "EUR"
+                date(2026, 1, 5), "EX", "Example", "SELL", 1, 12, "EUR"
             ),
         ]
 
@@ -2670,7 +2687,7 @@ class SentimentTests(unittest.TestCase):
                 fees_eur=1, gross_amount_eur=20,
             ),
             PortfolioTransaction(
-                date(2026, 1, 3), "EX", "Example", "SELL", 1, 12, "EUR",
+                date(2026, 1, 5), "EX", "Example", "SELL", 1, 12, "EUR",
                 fees_eur=1, gross_amount_eur=12,
             ),
         ]
@@ -2680,7 +2697,7 @@ class SentimentTests(unittest.TestCase):
                 1, None, 2, 0, -0.3,
             ),
             PortfolioActivity(
-                date(2026, 1, 3), "BENEFITS_SAVEBACK", "EX", "Example", "STOCK",
+                date(2026, 1, 5), "BENEFITS_SAVEBACK", "EX", "Example", "STOCK",
                 "EUR", None, None, 1, 0, 0,
             ),
         ]
@@ -2688,17 +2705,17 @@ class SentimentTests(unittest.TestCase):
             "EX": [
                 (date(2026, 1, 1), 10),
                 (date(2026, 1, 2), 11),
-                (date(2026, 1, 3), 12),
+                (date(2026, 1, 5), 12),
             ],
             "SXR8.DE": [
                 (date(2026, 1, 1), 100),
                 (date(2026, 1, 2), 101),
-                (date(2026, 1, 3), 102),
+                (date(2026, 1, 5), 102),
             ],
             "EUNL.DE": [
                 (date(2026, 1, 1), 200),
                 (date(2026, 1, 2), 202),
-                (date(2026, 1, 3), 204),
+                (date(2026, 1, 5), 204),
             ],
         }
 
@@ -2761,7 +2778,28 @@ class SentimentTests(unittest.TestCase):
             max_return_pct=80,
         )
 
-        html = render_dashboard([], portfolio=[position])
+        html = render_dashboard(
+            [],
+            portfolio=[position],
+            chart_data=DashboardCharts(
+                portfolio=[
+                    {
+                        "ticker": "ETF.DE",
+                        "name": "Example ETF",
+                        "prices_eur_by_period": {
+                            "1D": 110,
+                            "1W": 100,
+                            "1M": 90,
+                            "6M": 80,
+                            "1Y": 70,
+                            "YTD": 65,
+                            "MAX": 66.67,
+                        },
+                        "returns_pct_by_period": {"YTD": 84.62},
+                    }
+                ]
+            ),
+        )
 
         self.assertIn('<th scope="col" id="portfolio-selected-heading">Rendimiento 1D</th>', html)
         self.assertIn('data-portfolio-period="1D" data-portfolio-kind="return" class="text-bullish">+9.09%', html)
@@ -2772,6 +2810,8 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('<option value="MAX">MAX</option>', html)
         self.assertIn("portfolio-period", html)
         self.assertIn("portfolio-metric", html)
+        self.assertEqual(html.count('id="portfolio-period"'), 1)
+        self.assertNotIn('id="portfolio-history-period"', html)
         self.assertIn('<th scope="col">Inversión base</th>', html)
         self.assertIn('<th scope="col">Valor actual</th>', html)
         self.assertIn(
@@ -2787,6 +2827,9 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('data-portfolio-kind="close">70.00 €', html)
         self.assertIn("Precio de cierre (€)", html)
         self.assertIn("DashboardPortfolioChartSelect", html)
+        self.assertIn('data-basis-1d="110.0000"', html)
+        self.assertIn('data-basis-ytd="65.0000"', html)
+        self.assertIn("row.getAttribute(`data-basis-${period.toLowerCase()}`)", html)
 
     def test_dashboard_shows_trailing_risk_and_marks_breached_review_level(self):
         position = PortfolioPosition(
@@ -2977,7 +3020,9 @@ class SentimentTests(unittest.TestCase):
         self.assertIn('id="dashboard-chart-data"', html)
         self.assertIn(r"\u003c/script\u003e", html)
         self.assertIn("Beneficio o pérdida intradía de la cartera", html)
-        self.assertIn('id="portfolio-history-period"', html)
+        self.assertNotIn('id="portfolio-history-period"', html)
+        self.assertIn('id="portfolio-period"', html)
+        self.assertIn("document.getElementById('portfolio-period')?.value", html)
         self.assertIn('<option value="YTD">YTD</option>', html)
         self.assertIn("portfolio_transaction_events", html)
         self.assertIn("07/10/2026 · 11:15 CEST", html)
@@ -3728,7 +3773,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Number(item.weight_pct)", html)
         self.assertIn("'var(--bg)'", html)
         self.assertIn(
-            ".heatmap-name, .heatmap-return { fill: #d7e0eb; stroke: none;",
+            ".heatmap-name, .heatmap-return { fill: #000000; stroke: none;",
             html,
         )
         self.assertIn(
