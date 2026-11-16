@@ -348,6 +348,57 @@ class PortfolioActivity:
     tax_eur: float
 
 
+@dataclass
+class _PortfolioPurchaseLot:
+    activity: PortfolioActivity
+    original_shares: float
+    remaining_shares: float
+    unit_cost_eur: float
+
+    @property
+    def original_cost_eur(self) -> float:
+        return self.original_shares * self.unit_cost_eur
+
+    @property
+    def remaining_cost_eur(self) -> float:
+        return self.remaining_shares * self.unit_cost_eur
+
+
+@dataclass(frozen=True)
+class _PortfolioRealizedSale:
+    activity: PortfolioActivity
+    cost_basis_eur: float
+    net_proceeds_eur: float
+
+    @property
+    def result_eur(self) -> float:
+        return self.net_proceeds_eur - self.cost_basis_eur
+
+    @property
+    def result_pct(self) -> float | None:
+        if self.cost_basis_eur <= 0:
+            return None
+        return self.result_eur / self.cost_basis_eur * 100
+
+
+@dataclass(frozen=True)
+class _PortfolioPositionActivityDetails:
+    purchases: tuple[_PortfolioPurchaseLot, ...]
+    sales: tuple[_PortfolioRealizedSale, ...]
+    income_activities: tuple[PortfolioActivity, ...]
+    dividends_net_eur: float
+    other_benefits_net_eur: float
+    has_history: bool
+
+    @property
+    def total_purchase_cost_eur(self) -> float:
+        return sum(lot.original_cost_eur for lot in self.purchases)
+
+    @property
+    def realized_result_eur(self) -> float:
+        return sum(sale.result_eur for sale in self.sales)
+
+
 @dataclass(frozen=True)
 class MarketEvent:
     event_date: date
@@ -2762,12 +2813,87 @@ def _consume_fifo_lots(lots: list[list[float]], quantity: float) -> float:
         remaining -= consumed
         lot_shares -= consumed
         if lot_shares <= 1e-9:
+            lots[0][0] = 0.0
             lots.pop(0)
         else:
             lots[0][0] = lot_shares
     if remaining > 1e-7:
         raise ValueError("La venta supera las participaciones disponibles en lotes FIFO")
     return sold_cost
+
+
+def _portfolio_position_activity_details(
+    activities: list[PortfolioActivity],
+    ticker: str,
+) -> _PortfolioPositionActivityDetails:
+    ticker_activities = sorted(
+        (activity for activity in activities if activity.ticker == ticker),
+        key=lambda activity: activity.trade_date,
+    )
+    fifo_lots: list[list[float]] = []
+    purchase_records: list[tuple[list[float], _PortfolioPurchaseLot]] = []
+    sales: list[_PortfolioRealizedSale] = []
+    income_activities: list[PortfolioActivity] = []
+    dividends_net_eur = 0.0
+    other_benefits_net_eur = 0.0
+
+    for activity in ticker_activities:
+        if activity.action == "BUY":
+            if activity.shares is None or activity.shares <= 0:
+                raise ValueError(f"Compra de {ticker} sin participaciones válidas")
+            unit_cost = (
+                abs(activity.amount_eur) + abs(activity.fee_eur)
+            ) / activity.shares
+            fifo_lot = [activity.shares, unit_cost]
+            fifo_lots.append(fifo_lot)
+            purchase_records.append(
+                (
+                    fifo_lot,
+                    _PortfolioPurchaseLot(
+                        activity=activity,
+                        original_shares=activity.shares,
+                        remaining_shares=activity.shares,
+                        unit_cost_eur=unit_cost,
+                    ),
+                )
+            )
+        elif activity.action == "SELL":
+            if activity.shares is None or activity.shares <= 0:
+                raise ValueError(f"Venta de {ticker} sin participaciones válidas")
+            cost_basis = _consume_fifo_lots(fifo_lots, activity.shares)
+            sales.append(
+                _PortfolioRealizedSale(
+                    activity=activity,
+                    cost_basis_eur=cost_basis,
+                    net_proceeds_eur=(
+                        activity.amount_eur + activity.fee_eur + activity.tax_eur
+                    ),
+                )
+            )
+        elif activity.action == "DIVIDEND":
+            income_activities.append(activity)
+            dividends_net_eur += (
+                activity.amount_eur + activity.fee_eur + activity.tax_eur
+            )
+        elif activity.action in {"BENEFITS_SAVEBACK", "STOCKPERK"}:
+            income_activities.append(activity)
+            other_benefits_net_eur += (
+                activity.amount_eur + activity.fee_eur + activity.tax_eur
+            )
+
+    purchases = []
+    for fifo_lot, purchase in purchase_records:
+        purchase.remaining_shares = fifo_lot[0]
+        purchases.append(purchase)
+
+    return _PortfolioPositionActivityDetails(
+        purchases=tuple(purchases),
+        sales=tuple(sales),
+        income_activities=tuple(income_activities),
+        dividends_net_eur=dividends_net_eur,
+        other_benefits_net_eur=other_benefits_net_eur,
+        has_history=bool(ticker_activities),
+    )
 
 
 def portfolio_assets_from_transactions(
@@ -9415,17 +9541,20 @@ CHARTS_SCRIPT = """<script>
 (() => {
   const payloadNode = document.getElementById('dashboard-chart-data');
   const liveQuotesConfigNode = document.getElementById('live-quotes-config');
-  const portfolioRiskPopovers = Array.from(
-    document.querySelectorAll('.portfolio-risk-popover[popover]')
+  const portfolioPopovers = Array.from(
+    document.querySelectorAll(
+      '.portfolio-risk-popover[popover], .portfolio-technical-popover[popover]'
+    )
   );
-  const positionRiskPopover = (popover) => {
+  const positionPortfolioPopover = (popover) => {
     if (!popover.matches(':popover-open')) return;
     const trigger = Array.from(
       document.querySelectorAll('button[popovertarget]')
     ).find((button) => button.getAttribute('popovertarget') === popover.id);
     if (!trigger) return;
     const margin = 12;
-    popover.style.width = `${Math.max(1, Math.min(360, window.innerWidth - margin * 2))}px`;
+    const maxWidth = popover.classList.contains('portfolio-technical-popover') ? 850 : 360;
+    popover.style.width = `${Math.max(1, Math.min(maxWidth, window.innerWidth - margin * 2))}px`;
     const triggerRect = trigger.getBoundingClientRect();
     const panelRect = popover.getBoundingClientRect();
     const left = Math.max(
@@ -9443,21 +9572,21 @@ CHARTS_SCRIPT = """<script>
     popover.style.left = `${left}px`;
     popover.style.top = `${top}px`;
   };
-  portfolioRiskPopovers.forEach((popover) => {
-    popover.addEventListener('toggle', () => positionRiskPopover(popover));
+  portfolioPopovers.forEach((popover) => {
+    popover.addEventListener('toggle', () => positionPortfolioPopover(popover));
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    const openPopover = portfolioRiskPopovers.find(
+    const openPopover = portfolioPopovers.find(
       (popover) => popover.matches(':popover-open')
     );
     if (openPopover) openPopover.hidePopover();
   });
   window.addEventListener('resize', () => {
-    portfolioRiskPopovers.forEach(positionRiskPopover);
+    portfolioPopovers.forEach(positionPortfolioPopover);
   }, {passive: true});
   window.addEventListener('scroll', () => {
-    portfolioRiskPopovers.forEach(positionRiskPopover);
+    portfolioPopovers.forEach(positionPortfolioPopover);
   }, {passive: true, capture: true});
 
   if (!payloadNode || !window.d3) return;
@@ -9561,8 +9690,8 @@ CHARTS_SCRIPT = """<script>
         const boxHeight = item.y1 - item.y0;
         const label = d3.select(this);
         const fontSize = Math.max(
-          3,
-          Math.min(12, boxHeight * 0.2, boxWidth / (item.data.name.length * 0.62))
+          4,
+          Math.min(13, boxHeight * 0.21, boxWidth / (item.data.name.length * 0.58))
         );
         label.style('font-size', `${fontSize}px`);
       });
@@ -10046,6 +10175,76 @@ CHARTS_SCRIPT = """<script>
         const value = Number.isFinite(quantity) ? price * quantity : null;
         const valueNode = row.querySelector('[data-live-value]');
         if (valueNode && value !== null) valueNode.textContent = `${formatLiveNumber(value)} €`;
+        const technicalPanel = row.querySelector('.portfolio-technical-popover');
+        if (technicalPanel && value !== null) {
+          const technicalNumber = formatLiveNumber;
+          const signedEur = (amount) =>
+            `${amount > 0 ? '+' : amount < 0 ? '−' : ''}${technicalNumber(Math.abs(amount))} €`;
+          const resultClass = (amount) =>
+            amount > 0 ? 'text-bullish' : amount < 0 ? 'text-bearish' : 'text-neutral';
+          const updateResultNode = (node, amount) => {
+            if (!node) return;
+            if (node.firstChild) node.firstChild.nodeValue = signedEur(amount);
+            node.classList.remove('text-bullish', 'text-bearish', 'text-neutral');
+            node.classList.add(resultClass(amount));
+          };
+          const updatePercentNode = (node, percent) => {
+            if (!node) return;
+            node.textContent = `(${percent > 0 ? '+' : ''}${technicalNumber(percent)}%)`;
+            node.classList.remove('text-bullish', 'text-bearish', 'text-neutral');
+            node.classList.add(resultClass(percent));
+          };
+          const currentValueNode = technicalPanel.querySelector('[data-tech-current-value]');
+          const currentPriceNode = technicalPanel.querySelector('[data-tech-price]');
+          if (currentValueNode) currentValueNode.textContent = `${technicalNumber(value)} €`;
+          if (currentPriceNode) currentPriceNode.textContent = `${technicalNumber(price)} €`;
+
+          const openCost = Number(technicalPanel.dataset.techOpenCost);
+          const unrealized = value - openCost;
+          const unrealizedNode = technicalPanel.querySelector('[data-tech-unrealized]');
+          updateResultNode(unrealizedNode, unrealized);
+          const unrealizedPctNode = technicalPanel.querySelector('[data-tech-unrealized-pct]');
+          if (openCost > 0) {
+            updatePercentNode(unrealizedPctNode, unrealized / openCost * 100);
+          }
+
+          let totalResult = unrealized;
+          if (technicalPanel.dataset.techHasHistory === 'true') {
+            totalResult += Number(technicalPanel.dataset.techRealized)
+              + Number(technicalPanel.dataset.techDividends)
+              + Number(technicalPanel.dataset.techBenefits);
+          }
+          const totalNode = technicalPanel.querySelector('[data-tech-total]');
+          updateResultNode(totalNode, totalResult);
+          const purchaseCost = Number(technicalPanel.dataset.techPurchaseCost);
+          const totalPctNode = technicalPanel.querySelector('[data-tech-total-pct]');
+          if (purchaseCost > 0) {
+            updatePercentNode(totalPctNode, totalResult / purchaseCost * 100);
+          }
+
+          technicalPanel.querySelectorAll('[data-technical-lot]').forEach((lot) => {
+            const shares = Number(lot.dataset.lotShares);
+            const cost = Number(lot.dataset.lotCostEur);
+            const lotValueNode = lot.querySelector('[data-lot-current-value]');
+            const lotResultNode = lot.querySelector('[data-lot-result]');
+            const lotResultPctNode = lot.querySelector('[data-lot-result-pct]');
+            if (!Number.isFinite(shares) || shares <= 1e-9) {
+              if (lotValueNode) lotValueNode.textContent = 'Vendida';
+              if (lotResultNode) lotResultNode.firstChild.nodeValue = 'Vendida';
+              if (lotResultPctNode) lotResultPctNode.textContent = '';
+              return;
+            }
+            const lotValue = shares * price;
+            const lotResult = lotValue - cost;
+            const lotCostNode = lot.querySelector('[data-lot-open-cost]');
+            if (lotValueNode) lotValueNode.textContent = `${technicalNumber(lotValue)} €`;
+            if (lotCostNode) lotCostNode.textContent = `${technicalNumber(cost)} €`;
+            updateResultNode(lotResultNode, lotResult);
+            if (cost > 0) {
+              updatePercentNode(lotResultPctNode, lotResult / cost * 100);
+            }
+          });
+        }
         for (const period of ['1D', '1W', '1M', '6M', '1Y', 'YTD']) {
           const basis = Number(row.getAttribute(`data-basis-${period.toLowerCase()}`));
           if (!Number.isFinite(basis) || basis <= 0) continue;
@@ -10951,6 +11150,250 @@ def render_dashboard(
             'de compra/venta.</p></div>'
         )
 
+    def portfolio_technical_popover(position: PortfolioPosition) -> str:
+        ticker = position.asset.ticker
+        details = _portfolio_position_activity_details(portfolio_activity, ticker)
+        popover_id = (
+            "portfolio-technical-"
+            + hashlib.sha256(ticker.encode("utf-8")).hexdigest()
+        )
+        current_price = position.prices_eur.get("Hoy")
+        if current_price is None and position.asset.shares > 0:
+            current_price = (
+                position.current_value_eur / position.asset.shares
+                if position.current_value_eur is not None
+                else None
+            )
+        open_cost = (
+            sum(purchase.remaining_cost_eur for purchase in details.purchases)
+            if details.has_history
+            else position.asset.investment_eur
+        )
+        average_price = (
+            open_cost / position.asset.shares
+            if position.asset.shares > 0
+            else None
+        )
+        unrealized_result = (
+            position.current_value_eur - open_cost
+            if position.current_value_eur is not None
+            else None
+        )
+        realized_result = details.realized_result_eur if details.has_history else None
+        realized_cost = sum(sale.cost_basis_eur for sale in details.sales)
+        total_purchase_cost = (
+            details.total_purchase_cost_eur
+            if details.has_history
+            else position.asset.investment_eur
+        )
+        total_result = None
+        total_return = None
+        unrealized_return = None
+        realized_return = None
+        if unrealized_result is not None:
+            total_result = unrealized_result
+            if details.has_history:
+                total_result += (
+                    details.realized_result_eur
+                    + details.dividends_net_eur
+                    + details.other_benefits_net_eur
+                )
+            total_return = (
+                total_result / total_purchase_cost * 100
+                if total_purchase_cost > 0
+                else None
+            )
+            unrealized_return = (
+                unrealized_result / open_cost * 100 if open_cost > 0 else None
+            )
+            realized_return = (
+                details.realized_result_eur / realized_cost * 100
+                if realized_cost > 0 and details.has_history
+                else None
+            )
+
+        def result_class(value: float | None) -> str:
+            if value is None or value == 0:
+                return "text-neutral"
+            return "text-bullish" if value > 0 else "text-bearish"
+
+        def signed_eur(value: float | None) -> str:
+            if value is None:
+                return "—"
+            sign = "+" if value > 0 else "−" if value < 0 else ""
+            return f"{sign}{_format_number(abs(value))} €"
+
+        purchase_rows = []
+        for purchase in details.purchases:
+            lot = purchase.activity
+            remaining_value = (
+                current_price * purchase.remaining_shares
+                if current_price is not None and purchase.remaining_shares > 1e-9
+                else None
+            )
+            remaining_result = (
+                remaining_value - purchase.remaining_cost_eur
+                if remaining_value is not None
+                else None
+            )
+            remaining_return = (
+                remaining_result / purchase.remaining_cost_eur * 100
+                if remaining_result is not None and purchase.remaining_cost_eur > 0
+                else None
+            )
+            lot_status = purchase.remaining_shares <= 1e-9
+            remaining_return_text = (
+                "" if lot_status else f" ({signed_percent(remaining_return)})"
+            )
+            purchase_rows.append(
+                f'<tr data-technical-lot '
+                f'data-lot-shares="{_num_attr(purchase.remaining_shares)}" '
+                f'data-lot-cost-eur="{_num_attr(purchase.remaining_cost_eur)}">'
+                f'<td>{_esc(lot.trade_date.strftime("%d/%m/%Y"))}</td>'
+                f'<td>{_format_number(purchase.remaining_shares, 6)} / '
+                f'{_format_number(purchase.original_shares, 6)}'
+                f'{" · vendida" if lot_status else ""}</td>'
+                f'<td>{_portfolio_cell(lot.price_eur, " €")}</td>'
+                f'<td>{_portfolio_cell(purchase.original_cost_eur, " €")}</td>'
+                f'<td>{_portfolio_cell(abs(lot.fee_eur), " €")}</td>'
+                f'<td data-lot-open-cost>{_portfolio_cell(purchase.remaining_cost_eur, " €")}</td>'
+                f'<td data-lot-current-value>{"Vendida" if lot_status else _portfolio_cell(remaining_value, " €")}</td>'
+                f'<td data-lot-result class="{result_class(remaining_result)}">'
+                f'{"Vendida" if lot_status else signed_eur(remaining_result)}'
+                f'<small data-lot-result-pct class="{result_class(remaining_return)}">'
+                f'{remaining_return_text}</small></td>'
+                '</tr>'
+            )
+        purchase_table = (
+            '<div class="portfolio-technical-table-wrap"><table class="portfolio-technical-table">'
+            '<thead><tr><th>Compra</th><th>Restantes / originales</th><th>Precio</th>'
+            '<th>Coste original</th><th>Comisión</th><th>Coste restante</th>'
+            '<th>Valor actual</th><th>Resultado</th></tr></thead><tbody>'
+            + "".join(purchase_rows)
+            + "</tbody></table></div>"
+            if purchase_rows
+            else '<p class="portfolio-technical-empty">No hay compras registradas '
+            'para esta posición en el historial disponible.</p>'
+        )
+
+        sales_rows = []
+        for sale in details.sales:
+            activity = sale.activity
+            sales_rows.append(
+                f'<tr><td>{_esc(activity.trade_date.strftime("%d/%m/%Y"))}</td>'
+                f'<td>{_format_number(activity.shares, 6)}</td>'
+                f'<td>{_portfolio_cell(sale.net_proceeds_eur, " €")}</td>'
+                f'<td>{_portfolio_cell(abs(activity.fee_eur), " €")}</td>'
+                f'<td>{_portfolio_cell(abs(activity.tax_eur), " €")}</td>'
+                f'<td>{_portfolio_cell(sale.cost_basis_eur, " €")}</td>'
+                f'<td class="{result_class(sale.result_eur)}">'
+                f'{signed_eur(sale.result_eur)} '
+                f'<small>({signed_percent(sale.result_pct)})</small></td></tr>'
+            )
+        sales_table = (
+            '<div class="portfolio-technical-table-wrap"><table class="portfolio-technical-table">'
+            '<thead><tr><th>Venta</th><th>Participaciones</th><th>Cobro neto</th>'
+            '<th>Comisión</th><th>Impuestos</th><th>Coste FIFO</th>'
+            '<th>Resultado realizado</th></tr></thead><tbody>'
+            + "".join(sales_rows)
+            + "</tbody></table></div>"
+            if sales_rows
+            else '<p class="portfolio-technical-empty">No hay ventas registradas.</p>'
+        )
+
+        income_labels = {
+            "DIVIDEND": "Dividendo",
+            "BENEFITS_SAVEBACK": "Beneficio Saveback",
+            "STOCKPERK": "Beneficio de acción",
+        }
+        income_rows = []
+        for activity in details.income_activities:
+            net_amount = activity.amount_eur + activity.fee_eur + activity.tax_eur
+            income_rows.append(
+                f'<tr><td>{_esc(activity.trade_date.strftime("%d/%m/%Y"))}</td>'
+                f'<td>{income_labels[activity.action]}</td>'
+                f'<td>{signed_eur(activity.amount_eur)}</td>'
+                f'<td>{signed_eur(activity.fee_eur)}</td>'
+                f'<td>{signed_eur(activity.tax_eur)}</td>'
+                f'<td class="{result_class(net_amount)}">{signed_eur(net_amount)}</td></tr>'
+            )
+        income_table = (
+            '<div class="portfolio-technical-table-wrap"><table class="portfolio-technical-table">'
+            '<thead><tr><th>Fecha</th><th>Movimiento</th><th>Importe bruto</th>'
+            '<th>Comisión</th><th>Impuestos</th><th>Neto</th></tr></thead><tbody>'
+            + "".join(income_rows)
+            + "</tbody></table></div>"
+            if income_rows
+            else '<p class="portfolio-technical-empty">No hay dividendos ni otros '
+            'beneficios registrados.</p>'
+        )
+
+        history_note = (
+            '<p class="portfolio-technical-note">El resultado total suma la variación '
+            'de las participaciones actuales, ventas realizadas, dividendos netos y '
+            'otros beneficios registrados. La rentabilidad total se divide entre el '
+            'coste original de las compras. No es un cálculo fiscal.</p>'
+            if details.has_history
+            else '<p class="portfolio-technical-note">No hay historial de operaciones '
+            'para esta posición; solo se muestra la variación sobre la inversión base '
+            'configurada. El resultado realizado y los dividendos no están disponibles.</p>'
+        )
+        return (
+            f'<button type="button" class="portfolio-technical-trigger" '
+            f'aria-label="Abrir ficha técnica de {_esc(position.asset.name)} ({_esc(ticker)})" '
+            f'aria-haspopup="dialog" aria-controls="{_esc(popover_id)}" '
+            f'popovertarget="{_esc(popover_id)}">'
+            '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+            '<path d="M6 3.75h8l4 4v12.5H6z"/><path d="M14 3.75v4h4M9 12h6M9 15h6"/></svg>'
+            '</button>'
+            f'<div id="{_esc(popover_id)}" popover="auto" '
+            'class="portfolio-technical-popover" role="dialog" tabindex="-1" '
+            f'aria-labelledby="{_esc(popover_id)}-title" '
+            f'data-tech-has-history="{str(details.has_history).lower()}" '
+            f'data-tech-shares="{_num_attr(position.asset.shares)}" '
+            f'data-tech-open-cost="{_num_attr(open_cost)}" '
+            f'data-tech-purchase-cost="{_num_attr(total_purchase_cost)}" '
+            f'data-tech-realized="{_num_attr(details.realized_result_eur)}" '
+            f'data-tech-dividends="{_num_attr(details.dividends_net_eur)}" '
+            f'data-tech-benefits="{_num_attr(details.other_benefits_net_eur)}">'
+            '<div class="portfolio-technical-heading">'
+            f'<h3 id="{_esc(popover_id)}-title">Ficha técnica · {_esc(ticker)}</h3>'
+            f'<span>{_esc(position.asset.name)}</span></div>'
+            '<dl class="portfolio-technical-facts">'
+            f'<div><dt>Participaciones actuales</dt><dd>{_format_number(position.asset.shares, 6)}</dd></div>'
+            f'<div><dt>Precio medio de compra actual</dt><dd>{_portfolio_cell(average_price, " €")}</dd></div>'
+            f'<div><dt>Cotización actual</dt><dd data-tech-price>{_portfolio_cell(current_price, " €")}</dd></div>'
+            f'<div><dt>Coste de las participaciones actuales</dt><dd data-tech-open-cost>{_portfolio_cell(open_cost, " €")}</dd></div>'
+            f'<div><dt>Valor actual</dt><dd data-tech-current-value>{_portfolio_cell(position.current_value_eur, " €")}</dd></div>'
+            '</dl>'
+            '<section class="portfolio-technical-performance"><h4>Resultado acumulado</h4>'
+            '<dl class="portfolio-technical-facts">'
+            f'<div><dt>Sin vender</dt><dd data-tech-unrealized class="{result_class(unrealized_result)}">'
+            f'{signed_eur(unrealized_result)} <small data-tech-unrealized-pct>'
+            f'({signed_percent(unrealized_return)})</small></dd></div>'
+            f'<div><dt>Ventas realizadas</dt><dd data-tech-realized-result class="{result_class(realized_result)}">'
+            f'{signed_eur(realized_result)}</dd></div>'
+            f'<div><dt>Dividendos netos</dt><dd data-tech-dividends-result class="{result_class(details.dividends_net_eur)}">'
+            f'{"—" if not details.has_history else signed_eur(details.dividends_net_eur)}</dd></div>'
+            f'<div><dt>Otros beneficios netos</dt><dd data-tech-benefits-result class="{result_class(details.other_benefits_net_eur)}">'
+            f'{"—" if not details.has_history else signed_eur(details.other_benefits_net_eur)}</dd></div>'
+            f'<div><dt>Total</dt><dd data-tech-total class="{result_class(total_result)}">'
+            f'{signed_eur(total_result)} <small data-tech-total-pct>'
+            f'({signed_percent(total_return)})</small></dd></div>'
+            '</dl></section>'
+            '<section><h4>Compras registradas '
+            f'({len(details.purchases)})</h4>'
+            '<p class="portfolio-technical-note">Las ventas se asignan primero a las '
+            'compras más antiguas (FIFO).</p>'
+            f'{purchase_table}</section>'
+            '<section><h4>Ventas registradas '
+            f'({len(details.sales)})</h4>{sales_table}</section>'
+            '<section><h4>Dividendos y otros movimientos '
+            f'({len(details.income_activities)})</h4>{income_table}</section>'
+            f'{history_note}'
+            '</div>'
+        )
+
     portfolio_chart_by_ticker = {
         item.get("ticker"): item
         for item in chart_data.portfolio
@@ -10978,7 +11421,8 @@ def render_dashboard(
         f'<span>{_esc(position.asset.name)}'
         f'<span class="portfolio-asset-ticker">{_esc(position.asset.ticker)}</span></span>'
         f'{_floor_status_html(_floor_status_for_position(floor_statuses, position))}'
-        f'{portfolio_risk_popover(position)}</div></th>'
+        f'{portfolio_risk_popover(position)}'
+        f'{portfolio_technical_popover(position)}</div></th>'
         f'<td data-label="Posición">{_format_number(position.asset.shares, 6)}</td>'
         f'<td data-label="Inversión base">'
         f"{_portfolio_cell(position.asset.investment_eur, ' €')}</td>"
@@ -11289,16 +11733,16 @@ def render_dashboard(
     .portfolio-asset-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
     .portfolio-asset-line > span {{ color: var(--text-primary); font-size: 12px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }}
     .portfolio-asset-ticker {{ display: block; color: var(--text-secondary) !important; font-size: 10px !important; font-weight: 500 !important; }}
-    .portfolio-risk-trigger {{ display: inline-grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px;
+    .portfolio-risk-trigger, .portfolio-technical-trigger {{ display: inline-grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px;
       border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: var(--text-secondary); cursor: pointer; }}
-    .portfolio-risk-trigger:hover {{ border-color: var(--focus); background: var(--surface-hover); }}
-    .portfolio-risk-trigger:active {{ background: var(--surface); }}
-    .portfolio-risk-trigger:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
-    .portfolio-risk-trigger:disabled {{ opacity: .55; cursor: not-allowed; }}
-    .portfolio-risk-trigger svg {{ width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8;
+    .portfolio-risk-trigger:hover, .portfolio-technical-trigger:hover {{ border-color: var(--focus); background: var(--surface-hover); }}
+    .portfolio-risk-trigger:active, .portfolio-technical-trigger:active {{ background: var(--surface); }}
+    .portfolio-risk-trigger:focus-visible, .portfolio-technical-trigger:focus-visible {{ outline: 2px solid var(--focus); outline-offset: 2px; }}
+    .portfolio-risk-trigger:disabled, .portfolio-technical-trigger:disabled {{ opacity: .55; cursor: not-allowed; }}
+    .portfolio-risk-trigger svg, .portfolio-technical-trigger svg {{ width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8;
       stroke-linecap: round; stroke-linejoin: round; }}
     .portfolio-risk-trigger.is-no-data {{ color: var(--text-secondary); }}
-    .portfolio-risk-popover:popover-open {{ position: fixed; inset: auto; margin: 0; z-index: 20; }}
+    .portfolio-risk-popover:popover-open, .portfolio-technical-popover:popover-open {{ position: fixed; inset: auto; margin: 0; z-index: 20; }}
     .portfolio-risk-popover {{ box-sizing: border-box; max-width: calc(100vw - 24px); max-height: min(70vh, 500px);
       overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: 12px;
       background: var(--surface); color: var(--text-primary); font-weight: 400;
@@ -11341,6 +11785,29 @@ def render_dashboard(
     .portfolio-risk-explanation summary {{ cursor: pointer; color: var(--focus); font-size: 12px; }}
     .portfolio-risk-explanation p {{ margin: 7px 0 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }}
     .portfolio-risk-disclaimer {{ margin: 10px 0 0; color: var(--focus); font-size: 11px; font-weight: 500; }}
+    .portfolio-technical-popover {{ box-sizing: border-box; max-width: calc(100vw - 24px); max-height: min(78vh, 760px);
+      overflow: auto; overscroll-behavior: contain; padding: 14px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); color: var(--text-primary); font-size: 12px; box-shadow: var(--shadow-panel); }}
+    .portfolio-technical-heading {{ display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 10px; }}
+    .portfolio-technical-heading h3 {{ margin: 0; font-size: 15px; font-weight: 650; }}
+    .portfolio-technical-heading span {{ color: var(--text-secondary); font-size: 11px; }}
+    .portfolio-technical-popover section + section {{ margin-top: 15px; }}
+    .portfolio-technical-popover h4 {{ margin: 0 0 7px; font-size: 12px; font-weight: 650; }}
+    .portfolio-technical-facts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 7px 16px; margin: 0; }}
+    .portfolio-technical-facts > div {{ display: flex; justify-content: space-between; gap: 12px; min-width: 0; }}
+    .portfolio-technical-facts dt {{ color: var(--text-secondary); }}
+    .portfolio-technical-facts dd {{ margin: 0; text-align: right; font-variant-numeric: tabular-nums; }}
+    .portfolio-technical-performance {{ margin-top: 14px; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); }}
+    .portfolio-technical-performance .portfolio-technical-facts {{ grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); }}
+    .portfolio-technical-performance dd {{ font-weight: 600; }}
+    .portfolio-technical-popover small {{ font-size: 10px; font-weight: 500; white-space: nowrap; }}
+    .portfolio-technical-note, .portfolio-technical-empty {{ margin: 6px 0 9px; color: var(--text-secondary); font-size: 10px; line-height: 1.45; }}
+    .portfolio-technical-table-wrap {{ max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }}
+    .portfolio-technical-table {{ width: 100%; min-width: 760px; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }}
+    .portfolio-technical-table th, .portfolio-technical-table td {{ padding: 7px 8px; border-bottom: 1px solid var(--border-subtle); text-align: right; white-space: nowrap; }}
+    .portfolio-technical-table th {{ color: var(--text-secondary); font-weight: 600; }}
+    .portfolio-technical-table th:first-child, .portfolio-technical-table td:first-child {{ text-align: left; }}
+    .portfolio-technical-table td small {{ display: block; margin-top: 2px; }}
     .portfolio-note {{ color: var(--text-secondary); font-size: 11px; margin: 11px 0 0; }}
     .portfolio-activity-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin-top: 17px; }}
     .portfolio-activity-summary article {{ display: grid; gap: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 11px; }}
@@ -11382,7 +11849,7 @@ def render_dashboard(
     .heatmap-chart {{ display: block; width: 100%; max-width: 100%; min-height: 240px; overflow: hidden; }}
     .average-chart {{ display: block; width: 100%; max-width: 100%; height: auto; overflow: hidden; }}
     .heatmap-name, .heatmap-return {{ fill: #000000; stroke: none; pointer-events: none; }}
-    .heatmap-name {{ font-family: inherit; font-size: 10px; font-weight: 600; }}
+    .heatmap-name {{ font-family: system-ui, "Segoe UI", sans-serif; font-size: 11px; font-weight: 600; }}
     .heatmap-return {{ font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }}
     .chart-empty {{ fill: var(--text-secondary); font-size: 12px; }}
     .chart-time {{ fill: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }}

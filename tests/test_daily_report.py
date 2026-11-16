@@ -111,6 +111,7 @@ from daily_report import (
     portfolio_transactions_from_activity,
     portfolio_history_from_transactions,
     _portfolio_transaction_chart_data,
+    _portfolio_position_activity_details,
     _consume_fifo_lots,
     collect_reports,
     render_dashboard,
@@ -2468,6 +2469,88 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(activities[1].action, "DIVIDEND")
         self.assertEqual(activities[3].action, "STOCKPERK")
 
+    def test_position_activity_details_allocate_sales_fifo_and_keep_remaining_lots(self):
+        activities = [
+            PortfolioActivity(
+                date(2026, 1, 1), "BUY", "EX", "Example", "STOCK", "EUR",
+                2, 10, -20, -1, 0,
+            ),
+            PortfolioActivity(
+                date(2026, 1, 2), "BUY", "EX", "Example", "STOCK", "EUR",
+                2, 20, -40, -2, 0,
+            ),
+            PortfolioActivity(
+                date(2026, 1, 3), "SELL", "EX", "Example", "STOCK", "EUR",
+                3, 25, 75, -1, -2,
+            ),
+            PortfolioActivity(
+                date(2026, 1, 4), "DIVIDEND", "EX", "Example", "STOCK", "EUR",
+                None, None, 2, 0, -0.5,
+            ),
+            PortfolioActivity(
+                date(2026, 1, 5), "BENEFITS_SAVEBACK", "EX", "Example",
+                "STOCK", "EUR", None, None, 3, 0, -0.2,
+            ),
+        ]
+
+        details = _portfolio_position_activity_details(activities, "EX")
+
+        self.assertTrue(details.has_history)
+        self.assertAlmostEqual(details.total_purchase_cost_eur, 63)
+        self.assertEqual([lot.remaining_shares for lot in details.purchases], [0, 1])
+        self.assertAlmostEqual(details.purchases[0].remaining_cost_eur, 0)
+        self.assertAlmostEqual(details.purchases[1].remaining_cost_eur, 21)
+        self.assertAlmostEqual(details.sales[0].cost_basis_eur, 42)
+        self.assertAlmostEqual(details.sales[0].net_proceeds_eur, 72)
+        self.assertAlmostEqual(details.realized_result_eur, 30)
+        self.assertAlmostEqual(details.dividends_net_eur, 1.5)
+        self.assertAlmostEqual(details.other_benefits_net_eur, 2.8)
+        self.assertEqual(len(details.income_activities), 2)
+
+    def test_portfolio_technical_popover_shows_fifo_sales_and_live_lots(self):
+        activities = [
+            PortfolioActivity(
+                date(2026, 1, 1), "BUY", "EX", "Example", "STOCK", "EUR",
+                2, 10, -20, -1, 0,
+            ),
+            PortfolioActivity(
+                date(2026, 1, 2), "SELL", "EX", "Example", "STOCK", "EUR",
+                1, 15, 15, -1, 0,
+            ),
+        ]
+        position = PortfolioPosition(
+            asset=PortfolioAsset("Example", "EX", 1, 10.5, "EUR"),
+            prices_eur={"Hoy": 25},
+            current_value_eur=25,
+        )
+
+        html = render_dashboard(
+            [],
+            portfolio=[position],
+            portfolio_activity=activities,
+        )
+
+        self.assertIn('class="portfolio-technical-trigger"', html)
+        self.assertIn('aria-label="Abrir ficha técnica de Example (EX)"', html)
+        self.assertIn('class="portfolio-technical-popover"', html)
+        self.assertIn("Ficha técnica · EX", html)
+        self.assertIn("Compras registradas (1)", html)
+        self.assertIn("Ventas registradas (1)", html)
+        self.assertIn("Dividendos y otros movimientos (0)", html)
+        self.assertIn("primero a las compras más antiguas (FIFO)", html)
+        self.assertIn("Coste FIFO", html)
+        self.assertIn('data-tech-realized="3.5000"', html)
+        self.assertIn('data-lot-shares="1.0000"', html)
+        self.assertIn('data-lot-cost-eur="10.5000"', html)
+        self.assertIn('data-tech-total class="', html)
+        self.assertIn("+18.00 €", html)
+        self.assertIn("(+85.71%)", html)
+        self.assertIn("updateResultNode(totalNode, totalResult)", html)
+        self.assertIn("updatePercentNode(totalPctNode, totalResult / purchaseCost * 100)", html)
+        self.assertIn("No es un cálculo fiscal.", html)
+        self.assertIn("data-lot-current-value", html)
+        self.assertIn("data-tech-current-value", html)
+
     def test_public_portfolio_activity_matches_configured_active_tickers(self):
         activity_path = Path(__file__).parents[1] / "portfolio_activity.json"
         raw_activities = json.loads(activity_path.read_text(encoding="utf-8"))
@@ -2475,6 +2558,10 @@ class SentimentTests(unittest.TestCase):
         transactions = portfolio_transactions_from_activity(activities)
         assets = portfolio_assets_from_transactions(transactions)
         assets_by_ticker = {asset.ticker: asset for asset in assets}
+        details_by_ticker = {
+            asset.ticker: _portfolio_position_activity_details(activities, asset.ticker)
+            for asset in assets
+        }
         configured_tickers = {
             report.ticker for report in COMPANIES if report.ticker
         }
@@ -2504,9 +2591,20 @@ class SentimentTests(unittest.TestCase):
         self.assertTrue(all(item.ticker in configured_tickers for item in activities))
         self.assertEqual(set(assets_by_ticker), {asset.ticker for asset in PORTFOLIO})
         for configured in PORTFOLIO:
+            details = details_by_ticker[configured.ticker]
             self.assertAlmostEqual(
                 assets_by_ticker[configured.ticker].shares,
                 configured.shares,
+            )
+            self.assertAlmostEqual(
+                sum(lot.remaining_shares for lot in details.purchases),
+                configured.shares,
+                places=6,
+            )
+            self.assertAlmostEqual(
+                sum(lot.remaining_cost_eur for lot in details.purchases),
+                configured.investment_eur,
+                places=2,
             )
             self.assertAlmostEqual(
                 assets_by_ticker[configured.ticker].investment_eur,
@@ -2515,9 +2613,25 @@ class SentimentTests(unittest.TestCase):
             )
         self.assertIn("NKE.SG", configured_tickers)
         self.assertIn("NVO", configured_tickers)
-        dashboard = render_dashboard([], portfolio_activity=activities)
+        portfolio_positions = [
+            PortfolioPosition(
+                asset=assets_by_ticker[configured.ticker],
+                prices_eur={"Hoy": 100},
+                current_value_eur=assets_by_ticker[configured.ticker].shares * 100,
+            )
+            for configured in PORTFOLIO
+        ]
+        dashboard = render_dashboard(
+            [],
+            portfolio=portfolio_positions,
+            portfolio_activity=activities,
+        )
         self.assertIn("Historial de inversión · 65 movimientos", dashboard)
         self.assertEqual(dashboard.count('data-label="Movimiento"'), 65)
+        self.assertEqual(
+            dashboard.count('class="portfolio-technical-trigger"'),
+            len(PORTFOLIO),
+        )
         self.assertIn("AMZ.SG", assets_by_ticker)
         self.assertAlmostEqual(assets_by_ticker["AMZ.SG"].shares, 0.187863)
         self.assertAlmostEqual(assets_by_ticker["NVD.SG"].shares, 0.616531)
@@ -2893,6 +3007,7 @@ class SentimentTests(unittest.TestCase):
         self.assertIn("Se necesitan al menos 15 sesiones válidas de histórico.", html)
         self.assertIn('aria-label="Ver niveles de riesgo de Short History (SHORT)"', html)
         self.assertIn('class="portfolio-risk-trigger is-no-data"', html)
+        self.assertIn("No hay historial de operaciones para esta posición", html)
 
     def test_risk_explanation_covers_cost_relationships_and_missing_position_data(self):
         examples = (
@@ -3777,9 +3892,10 @@ class SentimentTests(unittest.TestCase):
             html,
         )
         self.assertIn(
-            ".heatmap-name { font-family: inherit; font-size: 10px; font-weight: 600; }",
+            '.heatmap-name { font-family: system-ui, "Segoe UI", sans-serif; font-size: 11px; font-weight: 600; }',
             html,
         )
+        self.assertIn("Math.min(13, boxHeight * 0.21", html)
         self.assertIn(".heatmap-return { font-size: 10px; font-weight: 500;", html)
         self.assertIn("const nameLabels = groups.filter((item) => item.data.current_day)", html)
         self.assertIn(
