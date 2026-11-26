@@ -1,1 +1,1 @@
-{"date": "2026-11-26", "alerts": {}, "dip_candidates": {}, "floor_alerts_today": {}}
+{"date": "2026-11-26", "alerts": {"2LU.SG": {"last_alerted_pct": 3.0474758572832883, "sent_at": "2026-11-26T07:31:00.154874+01:00", "name": "Lumentum Holdings", "current_price_eur": 445.5, "category": "watchlist_rise"}}, "dip_candidates": {"N14.SG": {"last_score": 4, "sent_at": "2026-11-26T07:31:00.154874+01:00"}}, "floor_alerts_today": {}}
