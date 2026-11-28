@@ -1,1 +1,1 @@
-{"gemini:gemini-4-hydrogen": {"failures": 5, "opened_until": "2026-11-28T10:38:24.589310+00:00"}, "gemini:gemini-3.8-flash": {"failures": 4}, "gemini:gemini-3.7-flash": {"failures": 4}}
+{"gemini:gemini-3.8-flash": {"failures": 5, "opened_until": "2026-11-28T11:13:23.493772+00:00"}, "gemini:gemini-3.7-flash": {"failures": 5, "opened_until": "2026-11-28T11:13:27.271103+00:00"}, "gemini:gemini-4-hydrogen": {"failures": 4}}
